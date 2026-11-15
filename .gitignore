@@ -1,0 +1,49 @@
+# Build and CMake artifacts
+build/
+build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.dir/
+
+# Visual Studio / MSBuild
+.vs/
+*.user
+*.suo
+*.VC.db
+*.sln.docstates
+*.tlog
+*.obj
+*.ilk
+*.pdb
+*.idb
+*.lastbuildstate
+*.recipe
+*.vcxproj.FileListAbsolute.txt
+*.CppClean.log
+
+# Intermediate logs and temps
+*.log
+*.tmp
+*.bak
+*.bak_*
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Local runtime captures, INI settings, emulator state, and exported guides
+capturas/
+guias/
+fx991cw_state/
+config_unificada.ini
+casio_favoritos.ini
+BACKLOG.zip
+CalculadoraUnificada-Portable-Win32.zip

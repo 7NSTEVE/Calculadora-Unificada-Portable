@@ -1,0 +1,6 @@
+[DLSimProject]
+Name=ColorGraph Sample
+Version=0.02
+Model=CGM.dlm
+MemCardPath=SDCard
+
