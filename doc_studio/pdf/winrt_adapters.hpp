@@ -78,4 +78,23 @@ public:
         const std::string& preferredLangTag = "");
 };
 
+struct HtrOutput {
+    bool recognized = false;
+    bool usedNativeInkRecognizer = false;
+    std::string textUtf8;
+    std::string mathLatexUtf8;
+    std::vector<std::string> candidatesUtf8;
+    std::string errorUtf8;
+};
+
+// Native offline Windows Handwriting Text Recognition (HTR) (F-043, F-045, F-169):
+// Uses Windows.UI.Input.Inking.InkRecognizerContainer when available, falling back cleanly
+// to high-contrast stroke rasterization + Windows.Media.Ocr offline.
+class WinRtInkHtrAdapter {
+public:
+    static HtrOutput RecognizeStrokes(
+        const std::vector<AnnotationObject>& strokes,
+        const std::string& preferredLangTag = "");
+};
+
 } // namespace DocStudio

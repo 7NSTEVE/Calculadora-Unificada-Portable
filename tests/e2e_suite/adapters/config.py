@@ -112,6 +112,7 @@ def resolve_paths(repo_root: Path | None = None) -> dict[str, Path]:
         "cpp_probe_dir": root / "tests" / "e2e_suite" / "cpp_probe",
         "ocr_ps1": root / "tools" / "ocr_png.ps1",
         # Windows authoritative binaries (never stale build-verify/Release/DocumentStudio.exe)
+        "win_cuadernu": root / "build-studio-x64" / "Release" / "CuadernU.exe",
         "win_document_studio": root / "build-studio-x64" / "Release" / "DocumentStudio.exe",
         "win_document_core_test": root / "build-studio-x64" / "Release" / "DocumentCoreTest.exe",
         "win_document_core_lib": root / "build-studio-x64" / "Release" / "DocumentCore.lib",

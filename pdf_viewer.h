@@ -927,15 +927,23 @@ inline bool LaunchDocumentStudioImpl(HWND owner, const std::wstring& args = L"")
         return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
     };
 
-    std::wstring studioExe = exeDir.empty() ? L"DocumentStudio.exe" : (exeDir + L"\\DocumentStudio.exe");
-    if (!fileExists(studioExe) && !exeDir.empty()) {
-        const std::wstring devSibling = exeDir + L"\\..\\..\\build-studio-x64\\Release\\DocumentStudio.exe";
-        if (fileExists(devSibling)) studioExe = devSibling;
+    std::wstring studioExe;
+    const wchar_t* const exeNames[2] = { L"CuadernU.exe", L"DocumentStudio.exe" };
+    for (const wchar_t* nm : exeNames) {
+        const std::wstring cand = exeDir.empty() ? std::wstring(nm) : (exeDir + L"\\" + nm);
+        if (fileExists(cand)) { studioExe = cand; break; }
+        if (!exeDir.empty()) {
+            const std::wstring devSibling = exeDir + L"\\..\\..\\build-studio-x64\\Release\\" + nm;
+            if (fileExists(devSibling)) { studioExe = devSibling; break; }
+        }
+    }
+    if (studioExe.empty()) {
+        studioExe = exeDir.empty() ? L"CuadernU.exe" : (exeDir + L"\\CuadernU.exe");
     }
 
     if (!fileExists(studioExe)) {
-        const std::wstring msg = L"No se encontr\u00F3 DocumentStudio.exe junto a CalculadoraUnificada.exe:\n" + studioExe;
-        MessageBoxW(owner, msg.c_str(), L"Document Studio", MB_ICONWARNING | MB_OK);
+        const std::wstring msg = L"No se encontr\u00F3 CuadernU.exe junto a CalculadoraUnificada.exe:\n" + studioExe;
+        MessageBoxW(owner, msg.c_str(), L"CuadernU", MB_ICONWARNING | MB_OK);
         return false;
     }
 
@@ -947,8 +955,8 @@ inline bool LaunchDocumentStudioImpl(HWND owner, const std::wstring& args = L"")
         exeDir.empty() ? nullptr : exeDir.c_str(),
         SW_SHOWNORMAL));
     if (rc <= 32) {
-        const std::wstring msg = L"No se pudo iniciar DocumentStudio.exe (c\u00F3digo ShellExecute=" + std::to_wstring(rc) + L").";
-        MessageBoxW(owner, msg.c_str(), L"Document Studio", MB_ICONERROR | MB_OK);
+        const std::wstring msg = L"No se pudo iniciar CuadernU.exe (c\u00F3digo ShellExecute=" + std::to_wstring(rc) + L").";
+        MessageBoxW(owner, msg.c_str(), L"CuadernU", MB_ICONERROR | MB_OK);
         return false;
     }
     return true;

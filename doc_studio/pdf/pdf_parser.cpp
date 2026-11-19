@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <sstream>
 #include <unordered_set>
 
@@ -1312,6 +1313,82 @@ void PdfDocument::CollectPages(
         pi.rotationDeg = rot;
         pages_.push_back(pi);
         pages_.back().extractedTextUtf8 = ExtractPageText(nodeVal, resDict, pages_.back().pageIndex0);
+
+        // Extract /Annots for clickable /Link (F-082) and AcroForm /Widget fields (F-084)
+        const DocRect effBox = hasCrop ? crop : media;
+        const double bw = (std::max)(1.0, effBox.w);
+        const double bh = (std::max)(1.0, effBox.h);
+        if (const PdfValue* annotsVal = Resolve(nodeVal.DictGet("Annots"))) {
+            if (annotsVal->IsArray()) {
+                for (const auto& aItem : annotsVal->arrayVal) {
+                    const PdfValue* annot = Resolve(&aItem);
+                    if (!annot || !annot->IsDict()) continue;
+                    const PdfValue* sub = Resolve(annot->DictGet("Subtype"));
+                    const PdfValue* rectV = Resolve(annot->DictGet("Rect"));
+                    if (!sub || !sub->IsName() || !rectV || !rectV->IsArray() || rectV->arrayVal.size() < 4) continue;
+                    const double x1 = rectV->arrayVal[0].AsNumber();
+                    const double y1 = rectV->arrayVal[1].AsNumber();
+                    const double x2 = rectV->arrayVal[2].AsNumber();
+                    const double y2 = rectV->arrayVal[3].AsNumber();
+                    const double rx0 = (std::min)(x1, x2), rx1 = (std::max)(x1, x2);
+                    const double ry0 = (std::min)(y1, y2), ry1 = (std::max)(y1, y2);
+                    const double nl = std::clamp((rx0 - effBox.x) / bw, 0.0, 1.0);
+                    const double nrR = std::clamp((rx1 - effBox.x) / bw, nl, 1.0);
+                    const double nt = std::clamp(1.0 - (ry1 - effBox.y) / bh, 0.0, 1.0);
+                    const double nb = std::clamp(1.0 - (ry0 - effBox.y) / bh, nt, 1.0);
+                    const DocRect nr{ nl, nt, (std::max)(0.002, nrR - nl), (std::max)(0.002, nb - nt) };
+
+                    if (sub->strVal == "Link") {
+                        PdfLinkRect lr{};
+                        lr.rectNorm = nr;
+                        if (const PdfValue* act = Resolve(annot->DictGet("A"))) {
+                            if (const PdfValue* uri = Resolve(act->DictGet("URI"))) {
+                                if (uri->kind == PdfValue::Kind::String) lr.uriUtf8 = uri->strVal;
+                            }
+                            if (const PdfValue* dst = Resolve(act->DictGet("D"))) {
+                                if (dst->IsArray() && !dst->arrayVal.empty() && dst->arrayVal[0].IsRef()) {
+                                    lr.targetPage0 = static_cast<int>(dst->arrayVal[0].refVal.obj); // resolved later in PopulateDocumentModel
+                                }
+                            }
+                        }
+                        if (lr.uriUtf8.empty() && lr.targetPage0 < 0) {
+                            if (const PdfValue* dst = Resolve(annot->DictGet("Dest"))) {
+                                if (dst->IsArray() && !dst->arrayVal.empty() && dst->arrayVal[0].IsRef()) {
+                                    lr.targetPage0 = static_cast<int>(dst->arrayVal[0].refVal.obj);
+                                }
+                            }
+                        }
+                        if (!lr.uriUtf8.empty() || lr.targetPage0 >= 0) {
+                            pages_.back().pdfLinks.push_back(std::move(lr));
+                        }
+                    } else if (sub->strVal == "Widget") {
+                        PdfFormField ff{};
+                        ff.rectNorm = nr;
+                        if (const PdfValue* nm = Resolve(annot->DictGet("T"))) {
+                            if (nm->kind == PdfValue::Kind::String) ff.nameUtf8 = nm->strVal;
+                        }
+                        if (const PdfValue* ft = Resolve(annot->DictGet("FT"))) {
+                            if (ft->IsName()) ff.fieldTypeUtf8 = ft->strVal;
+                        }
+                        if (const PdfValue* val = Resolve(annot->DictGet("V"))) {
+                            if (val->kind == PdfValue::Kind::String) ff.valueUtf8 = val->strVal;
+                            else if (val->IsName()) {
+                                ff.valueUtf8 = val->strVal;
+                                ff.checked = (val->strVal != "Off" && val->strVal != "No");
+                            }
+                        }
+                        if (const PdfValue* asV = Resolve(annot->DictGet("AS"))) {
+                            if (asV->IsName() && asV->strVal != "Off") ff.checked = true;
+                        }
+                        if (const PdfValue* fl = Resolve(annot->DictGet("Ff"))) {
+                            if (fl->IsNumber() && (static_cast<std::int64_t>(fl->AsNumber()) & 1) != 0) ff.readOnly = true;
+                        }
+                        if (ff.nameUtf8.empty()) ff.nameUtf8 = "campo_" + std::to_string(pages_.back().formFields.size() + 1);
+                        pages_.back().formFields.push_back(std::move(ff));
+                    }
+                }
+            }
+        }
         return;
     }
 
@@ -1394,9 +1471,36 @@ std::string PdfDocument::ExtractPageText(const PdfValue& pageDictVal, const PdfD
     PdfReader pr(streamBytes.data(), streamBytes.size(), 0);
     std::vector<PdfValue> operands;
     std::string activeFont;
+    double fontSizePt = 11.0;
+    double curX = 0.0;
     double curY = 0.0;
     bool inText = false;
     std::string out;
+
+    const DocRect effBox = (pageIndex0 < pages_.size())
+        ? (pages_[pageIndex0].hasCropBox ? pages_[pageIndex0].cropBox : pages_[pageIndex0].mediaBox)
+        : DocRect{ 0.0, 0.0, 595.0, 842.0 };
+    const double bw = (std::max)(1.0, effBox.w);
+    const double bh = (std::max)(1.0, effBox.h);
+
+    auto recordTextRun = [&](const std::string& decoded) {
+        if (decoded.empty() || pageIndex0 >= pages_.size()) return;
+        const std::string clean = NormalizeLigaturesUtf8(decoded);
+        if (clean.empty()) return;
+        const double estW = (std::max)(4.0, static_cast<double>(clean.size()) * fontSizePt * 0.52);
+        const double estH = (std::max)(6.0, fontSizePt * 1.15);
+        PdfTextRunBox box{};
+        box.textUtf8 = clean;
+        const double xl = std::clamp((curX - effBox.x) / bw, 0.0, 0.99);
+        const double xr = std::clamp((curX + estW - effBox.x) / bw, xl + 0.005, 1.0);
+        const double yt = std::clamp(1.0 - (curY + estH * 0.85 - effBox.y) / bh, 0.0, 0.99);
+        const double yb = std::clamp(1.0 - (curY - estH * 0.25 - effBox.y) / bh, yt + 0.005, 1.0);
+        box.rectNorm = { xl, yt, xr - xl, yb - yt };
+        if (pages_[pageIndex0].textBoxes.size() < 2500u) {
+            const_cast<PdfDocument*>(this)->pages_[pageIndex0].textBoxes.push_back(std::move(box));
+        }
+        curX += estW;
+    };
 
     auto decodeStr = [&](const std::string& raw) -> std::string {
         auto it = fontMaps.find(activeFont);
@@ -1440,6 +1544,7 @@ std::string PdfDocument::ExtractPageText(const PdfValue& pageDictVal, const PdfD
         // Operator dispatch
         if (tok == "BT") {
             inText = true;
+            curX = 0.0;
             curY = 0.0;
         } else if (tok == "ET") {
             inText = false;
@@ -1447,44 +1552,65 @@ std::string PdfDocument::ExtractPageText(const PdfValue& pageDictVal, const PdfD
         } else if (tok == "Tf") {
             if (operands.size() >= 2 && operands[operands.size() - 2].IsName()) {
                 activeFont = operands[operands.size() - 2].strVal;
+                const double fs = std::abs(operands.back().AsNumber(11.0));
+                if (fs >= 3.0 && fs <= 144.0) fontSizePt = fs;
             }
         } else if ((tok == "Td" || tok == "TD") && inText) {
             if (operands.size() >= 2) {
+                const double dx = operands[operands.size() - 2].AsNumber();
                 const double dy = operands.back().AsNumber();
+                curX += dx;
+                curY += dy;
                 if (std::abs(dy) > 0.5) appendLineBreakIfNeeded();
                 else if (!out.empty() && out.back() != ' ' && out.back() != '\n') out.push_back(' ');
             }
         } else if (tok == "Tm" && inText) {
             if (operands.size() >= 6) {
+                const double nx = operands[operands.size() - 2].AsNumber();
                 const double ny = operands.back().AsNumber();
                 if (std::abs(ny - curY) > 1.0) appendLineBreakIfNeeded();
                 else if (!out.empty() && out.back() != ' ' && out.back() != '\n') out.push_back(' ');
+                curX = nx;
                 curY = ny;
             }
         } else if (tok == "T*" && inText) {
+            curY -= fontSizePt * 1.2;
             appendLineBreakIfNeeded();
         } else if ((tok == "Tj" || tok == "'") && inText) {
-            if (tok == "'") appendLineBreakIfNeeded();
+            if (tok == "'") {
+                curY -= fontSizePt * 1.2;
+                appendLineBreakIfNeeded();
+            }
             if (!operands.empty() && operands.back().kind == PdfValue::Kind::String) {
-                out += decodeStr(operands.back().strVal);
+                const std::string dec = decodeStr(operands.back().strVal);
+                out += dec;
+                recordTextRun(dec);
             }
         } else if (tok == "\"" && inText) {
+            curY -= fontSizePt * 1.2;
             appendLineBreakIfNeeded();
             if (!operands.empty() && operands.back().kind == PdfValue::Kind::String) {
-                out += decodeStr(operands.back().strVal);
+                const std::string dec = decodeStr(operands.back().strVal);
+                out += dec;
+                recordTextRun(dec);
             }
         } else if (tok == "TJ" && inText) {
             if (!operands.empty() && operands.back().IsArray()) {
+                std::string joined;
                 for (const auto& elem : operands.back().arrayVal) {
                     if (elem.kind == PdfValue::Kind::String) {
-                        out += decodeStr(elem.strVal);
+                        const std::string dec = decodeStr(elem.strVal);
+                        out += dec;
+                        joined += dec;
                     } else if (elem.IsNumber()) {
                         // Large negative kerning (< -120 in thousandths of text space) indicates word space
                         if (elem.AsNumber() < -120.0 && !out.empty() && out.back() != ' ' && out.back() != '\n') {
                             out.push_back(' ');
+                            joined.push_back(' ');
                         }
                     }
                 }
+                recordTextRun(joined);
             }
         }
         operands.clear();
@@ -1521,6 +1647,11 @@ bool PdfDocument::PopulateDocumentModel(
         }
     }
 
+    std::unordered_map<std::uint32_t, std::size_t> objNumToPageIdx;
+    for (const auto& pi : pages_) {
+        objNumToPageIdx[pi.pageRef.obj] = pi.pageIndex0;
+    }
+
     for (const auto& pi : pages_) {
         PageModel pm;
         pm.pageId = doc.AllocatePageId();
@@ -1534,7 +1665,105 @@ bool PdfDocument::PopulateDocumentModel(
         pm.sourcePdfAssetKey = sourceAssetKey;
         pm.sourcePageIndex0 = static_cast<int>(pi.pageIndex0);
         pm.extractedTextUtf8 = pi.extractedTextUtf8;
+        pm.pdfLinks = pi.pdfLinks;
+        for (auto& lr : pm.pdfLinks) {
+            if (lr.targetPage0 >= 0) {
+                auto it = objNumToPageIdx.find(static_cast<std::uint32_t>(lr.targetPage0));
+                lr.targetPage0 = (it != objNumToPageIdx.end()) ? static_cast<int>(it->second) : -1;
+            }
+        }
+        pm.formFields = pi.formFields;
+        pm.textBoxes = pi.textBoxes;
         doc.MutablePages().push_back(std::move(pm));
+    }
+
+    // Extract PDF /Outlines (Table of Contents) -> DocumentModel::Bookmarks() (F-083)
+    const PdfValue catalog = LookupObject(rootRef_.obj);
+    if (const PdfValue* outlines = Resolve(catalog.DictGet("Outlines"))) {
+        std::unordered_set<std::uint32_t> visitedOutlines;
+        auto decodePdfTextStr = [](const std::string& raw) -> std::string {
+            if (raw.size() >= 2 && static_cast<std::uint8_t>(raw[0]) == 0xFEu && static_cast<std::uint8_t>(raw[1]) == 0xFFu) {
+                return Utf16BeBytesToUtf8(raw.substr(2));
+            }
+            std::string out;
+            for (unsigned char b : raw) out += WinAnsiByteToUtf8(b);
+            return out;
+        };
+        auto resolveDestPage = [&](const PdfValue* item) -> std::size_t {
+            if (!item) return 0;
+            const PdfValue* dest = Resolve(item->DictGet("Dest"));
+            if (!dest) {
+                if (const PdfValue* act = Resolve(item->DictGet("A"))) {
+                    dest = Resolve(act->DictGet("D"));
+                }
+            }
+            if (dest && dest->IsArray() && !dest->arrayVal.empty() && dest->arrayVal[0].IsRef()) {
+                auto it = objNumToPageIdx.find(dest->arrayVal[0].refVal.obj);
+                if (it != objNumToPageIdx.end()) return it->second;
+            }
+            return 0;
+        };
+        std::function<void(const PdfValue*, int)> walkOutlines = [&](const PdfValue* nodeRefVal, int level) {
+            if (!nodeRefVal || level > 12 || doc.Bookmarks().size() >= 512u) return;
+            const PdfValue* curRef = nodeRefVal;
+            while (curRef) {
+                std::uint32_t objId = curRef->IsRef() ? curRef->refVal.obj : 0u;
+                if (objId != 0 && !visitedOutlines.insert(objId).second) break;
+                const PdfValue* item = Resolve(curRef);
+                if (!item || !item->IsDict()) break;
+                if (const PdfValue* titleV = Resolve(item->DictGet("Title"))) {
+                    if (titleV->kind == PdfValue::Kind::String && !titleV->strVal.empty()) {
+                        doc.AddBookmark(decodePdfTextStr(titleV->strVal), resolveDestPage(item), 0.0, level);
+                    }
+                }
+                if (const PdfValue* firstChild = item->DictGet("First")) {
+                    walkOutlines(firstChild, level + 1);
+                }
+                curRef = item->DictGet("Next");
+            }
+        };
+        if (const PdfValue* firstTop = outlines->DictGet("First")) {
+            walkOutlines(firstTop, 0);
+        }
+    }
+
+    // Extract PDF /Names /EmbeddedFiles -> DocumentModel::Attachments() (F-085)
+    if (const PdfValue* names = Resolve(catalog.DictGet("Names"))) {
+        if (const PdfValue* efTree = Resolve(names->DictGet("EmbeddedFiles"))) {
+            std::function<void(const PdfValue*, int)> walkNameTree = [&](const PdfValue* node, int depth) {
+                if (!node || !node->IsDict() || depth > 16 || doc.Attachments().size() >= 64u) return;
+                if (const PdfValue* pairs = Resolve(node->DictGet("Names"))) {
+                    if (pairs->IsArray()) {
+                        for (std::size_t i = 0; i + 1 < pairs->arrayVal.size(); i += 2) {
+                            const std::string fname = pairs->arrayVal[i].strVal;
+                            const PdfValue* fspec = Resolve(&pairs->arrayVal[i + 1]);
+                            if (!fspec || !fspec->IsDict()) continue;
+                            const PdfValue* efDict = Resolve(fspec->DictGet("EF"));
+                            const PdfValue* fStm = efDict ? Resolve(efDict->DictGet("F")) : nullptr;
+                            if (!fStm && efDict) fStm = Resolve(efDict->DictGet("UF"));
+                            if (fStm && fStm->IsStream()) {
+                                std::vector<std::uint8_t> raw;
+                                if (DecompressStream(*fStm->streamVal, raw) && !raw.empty()) {
+                                    std::string finalName = fname;
+                                    if (const PdfValue* uf = Resolve(fspec->DictGet("UF"))) {
+                                        if (uf->kind == PdfValue::Kind::String && !uf->strVal.empty()) finalName = uf->strVal;
+                                    } else if (const PdfValue* f = Resolve(fspec->DictGet("F"))) {
+                                        if (f->kind == PdfValue::Kind::String && !f->strVal.empty()) finalName = f->strVal;
+                                    }
+                                    doc.AddAttachment(finalName.empty() ? "adjunto.bin" : finalName, "application/octet-stream", std::move(raw));
+                                }
+                            }
+                        }
+                    }
+                }
+                if (const PdfValue* kids = Resolve(node->DictGet("Kids"))) {
+                    if (kids->IsArray()) {
+                        for (const auto& k : kids->arrayVal) walkNameTree(Resolve(&k), depth + 1);
+                    }
+                }
+            };
+            walkNameTree(efTree, 0);
+        }
     }
 
     doc.RebuildLayout();

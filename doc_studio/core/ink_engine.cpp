@@ -662,11 +662,45 @@ DocPoint ProjectPointOntoRuler(
     if (outSnapped) *outSnapped = false;
     if (!ruler.visible) return pt;
 
-    const double rad = ruler.angleDeg * (3.14159265358979323846 / 180.0);
+    const double rad = ruler.angleDeg * (kPi / 180.0);
     const double ux = std::cos(rad);
     const double uy = std::sin(rad);
-    const double halfL = (std::max)(20.0, ruler.lengthPt * 0.5);
 
+    if (ruler.mode == RulerMode::Protractor) {
+        const double radius = (std::max)(40.0, ruler.lengthPt * 0.42);
+        const double dx = pt.x - ruler.centerX;
+        const double dy = pt.y - ruler.centerY;
+        const double dist = std::hypot(dx, dy);
+        // Check base straight edge of protractor
+        const double along = dx * ux + dy * uy;
+        const double perp = -dx * uy + dy * ux;
+        if (std::abs(along) <= radius + snapDistWorld && std::abs(perp) <= snapDistWorld * 0.85) {
+            if (outSnapped) *outSnapped = true;
+            const double ca = std::clamp(along, -radius, radius);
+            return { ruler.centerX + ca * ux, ruler.centerY + ca * uy };
+        }
+        // Check semicircular arc (upper half relative to ruler angle)
+        if (std::abs(dist - radius) <= snapDistWorld && perp <= snapDistWorld) {
+            const double ang = std::atan2(dy, dx);
+            if (outSnapped) *outSnapped = true;
+            return { ruler.centerX + radius * std::cos(ang), ruler.centerY + radius * std::sin(ang) };
+        }
+        return pt;
+    }
+
+    if (ruler.mode == RulerMode::Compass) {
+        const double radius = (std::max)(18.0, ruler.compassRadiusPt);
+        const double dx = pt.x - ruler.centerX;
+        const double dy = pt.y - ruler.centerY;
+        const double dist = std::hypot(dx, dy);
+        if (dist > 1e-4 && std::abs(dist - radius) <= snapDistWorld * 1.25) {
+            if (outSnapped) *outSnapped = true;
+            return { ruler.centerX + (dx / dist) * radius, ruler.centerY + (dy / dist) * radius };
+        }
+        return pt;
+    }
+
+    const double halfL = (std::max)(20.0, ruler.lengthPt * 0.5);
     const double rx = pt.x - ruler.centerX;
     const double ry = pt.y - ruler.centerY;
     const double along = rx * ux + ry * uy;
@@ -678,6 +712,242 @@ DocPoint ProjectPointOntoRuler(
         return { ruler.centerX + clampedAlong * ux, ruler.centerY + clampedAlong * uy };
     }
     return pt;
+}
+
+bool EraseStrokePartial(
+    const AnnotationObject& stroke,
+    DocPoint eraserCenter,
+    double eraserRadiusWorld,
+    std::vector<AnnotationObject>& outPieces)
+{
+    outPieces.clear();
+    if (stroke.kind != ObjectKind::InkStroke || stroke.inkPoints.empty()) return false;
+
+    const double reach = (std::max)(2.0, eraserRadiusWorld) + stroke.strokeWidth * 0.5;
+    const double reach2 = reach * reach;
+
+    // Fast bbox reject
+    if (eraserCenter.x + reach < stroke.bounds.x || eraserCenter.x - reach > stroke.bounds.Right() ||
+        eraserCenter.y + reach < stroke.bounds.y || eraserCenter.y - reach > stroke.bounds.Bottom()) {
+        return false;
+    }
+
+    // Densify long segments slightly before splitting so fast strokes split cleanly along circle intersections
+    std::vector<InkPoint> dense;
+    dense.reserve(stroke.inkPoints.size() * 2);
+    dense.push_back(stroke.inkPoints[0]);
+    const double maxSegLen = (std::max)(2.5, reach * 0.45);
+    for (std::size_t i = 1; i < stroke.inkPoints.size(); ++i) {
+        const auto& a = stroke.inkPoints[i - 1];
+        const auto& b = stroke.inkPoints[i];
+        const double segLen = Dist(a.x, a.y, b.x, b.y);
+        if (segLen > maxSegLen) {
+            const int steps = (std::min)(32, static_cast<int>(std::ceil(segLen / maxSegLen)));
+            for (int s = 1; s < steps; ++s) {
+                const double t = static_cast<double>(s) / static_cast<double>(steps);
+                InkPoint mid{};
+                mid.x = a.x + (b.x - a.x) * t;
+                mid.y = a.y + (b.y - a.y) * t;
+                mid.pressure = static_cast<float>(a.pressure + (b.pressure - a.pressure) * t);
+                mid.tiltXDeg = static_cast<float>(a.tiltXDeg + (b.tiltXDeg - a.tiltXDeg) * t);
+                mid.tiltYDeg = static_cast<float>(a.tiltYDeg + (b.tiltYDeg - a.tiltYDeg) * t);
+                mid.timestampMs = static_cast<std::uint64_t>(
+                    static_cast<double>(a.timestampMs) +
+                    (static_cast<double>(b.timestampMs) - static_cast<double>(a.timestampMs)) * t);
+                dense.push_back(mid);
+            }
+        }
+        dense.push_back(b);
+    }
+
+    bool anyErased = false;
+    std::vector<InkPoint> current;
+    auto flushPiece = [&]() {
+        if (current.size() >= 2) {
+            AnnotationObject piece = stroke;
+            piece.id = 0;
+            piece.zOrder = 0;
+            piece.inkPoints = std::move(current);
+            piece.inkStartTimeMs = piece.inkPoints.front().timestampMs;
+            piece.inkEndTimeMs = piece.inkPoints.back().timestampMs;
+            piece.RecomputeBounds();
+            outPieces.push_back(std::move(piece));
+            current.clear();
+        } else {
+            current.clear();
+        }
+    };
+
+    for (const auto& pt : dense) {
+        if (Dist2(pt.x, pt.y, eraserCenter.x, eraserCenter.y) <= reach2) {
+            anyErased = true;
+            flushPiece();
+        } else {
+            current.push_back(pt);
+        }
+    }
+    flushPiece();
+    return anyErased;
+}
+
+bool NeatenAndRestyleStrokes(
+    DocumentModel& doc,
+    ObjectTarget target,
+    const std::vector<std::uint64_t>& ids)
+{
+    if (ids.empty()) return false;
+    std::vector<AnnotationObject*> strokes;
+    double sumX = 0.0, sumY = 0.0;
+    std::size_t totalPts = 0;
+
+    for (std::uint64_t id : ids) {
+        AnnotationObject* obj = target.isCanvas
+            ? doc.FindCanvasObjectMutable(id)
+            : doc.FindPageObjectMutable(target.pageIndex, id);
+        if (!obj || obj->kind != ObjectKind::InkStroke || obj->inkPoints.size() < 2) continue;
+        if (!doc.IsLayerVisible(obj->layerId) || doc.IsLayerLocked(obj->layerId)) continue;
+        strokes.push_back(obj);
+        for (const auto& p : obj->inkPoints) {
+            sumX += p.x;
+            sumY += p.y;
+            ++totalPts;
+        }
+    }
+    if (strokes.empty() || totalPts < 2) return false;
+
+    const double meanX = sumX / static_cast<double>(totalPts);
+    const double meanY = sumY / static_cast<double>(totalPts);
+
+    // Estimate line baseline slope via linear regression over the stroke group and deskew gently (<= 12 deg)
+    double covXY = 0.0, varX = 0.0;
+    for (const auto* s : strokes) {
+        for (const auto& p : s->inkPoints) {
+            const double dx = p.x - meanX;
+            const double dy = p.y - meanY;
+            covXY += dx * dy;
+            varX += dx * dx;
+        }
+    }
+    double skewAngle = (varX > 1e-3) ? std::atan2(covXY, varX) : 0.0;
+    const double maxDeskewRad = 12.0 * (kPi / 180.0);
+    if (std::abs(skewAngle) > maxDeskewRad) skewAngle = 0.0; // don't rotate vertical drawings
+    const double cosA = std::cos(-skewAngle);
+    const double sinA = std::sin(-skewAngle);
+
+    for (auto* s : strokes) {
+        for (auto& p : s->inkPoints) {
+            const double dx = p.x - meanX;
+            const double dy = p.y - meanY;
+            p.x = meanX + dx * cosA - dy * sinA;
+            p.y = meanY + dx * sinA + dy * cosA;
+            // Gently normalize pressure spikes for consistent calligraphy look
+            p.pressure = static_cast<float>(0.35 + 0.65 * std::clamp(static_cast<double>(p.pressure), 0.15, 0.95));
+        }
+        s->inkPoints = SmoothInkStroke(s->inkPoints, 0.55);
+        s->RecomputeBounds();
+    }
+    if (target.isCanvas) doc.RebuildCanvasIndex();
+    doc.SetDirty(true);
+    doc.BumpRevision();
+    return true;
+}
+
+DocPoint SnapPointToGrid(
+    DocPoint pt,
+    PaperPattern pattern,
+    double gridSpacingPt)
+{
+    const double step = (std::max)(4.0, gridSpacingPt);
+    switch (pattern) {
+    case PaperPattern::Ruled:
+    case PaperPattern::Cornell:
+    case PaperPattern::MusicStaff:
+        return { pt.x, std::round(pt.y / step) * step };
+    case PaperPattern::Isometric: {
+        const double dy = step * 0.8660254037844386;
+        const double row = std::round(pt.y / dy);
+        const double offset = (static_cast<long long>(row) % 2 != 0) ? (step * 0.5) : 0.0;
+        const double col = std::round((pt.x - offset) / step);
+        return { col * step + offset, row * dy };
+    }
+    case PaperPattern::Grid:
+    case PaperPattern::Dots:
+    case PaperPattern::LogLog:
+    case PaperPattern::Polar:
+    case PaperPattern::SmithChart:
+    case PaperPattern::Plain:
+    default:
+        return { std::round(pt.x / step) * step, std::round(pt.y / step) * step };
+    }
+}
+
+void UpdateMagneticConnectors(
+    DocumentModel& doc,
+    ObjectTarget target,
+    std::uint64_t movedObjectId)
+{
+    if (movedObjectId == 0) return;
+
+    auto getCenter = [&](std::uint64_t id, DocPoint& outCenter) -> bool {
+        const AnnotationObject* o = target.isCanvas
+            ? doc.FindCanvasObject(id)
+            : (target.pageIndex < doc.Pages().size() ? [&]() -> const AnnotationObject* {
+                for (const auto& item : doc.Pages()[target.pageIndex].objects) {
+                    if (item.id == id) return &item;
+                }
+                return nullptr;
+            }() : nullptr);
+        if (!o) return false;
+        outCenter = { o->bounds.x + o->bounds.w * 0.5, o->bounds.y + o->bounds.h * 0.5 };
+        return true;
+    };
+
+    auto updateVec = [&](std::vector<AnnotationObject>& objs) {
+        bool changed = false;
+        for (auto& o : objs) {
+            if (o.kind != ObjectKind::Shape || o.shapeKind != ShapeKind::Connector) continue;
+            if (o.connectorFromId != movedObjectId && o.connectorToId != movedObjectId) continue;
+            DocPoint p{};
+            if (o.connectorFromId != 0 && getCenter(o.connectorFromId, p)) {
+                o.shapeStart = p;
+                changed = true;
+            }
+            if (o.connectorToId != 0 && getCenter(o.connectorToId, p)) {
+                o.shapeEnd = p;
+                changed = true;
+            }
+            o.RecomputeBounds();
+        }
+        return changed;
+    };
+
+    if (target.isCanvas) {
+        std::vector<std::uint64_t> connIds;
+        for (const auto& o : doc.CanvasObjects()) {
+            if (o.kind == ObjectKind::Shape && o.shapeKind == ShapeKind::Connector &&
+                (o.connectorFromId == movedObjectId || o.connectorToId == movedObjectId)) {
+                connIds.push_back(o.id);
+            }
+        }
+        for (std::uint64_t cid : connIds) {
+            if (AnnotationObject* c = doc.FindCanvasObjectMutable(cid)) {
+                DocPoint p{};
+                if (c->connectorFromId != 0 && getCenter(c->connectorFromId, p)) c->shapeStart = p;
+                if (c->connectorToId != 0 && getCenter(c->connectorToId, p)) c->shapeEnd = p;
+                c->RecomputeBounds();
+            }
+        }
+        if (!connIds.empty()) {
+            doc.RebuildCanvasIndex();
+            doc.SetDirty(true);
+            doc.BumpRevision();
+        }
+    } else if (target.pageIndex < doc.Pages().size()) {
+        if (updateVec(doc.MutablePages()[target.pageIndex].objects)) {
+            doc.SetDirty(true);
+            doc.BumpRevision();
+        }
+    }
 }
 
 } // namespace DocStudio::InkEngine

@@ -25,6 +25,9 @@
 #include "../../ui_glass/liquid_glass_math.hpp"
 #include "../../ui_glass/vector_icons.hpp"
 #include "../../ui_glass/gdi_liquid_glass.hpp"
+#include "canvas_manipulation.hpp"
+#include "projector_window.hpp"
+#include "stem_gui_dialogs.hpp"
 #include "studio_actions.hpp"
 #include "studio_cli_dispatch.hpp"
 #include "../core/audio_timeline.hpp"
@@ -33,8 +36,10 @@
 #include "../core/cudoc_storage.hpp"
 #include "../core/doc_types.hpp"
 #include "../core/document_model.hpp"
+#include "../core/image_processing.hpp"
 #include "../core/notebook_vault.hpp"
 #include "../core/utf_conv.hpp"
+#include "../interop/notebook_migration_engine.hpp"
 #include "../pdf/interop_openxml.hpp"
 #include "../pdf/pdf_parser.hpp"
 #include "../pdf/pdf_signer.hpp"
@@ -191,7 +196,74 @@ enum CmdId : WORD {
     CMD_MORE_OVERFLOW,
     CMD_ACADEMIC_SYNC_TEC,
     CMD_ACADEMIC_SOLVE_SCHEDULE,
-    CMD_ACADEMIC_SEARCH_MATERIALS
+    CMD_ACADEMIC_SEARCH_MATERIALS,
+    // Track A-E Unified CuadernU & Multi-Format Interoperability IDs
+    CMD_MIGRATE_NOTEBOOK = 2401,
+    CMD_OPEN_VAULT_LIBRARY,
+    CMD_SAVE_ENCRYPTED,
+    CMD_OPEN_ENCRYPTED,
+    CMD_VERSION_HISTORY,
+    CMD_CONFLICT_MERGE,
+    CMD_VIEW_ATTACHMENTS,
+    CMD_QUICK_NOTE,
+    CMD_NEW_TAB,
+    CMD_NEXT_TAB,
+    CMD_TOGGLE_SPREAD,
+    CMD_TOGGLE_SPLIT_VIEW,
+    CMD_OPEN_PROJECTOR,
+    CMD_FREEZE_PROJECTOR,
+    CMD_TOGGLE_PARTIAL_ERASER,
+    CMD_CYCLE_PEN_STYLE,
+    CMD_CUSTOM_INK_COLOR,
+    CMD_TOGGLE_SNAP_GRID,
+    CMD_CYCLE_GEOMETRY_TOOL,
+    CMD_COPY_STROKE_STYLE,
+    CMD_RESTYLE_INK,
+    CMD_HTR_TO_TEXT,
+    CMD_HTR_TO_MATH,
+    CMD_GROUP_OBJECTS,
+    CMD_UNGROUP_OBJECTS,
+    CMD_DUPLICATE_OBJECTS,
+    CMD_CLIPBOARD_PASTE,
+    CMD_ADD_REDACTION,
+    CMD_ADD_CONNECTOR,
+    CMD_IMPORT_IMAGE_MULTI,
+    CMD_IMG_ENHANCE_WHITEBOARD,
+    CMD_IMG_REMOVE_BG,
+    CMD_IMG_ROTATE_90,
+    CMD_IMG_TOGGLE_OPACITY,
+    CMD_IMG_CROP,
+    CMD_STICKER_OPAMP,
+    CMD_STICKER_RESISTOR,
+    CMD_STICKER_AXES,
+    CMD_STICKER_NOTE,
+    CMD_PAPER_ISOMETRIC,
+    CMD_PAPER_LOGLOG,
+    CMD_PAPER_POLAR,
+    CMD_PAPER_SMITH,
+    CMD_PAPER_CORNELL,
+    CMD_PAPER_MUSIC,
+    CMD_AUDIO_BOOKMARK,
+    CMD_AUDIO_IMPORT,
+    CMD_AUDIO_TRANSCRIBE,
+    CMD_AUDIO_EXPORT_HTML5,
+    CMD_ADD_TABLE,
+    CMD_ADD_CODE_BLOCK,
+    CMD_ADV_MATH,
+    CMD_CHECK_MY_WORK,
+    CMD_TEACH_ME,
+    CMD_SUMMARIZE_NOTES,
+    CMD_LOCAL_QA,
+    CMD_COMPARE_4_CASIO,
+    CMD_RECOGNIZE_CIRCUIT,
+    CMD_ENG_TOOLBOX,
+    CMD_FORMULA_AST_SEARCH,
+    CMD_LAN_QR,
+    CMD_EXAM_PIN_LOCK,
+    CMD_TEXT_BOLD,
+    CMD_TEXT_ITALIC,
+    CMD_TEXT_UNDERLINE,
+    CMD_INLINE_EDIT_CTRL = 2599
 };
 
 enum class ToolbarZone {
@@ -267,17 +339,23 @@ struct StudioAppState {
 
     std::wstring currentDocPath;
     std::string activePdfSourcePathUtf8;
-    std::string statusBannerUtf8 = "Document Studio listo";
+    std::string statusBannerUtf8 = "CuadernU listo";
 
     ToolKind activeTool = ToolKind::Pen;
     DocColor penColor = DocColor::RGBA(26, 115, 232, 255);
     double penWidth = 2.6;
+    InkPenStyle penStyle = InkPenStyle::Fountain;
+    EraserActionMode eraserActionMode = EraserActionMode::WholeStroke;
+    bool snapToGrid = false;
+    double penOpacity = 1.0;
 
-    // Interactive gesture state
+    // Interactive gesture & direct canvas manipulation state
     bool panning = false;
     POINT lastPanPt{};
     POINT panStartPt{};
     bool panMoved = false;
+    bool rbuttonMoved = false;
+    POINT rbuttonDownPt{};
     bool drawing = false;
     bool draftIsCanvas = false;
     std::size_t draftPageIdx = 0;
@@ -285,6 +363,42 @@ struct StudioAppState {
     DocPoint draftAnchorWorld{};
     bool hasDraftCrop = false;
     DocRect draftCropPageLocal{};
+
+    CanvasManip::ActiveTransformDrag transformDrag{};
+    bool pdfSelectingText = false;
+    std::size_t pdfSelPage = 0;
+    DocPoint pdfSelAnchorLocal{};
+    DocRect pdfSelRectLocal{};
+    std::string lastSelectedPdfTextUtf8;
+
+    // Stylus hardware features (F-036 palm rejection, F-037 inverted eraser, F-038 barrel button)
+    ULONGLONG lastPenInputTickMs = 0;
+    bool barrelTempLasso = false;
+    bool invertedTempEraser = false;
+    ToolKind savedToolBeforeStylusMod = ToolKind::Pen;
+
+    // Inline TextBox editing overlay
+    HWND hwndInlineEdit = nullptr;
+    std::uint64_t inlineEditObjId = 0;
+    ObjectTarget inlineEditTarget{};
+
+    // Multi-tab, split view, vault, versions, projector, exam lock
+    struct OpenDocTab {
+        std::wstring path;
+        std::vector<std::uint8_t> serializedCudoc;
+        Camera2D cam{};
+        std::string title;
+    };
+    std::vector<OpenDocTab> tabs;
+    std::size_t activeTabIdx = 0;
+    bool splitViewActive = false;
+    Camera2D splitCamera{};
+    NotebookVault vault;
+    PageVersionHistory versionHistory;
+    SecondaryProjectorWindow projectorWnd;
+    bool examModeLocked = false;
+    std::string examPinUtf8;
+    bool aiOfflineOnly = true;
 
     std::uint64_t selectedObjectId = 0;
     bool selectedIsCanvas = false;
@@ -757,7 +871,13 @@ void UpdateWindowTitle(StudioAppState* st) {
     const std::wstring name = st->currentDocPath.empty()
         ? Utf8ToWide(st->doc.Title())
         : std::filesystem::path(st->currentDocPath).filename().wstring();
-    const std::wstring title = L"Document Studio \u2014 " + name + dirtyMark;
+    std::wstring extra;
+    if (st->tabs.size() > 1) {
+        extra += L"  [" + std::to_wstring(st->activeTabIdx + 1) + L"/" + std::to_wstring(st->tabs.size()) + L"]";
+    }
+    if (st->splitViewActive) extra += L"  [Vista Dividida]";
+    if (st->examModeLocked) extra += L"  [Modo Examen]";
+    const std::wstring title = L"CuadernU \u2014 " + name + extra + dirtyMark;
     SetWindowTextW(st->hwndMain, title.c_str());
 }
 
@@ -806,6 +926,10 @@ void PopulateViewportOverlay(const StudioAppState* st, ViewportOverlayState& ov)
     ov.focusMode = st->focusMode;
     ov.darkTheme = st->glassSettings.IsDark();
     ov.highContrast = st->glassSettings.IsHighContrast();
+    ov.hasPdfTextSel = st->pdfSelectingText && !st->pdfSelRectLocal.Empty();
+    ov.pdfTextSelPage = st->pdfSelPage;
+    ov.pdfTextSelRectLocal = st->pdfSelRectLocal;
+    ov.showSelectionHandles = !st->presenterMode;
 }
 
 void ApplyCliCalcCardSpec(StudioAppState* st) {
@@ -1106,6 +1230,11 @@ void InvalidateViews(StudioAppState* st) {
     if (st->hwndViewport) InvalidateRect(st->hwndViewport, nullptr, FALSE);
     if (st->hwndSidebar && IsWindowVisible(st->hwndSidebar)) InvalidateRect(st->hwndSidebar, nullptr, FALSE);
     if (st->hwndInspector && IsWindowVisible(st->hwndInspector)) InvalidateRect(st->hwndInspector, nullptr, FALSE);
+    if (st->projectorWnd.IsOpen()) {
+        ViewportOverlayState pv{};
+        PopulateViewportOverlay(st, pv);
+        st->projectorWnd.SyncFromMain(&st->doc, &st->camera, &st->pageCache, pv);
+    }
     if (st->hwndMain) {
         RECT rc{};
         GetClientRect(st->hwndMain, &rc);
@@ -1116,11 +1245,257 @@ void InvalidateViews(StudioAppState* st) {
     }
 }
 
+std::wstring GetCuadernUDataDir() {
+    wchar_t localApp[MAX_PATH]{};
+    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", localApp, MAX_PATH);
+    std::wstring base = (n > 0 && n < MAX_PATH) ? std::wstring(localApp) : L".";
+    std::filesystem::path dir = std::filesystem::path(base) / L"CuadernU";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return dir.wstring();
+}
+
+std::wstring GetPersistentUndoPath(const StudioAppState* st) {
+    std::filesystem::path dir = std::filesystem::path(GetCuadernUDataDir()) / L"history";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    std::string uuid = st ? st->doc.DocumentUuid() : "default";
+    for (char& ch : uuid) {
+        if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '-' && ch != '_') ch = '_';
+    }
+    return (dir / (Utf8ToWide(uuid) + L".undo.json")).wstring();
+}
+
+void SavePersistentUndoAndTruncateWal(StudioAppState* st) {
+    if (!st) return;
+    if (!st->currentDocPath.empty()) {
+        CudocWal::Truncate(st->currentDocPath + L"-wal");
+    }
+    st->cmdStack.SaveSessionHistoryToFile(GetPersistentUndoPath(st), st->doc);
+}
+
+void TryLoadPersistentUndo(StudioAppState* st) {
+    if (!st) return;
+    if (st->cmdStack.LoadSessionHistoryFromFile(GetPersistentUndoPath(st), st->doc)) {
+        st->statusBannerUtf8 += " (historial Undo restaurado)";
+    }
+}
+
+void AppendWalMutation(StudioAppState* st, const std::string& opTag) {
+    if (!st || st->currentDocPath.empty()) return;
+    WalRecord rec{};
+    rec.opTag = opTag;
+    rec.payloadJson = "{\"rev\":" + std::to_string(st->doc.Revision()) + "}";
+    CudocWal::AppendRecord(st->currentDocPath + L"-wal", rec);
+}
+
+const char* PaperPatternLabelUtf8(PaperPattern pat) noexcept {
+    switch (pat) {
+    case PaperPattern::Plain:      return "Blanco";
+    case PaperPattern::Ruled:      return "Rayado";
+    case PaperPattern::Grid:       return "Cuadr\xC3\xAD" "cula";
+    case PaperPattern::Dots:       return "Puntos";
+    case PaperPattern::Millimeter: return "Milimetrado";
+    case PaperPattern::Isometric:  return "Isom\xC3\xA9trico 30\xC2\xB0";
+    case PaperPattern::LogLog:     return "Log-Log";
+    case PaperPattern::Polar:      return "Polar";
+    case PaperPattern::SmithChart: return "Carta de Smith";
+    case PaperPattern::Cornell:    return "Cornell";
+    case PaperPattern::MusicStaff: return "Pentagrama";
+    }
+    return "Blanco";
+}
+
+GuiDialogs::PromptFn MakePromptAdapter(StudioAppState* st) {
+    return [st](const std::wstring& title, const std::wstring& label, std::wstring& value, bool) -> bool {
+        return ShowTextPrompt(st->hwndMain, title.c_str(), label.c_str(), value);
+    };
+}
+
+void CommitInlineTextEdit(StudioAppState* st, bool save) {
+    if (!st || !st->hwndInlineEdit) return;
+    HWND hEdit = st->hwndInlineEdit;
+    const std::uint64_t objId = st->inlineEditObjId;
+    const ObjectTarget tgt = st->inlineEditTarget;
+    st->hwndInlineEdit = nullptr;
+    st->inlineEditObjId = 0;
+
+    if (save && objId != 0) {
+        const int len = GetWindowTextLengthW(hEdit);
+        std::wstring buf(static_cast<std::size_t>((std::max)(0, len)) + 1u, L'\0');
+        GetWindowTextW(hEdit, buf.data(), static_cast<int>(buf.size()));
+        buf.resize(static_cast<std::size_t>((std::max)(0, len)));
+        if (AnnotationObject* obj = CanvasManip::FindObjectMut(st->doc, tgt, objId)) {
+            AnnotationObject before = *obj;
+            AnnotationObject after = *obj;
+            after.textUtf8 = WideToUtf8(buf);
+            if (after.textUtf8 != before.textUtf8) {
+                st->cmdStack.Execute(st->doc, std::make_unique<ModifyObjectCommand>(tgt, std::move(before), std::move(after)));
+                AppendWalMutation(st, "edit_textbox");
+                st->statusBannerUtf8 = "Texto actualizado";
+            }
+        }
+    }
+    if (IsWindow(hEdit)) DestroyWindow(hEdit);
+    UpdateWindowTitle(st);
+    InvalidateViews(st);
+}
+
+void BeginInlineTextEdit(StudioAppState* st, ObjectTarget tgt, const AnnotationObject& obj) {
+    if (!st || !st->hwndViewport) return;
+    CommitInlineTextEdit(st, true);
+    double ox = 0.0, oy = 0.0;
+    if (!tgt.isCanvas) {
+        if (const auto* pl = st->doc.Layout().PlacementAt(tgt.pageIndex)) {
+            const DocRect wr = pl->WorldRect();
+            ox = wr.x; oy = wr.y;
+        }
+    }
+    const DocRect scr = st->camera.WorldRectToScreen({ ox + obj.bounds.x, oy + obj.bounds.y, obj.bounds.w, obj.bounds.h });
+    const int x = static_cast<int>(std::lround(scr.x));
+    const int y = static_cast<int>(std::lround(scr.y));
+    const int w = (std::max)(160, static_cast<int>(std::lround(scr.w)));
+    const int h = (std::max)(44, static_cast<int>(std::lround(scr.h)));
+
+    st->hwndInlineEdit = CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"EDIT", Utf8ToWide(obj.textUtf8).c_str(),
+        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
+        x, y, w, h, st->hwndViewport, reinterpret_cast<HMENU>(CMD_INLINE_EDIT_CTRL),
+        GetModuleHandleW(nullptr), nullptr);
+    if (st->hwndInlineEdit) {
+        st->inlineEditObjId = obj.id;
+        st->inlineEditTarget = tgt;
+        SendMessageW(st->hwndInlineEdit, WM_SETFONT, reinterpret_cast<WPARAM>(st->hUiFont), TRUE);
+        SetFocus(st->hwndInlineEdit);
+        SendMessageW(st->hwndInlineEdit, EM_SETSEL, 0, -1);
+    }
+}
+
+void SaveActiveTabSnapshot(StudioAppState* st) {
+    if (!st) return;
+    if (st->tabs.empty()) {
+        st->tabs.push_back({});
+        st->activeTabIdx = 0;
+    }
+    if (st->activeTabIdx >= st->tabs.size()) st->activeTabIdx = st->tabs.size() - 1;
+    auto& t = st->tabs[st->activeTabIdx];
+    t.path = st->currentDocPath;
+    t.cam = st->camera;
+    t.title = st->doc.Title();
+    t.serializedCudoc.clear();
+    CudocStorage::SerializeToBytes(st->doc, t.serializedCudoc);
+}
+
+void SwitchToDocTab(StudioAppState* st, std::size_t newIdx) {
+    if (!st || st->tabs.empty()) return;
+    SaveActiveTabSnapshot(st);
+    newIdx %= st->tabs.size();
+    st->activeTabIdx = newIdx;
+    auto& t = st->tabs[newIdx];
+    if (!t.serializedCudoc.empty()) {
+        DocumentModel loaded;
+        if (CudocStorage::DeserializeFromBytes(t.serializedCudoc.data(), t.serializedCudoc.size(), loaded)) {
+            st->doc = std::move(loaded);
+        }
+    }
+    st->currentDocPath = t.path;
+    st->camera = t.cam;
+    st->selectedObjectId = 0;
+    st->lassoSelectedIds.clear();
+    st->cmdStack.Clear();
+    st->pageCache.InvalidateAll(++st->asyncGen);
+    st->statusBannerUtf8 = "Pesta\xC3\xB1""a " + std::to_string(newIdx + 1) + "/" + std::to_string(st->tabs.size()) + ": " + st->doc.Title();
+    LayoutMainChildren(st);
+    UpdateWindowTitle(st);
+    InvalidateViews(st);
+}
+
+void AddNewDocTab(StudioAppState* st, bool quickNote) {
+    if (!st) return;
+    SaveActiveTabSnapshot(st);
+    StudioAppState::OpenDocTab nt{};
+    DocumentModel fresh;
+    fresh.ResetToBlank(quickNote ? DocumentMode::InfiniteCanvas : DocumentMode::PaginatedPdf);
+    if (quickNote) {
+        fresh.SetCanvasBackground(PaperPattern::Dots);
+        fresh.SetTitle("Nota R\xC3\xA1pida");
+    } else {
+        fresh.SetTitle("Cuaderno " + std::to_string(st->tabs.size() + 1));
+    }
+    CudocStorage::SerializeToBytes(fresh, nt.serializedCudoc);
+    nt.title = fresh.Title();
+    nt.cam.zoom = 1.0;
+    nt.cam.panX = -48.0;
+    nt.cam.panY = -48.0;
+    st->tabs.push_back(std::move(nt));
+    SwitchToDocTab(st, st->tabs.size() - 1);
+}
+
+void PollCasioIpcInbox(StudioAppState* st) {
+    if (!st) return;
+    std::filesystem::path inbox = std::filesystem::path(GetCuadernUDataDir()) / L"ipc_inbox";
+    std::error_code ec;
+    if (!std::filesystem::exists(inbox, ec)) return;
+    bool anyAdded = false;
+    for (const auto& ent : std::filesystem::directory_iterator(inbox, ec)) {
+        if (!ent.is_regular_file()) continue;
+        if (ent.path().extension() != L".json") continue;
+        std::ifstream ifs(ent.path(), std::ios::binary);
+        if (!ifs.is_open()) continue;
+        std::string raw((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        ifs.close();
+        try {
+            auto j = nlohmann::json::parse(raw);
+            CalcBridge::CalcStepRecord rec{};
+            rec.modelIdUtf8 = j.value("model", "fx-991CW");
+            rec.keySeqUtf8 = j.value("keySeq", "[CALC]");
+            rec.expressionUtf8 = j.value("expression", "");
+            if (!rec.expressionUtf8.empty() || !rec.keySeqUtf8.empty()) {
+                double x = 80.0, y = 80.0;
+                NextCardPlacement(st, x, y);
+                const ObjectTarget tgt = CurrentTarget(st);
+                const auto newId = AppActions::AddCalcCardAction(st->doc, st->cmdStack, tgt, x, y, rec, st->statusBannerUtf8);
+                if (newId != 0) {
+                    st->selectedObjectId = newId;
+                    st->selectedIsCanvas = tgt.isCanvas;
+                    st->selectedPageIndex = tgt.pageIndex;
+                    st->statusBannerUtf8 = "Tarjeta CASIO recibida en vivo (" + rec.modelIdUtf8 + ")";
+                    anyAdded = true;
+                }
+            }
+        } catch (...) {}
+        std::filesystem::remove(ent.path(), ec);
+    }
+    if (anyAdded) {
+        UpdateWindowTitle(st);
+        InvalidateViews(st);
+    }
+}
+
 bool OpenDocumentFile(StudioAppState* st, const std::wstring& path, std::string* outErr = nullptr) {
     const std::wstring ext = GetFileExtLower(path);
     const std::string pathUtf8 = WideToUtf8(path);
 
-    if (ext == L".pdf") {
+    if (ext == L".goodnotes" || ext == L".note" || ext == L".one" || ext == L".onepkg" || ext == L".tinta") {
+        DocumentModel migrated;
+        Interop::MigrationResult migRes{};
+        if (!Interop::NotebookMigrationEngine::ImportAndMigrateFile(path, migrated, migRes)) {
+            if (outErr) *outErr = migRes.errorUtf8;
+            st->statusBannerUtf8 = "Error de migraci\xC3\xB3n: " + migRes.errorUtf8;
+            return false;
+        }
+        st->doc = std::move(migrated);
+        if (!migRes.primaryAudioWavBytes.empty()) {
+            st->audioSession.LoadFromWavBytes(migRes.primaryAudioWavBytes.data(), migRes.primaryAudioWavBytes.size());
+        }
+        st->cmdStack.Clear();
+        st->pageCache.InvalidateAll(++st->asyncGen);
+        st->currentDocPath.clear();
+        CenterCameraOnPage(st, 0);
+        st->statusBannerUtf8 = "Migrado desde " + migRes.report.formatLabelUtf8 + " (" +
+            std::to_string(migRes.report.pageCount) + " p\xC3\xA1g., " +
+            std::to_string(migRes.report.editableStrokeCount) + " trazos editables)";
+    } else if (ext == L".pdf") {
         PdfDocument pdf;
         std::string err;
         if (!pdf.LoadFromFile(path, &err)) {
@@ -1143,7 +1518,16 @@ bool OpenDocumentFile(StudioAppState* st, const std::wstring& path, std::string*
     } else if (ext == L".cudoc") {
         bool usedBak = false;
         std::string err;
-        if (!CudocStorage::LoadFromFileWithRecovery(path, st->doc, &usedBak, &err)) {
+        std::size_t replayed = 0;
+        const std::wstring walPath = path + L"-wal";
+        bool loadedOk = false;
+        if (std::filesystem::exists(walPath)) {
+            loadedOk = CudocWal::RecoverDocument(path, walPath, st->doc, &replayed, &err);
+        }
+        if (!loadedOk) {
+            loadedOk = CudocStorage::LoadFromFileWithRecovery(path, st->doc, &usedBak, &err);
+        }
+        if (!loadedOk) {
             if (outErr) *outErr = err;
             st->statusBannerUtf8 = "Error .cudoc: " + err;
             return false;
@@ -1152,7 +1536,10 @@ bool OpenDocumentFile(StudioAppState* st, const std::wstring& path, std::string*
         st->pageCache.InvalidateAll(++st->asyncGen);
         st->currentDocPath = path;
         CenterCameraOnPage(st, 0);
-        st->statusBannerUtf8 = usedBak ? "Recuperado desde respaldo .bak" : ".cudoc cargado";
+        st->statusBannerUtf8 = (replayed > 0)
+            ? ("Recuperado con WAL (" + std::to_string(replayed) + " deltas)")
+            : (usedBak ? "Recuperado desde respaldo .bak" : ".cudoc cargado");
+        TryLoadPersistentUndo(st);
     } else if (ext == L".docx") {
         std::string err;
         if (!OpenXmlInterop::ImportFromDocxFile(path, st->doc, &err)) {
@@ -1177,7 +1564,8 @@ bool OpenDocumentFile(StudioAppState* st, const std::wstring& path, std::string*
         st->currentDocPath.clear();
         CenterCameraOnPage(st, 0);
         st->statusBannerUtf8 = "PowerPoint .pptx importado";
-    } else if (ext == L".png" || ext == L".jpg" || ext == L".jpeg" || ext == L".bmp") {
+    } else if (ext == L".png" || ext == L".jpg" || ext == L".jpeg" || ext == L".bmp" ||
+               ext == L".tif" || ext == L".tiff" || ext == L".webp" || ext == L".svg" || ext == L".gif") {
         HANDLE hf = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hf == INVALID_HANDLE_VALUE) return false;
         LARGE_INTEGER li{};
@@ -1188,16 +1576,32 @@ bool OpenDocumentFile(StudioAppState* st, const std::wstring& path, std::string*
         CloseHandle(hf);
         bytes.resize(rd);
 
+        ImageProc::RgbaImage dec{};
+        std::vector<std::uint8_t> pngOut;
+        int pxW = 480, pxH = 320;
+        if (ImageProc::DecodeImageBytesWic(bytes.data(), bytes.size(), dec) && dec.Valid()) {
+            pxW = dec.width;
+            pxH = dec.height;
+            if (!ImageProc::EncodeRgbaToPngWic(dec, pngOut)) pngOut = std::move(bytes);
+        } else {
+            pngOut = std::move(bytes);
+        }
+
         AnnotationObject img;
         img.kind = ObjectKind::Image;
-        img.pngBytes = std::move(bytes);
-        img.bounds = { 48.0, 48.0, 480.0, 320.0 };
+        img.layerId = st->doc.ActiveLayerId();
+        img.pngBytes = std::move(pngOut);
+        img.imagePixelW = pxW;
+        img.imagePixelH = pxH;
+        const double dispW = std::clamp(static_cast<double>(pxW) * 0.65, 120.0, 480.0);
+        const double dispH = dispW * (static_cast<double>(pxH) / (std::max)(1, pxW));
+        img.bounds = { 48.0, 48.0, dispW, dispH };
         if (st->doc.Mode() == DocumentMode::InfiniteCanvas) {
             st->cmdStack.Execute(st->doc, std::make_unique<AddObjectCommand>(ObjectTarget{ true, 0 }, std::move(img)));
         } else {
             st->cmdStack.Execute(st->doc, std::make_unique<AddObjectCommand>(ObjectTarget{ false, st->activePageIndex }, std::move(img)));
         }
-        st->statusBannerUtf8 = "Imagen insertada en estudio";
+        st->statusBannerUtf8 = "Imagen insertada (" + std::to_string(pxW) + "x" + std::to_string(pxH) + ")";
     } else {
         if (outErr) *outErr = "Extensi\xC3\xB3n de archivo no soportada.";
         return false;
@@ -1214,12 +1618,14 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
     switch (id) {
     case CMD_OPEN: {
         static constexpr COMDLG_FILTERSPEC kFilters[] = {
-            { L"Documentos compatibles (*.pdf;*.cudoc;*.docx;*.pptx;*.png)", L"*.pdf;*.cudoc;*.docx;*.pptx;*.png;*.jpg" },
-            { L"Documentos PDF (*.pdf)", L"*.pdf" },
-            { L"Document Studio (*.cudoc)", L"*.cudoc" }
+            { L"Todos compatibles (*.cudoc;*.pdf;*.goodnotes;*.note;*.one;*.onepkg;*.tinta;*.docx;*.pptx;*.png;*.svg)",
+              L"*.cudoc;*.pdf;*.goodnotes;*.note;*.one;*.onepkg;*.tinta;*.docx;*.pptx;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp;*.svg" },
+            { L"Cuadernos CuadernU (*.cudoc;*.tinta)", L"*.cudoc;*.tinta" },
+            { L"Goodnotes / Notability / OneNote (*.goodnotes;*.note;*.one;*.onepkg)", L"*.goodnotes;*.note;*.one;*.onepkg" },
+            { L"Documentos PDF / Office (*.pdf;*.docx;*.pptx)", L"*.pdf;*.docx;*.pptx" }
         };
         std::vector<std::wstring> paths;
-        if (ShowOpenDialog(st->hwndMain, L"Abrir documento", kFilters, 3, paths, false)) {
+        if (ShowOpenDialog(st->hwndMain, L"Abrir en CuadernU", kFilters, 4, paths, false)) {
             std::string err;
             if (!OpenDocumentFile(st, paths[0], &err)) {
                 MessageBoxW(st->hwndMain, Utf8ToWide(err).c_str(), L"Error al abrir", MB_ICONERROR);
@@ -1230,14 +1636,15 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
     case CMD_SAVE_CUDOC: {
         std::wstring savePath = st->currentDocPath;
         if (savePath.empty()) {
-            static constexpr COMDLG_FILTERSPEC kFilters[] = { { L"Document Studio (*.cudoc)", L"*.cudoc" } };
-            if (!ShowSaveDialog(st->hwndMain, L"Guardar proyecto .cudoc", kFilters, 1, L"cudoc", L"documento.cudoc", savePath)) break;
+            static constexpr COMDLG_FILTERSPEC kFilters[] = { { L"Cuaderno CuadernU (*.cudoc)", L"*.cudoc" } };
+            if (!ShowSaveDialog(st->hwndMain, L"Guardar cuaderno CuadernU (.cudoc)", kFilters, 1, L"cudoc", L"cuaderno.cudoc", savePath)) break;
         }
         std::string err;
         if (CudocStorage::SaveToFile(savePath, st->doc, &err)) {
             st->currentDocPath = savePath;
             st->cmdStack.MarkClean(st->doc);
-            st->statusBannerUtf8 = "Guardado at\xC3\xB3micamente (.cudoc + .bak)";
+            SavePersistentUndoAndTruncateWal(st);
+            st->statusBannerUtf8 = "Guardado at\xC3\xB3micamente (.cudoc + .bak + historial)";
             UpdateWindowTitle(st);
         } else {
             MessageBoxW(st->hwndMain, Utf8ToWide(err).c_str(), L"Error al guardar", MB_ICONERROR);
@@ -1443,7 +1850,7 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
 
         DOCINFOW di{};
         di.cbSize = sizeof(di);
-        di.lpszDocName = L"Document Studio";
+        di.lpszDocName = L"CuadernU";
         if (StartDocW(pd.hDC, &di) > 0) {
             const int dpiW = GetDeviceCaps(pd.hDC, HORZRES);
             const int dpiH = GetDeviceCaps(pd.hDC, VERTRES);
@@ -1508,21 +1915,28 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
     case CMD_STEM_MENU: {
         HMENU menu = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING, CMD_ADD_FORMULA,           L"Insertar F\u00F3rmula #varsub / Unidades...");
-        AppendMenuW(menu, MF_STRING, CMD_CYCLE_MATH_SUBMODE,    L"Alternar Modo Calcpad (#varsub / #nosub / #novar)");
+        AppendMenuW(menu, MF_STRING, CMD_ADV_MATH,              L"Laboratorio Matem\u00E1tico Avanzado (Eigen / EDO / C\u00E1lculo)...");
+        AppendMenuW(menu, MF_STRING, CMD_ADD_TABLE,             L"Insertar Tabla Reactiva (CSV con F\u00F3rmulas)...");
+        AppendMenuW(menu, MF_STRING, CMD_ADD_CODE_BLOCK,        L"Insertar Bloque de C\u00F3digo / MCU...");
+        AppendMenuW(menu, MF_STRING, CMD_CYCLE_MATH_SUBMODE,    L"Alternar Modo de Sustituci\u00F3n (#varsub / #nosub / #novar)");
         AppendMenuW(menu, MF_STRING, CMD_PARAM_SLIDER,          L"Slider de Par\u00E1metro Reactivo...");
         AppendMenuW(menu, MF_STRING, CMD_CHECK_STEP,            L"Verificar Paso Algebraico...");
         AppendMenuW(menu, MF_STRING, CMD_ADD_MATRIX_SEL,        L"Matriz / Sistema de Ecuaciones Lineales (SEL)...");
         AppendMenuW(menu, MF_STRING, CMD_OCR_CONFIRM_FORMULA,   L"OCR -> F\u00F3rmula con Tarjeta de Confirmaci\u00F3n...");
+        AppendMenuW(menu, MF_STRING, CMD_FORMULA_AST_SEARCH,    L"B\u00FAsqueda Sem\u00E1ntica de F\u00F3rmulas (AST)...");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, CMD_ADD_CIRCUIT,           L"Resolver Circuito MNA (DC / AC / Diodos)...");
+        AppendMenuW(menu, MF_STRING, CMD_RECOGNIZE_CIRCUIT,     L"Reconocer Circuito a Mano Alzada...");
+        AppendMenuW(menu, MF_STRING, CMD_ENG_TOOLBOX,           L"Caja de Herramientas de Ingenier\u00ED""a (RC / Op-Amp / SMD)...");
         AppendMenuW(menu, MF_STRING, CMD_ADD_TRANSIENT_LAPLACE, L"Simulaci\u00F3n Transitoria Osciloscopio + Laplace (s)...");
         AppendMenuW(menu, MF_STRING, CMD_ADD_KMAP,              L"Simplificar Mapa de Karnaugh...");
         AppendMenuW(menu, MF_STRING, CMD_ADD_PLOT,              L"Gr\u00E1fico 2D / Regresi\u00F3n CSV...");
-        AppendMenuW(menu, MF_STRING, CMD_ADD_PLOT_3D,           L"Superficie 3D z = f(x,y) [Paleta CVD Accesible]...");
+        AppendMenuW(menu, MF_STRING, CMD_ADD_PLOT_3D,           L"Superficie 3D z = f(x,y) [Rotable con Rat\u00F3n]...");
         AppendMenuW(menu, MF_STRING, CMD_ADD_PHASOR_DIAG,       L"Diagrama Fasorial Vectorial (Rect / Polar / Exp)...");
         AppendMenuW(menu, MF_STRING, CMD_ADD_BODE_PLOT,         L"Diagrama de Bode Semilogar\u00EDtmico |H(jw)| dB...");
         AppendMenuW(menu, MF_STRING, CMD_ADD_CALC_CARD,         L"Insertar Tarjeta CASIO Interactiva...");
         AppendMenuW(menu, MF_STRING, CMD_CASIO_REVERSE_KEYS,    L"Traducir Ecuaci\u00F3n/Matriz/Fasor -> Teclas CASIO...");
+        AppendMenuW(menu, MF_STRING, CMD_COMPARE_4_CASIO,       L"Comparador de 4 Modelos CASIO...");
         AppendMenuW(menu, MF_STRING, CMD_VAR_INSPECTOR,         L"Inspector de Variables y Dimensiones F\u00EDsicas...");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, CMD_EXPORT_CIRCUIT,        L"Exportar Circuito (SVG / DXF / KiCad)...");
@@ -1542,30 +1956,41 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
     }
     case CMD_STUDY_MENU: {
         HMENU menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING, CMD_LAYER_ADD,           L"Capas: Nueva capa...");
-        AppendMenuW(menu, MF_STRING, CMD_LAYER_NEXT,          L"Capas: Cambiar capa activa");
-        AppendMenuW(menu, MF_STRING, CMD_LAYER_TOGGLE_VIS,    L"Capas: Mostrar / Ocultar capa activa");
-        AppendMenuW(menu, MF_STRING, CMD_LAYER_TOGGLE_LOCK,   L"Capas: Bloquear / Desbloquear capa activa");
-        AppendMenuW(menu, MF_STRING, CMD_TEACHER_PRIVATE_LAYER, L"Capas: Crear Capa Privada Docente (Oculta en Proyecci\u00F3n/PDF)");
+        AppendMenuW(menu, MF_STRING, CMD_CHECK_MY_WORK,       L"Revisar mi Procedimiento (Check My Work)...");
+        AppendMenuW(menu, MF_STRING, CMD_TEACH_ME,            L"Gu\u00ED""a Socr\u00E1tica Paso a Paso (Teach Me)...");
+        AppendMenuW(menu, MF_STRING, CMD_SUMMARIZE_NOTES,     L"Generar Resumen No Destructivo (Capa Separada)");
+        AppendMenuW(menu, MF_STRING, CMD_LOCAL_QA,            L"Consulta Local con Citas sobre Apuntes...");
+        AppendMenuW(menu, MF_STRING, CMD_STUDY_DECK,          L"Repasar Flashcards (SM-2)...");
+        AppendMenuW(menu, MF_STRING, CMD_FTS_SEARCH,          L"Buscar en \u00CDndice Unicode (FTS Vault)...");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, CMD_TOGGLE_MINIMAP,      L"Minimapa de Lienzo Infinito (Mostrar / Ocultar)");
-        AppendMenuW(menu, MF_STRING, CMD_TOGGLE_RULER,        L"Regla Graduada 0\u00B0-360\u00B0 (Mostrar / Rotar +15\u00B0 / Ocultar)");
-        AppendMenuW(menu, MF_STRING, CMD_CYCLE_ERASER_FILTER, L"Borrador Selectivo: Todo / Solo Resaltador / Solo Tinta");
-        AppendMenuW(menu, MF_STRING, CMD_CLEAR_HIGHLIGHTS,    L"Limpiar Todos los Resaltados de la Vista");
-        AppendMenuW(menu, MF_STRING, CMD_TAG_OBJECT_BOARD,    L"Etiquetar Objeto (#examen / #duda) y Ver Tablero...");
+        HMENU hAudioSub = CreatePopupMenu();
+        AppendMenuW(hAudioSub, MF_STRING, CMD_AUDIO_REC,          st->audioSession.IsContinuousRecording() ? L"Detener Grabaci\u00F3n Continua (Mic)" : L"Grabar Audio Continuo en Segundo Plano (Mic)");
+        AppendMenuW(hAudioSub, MF_STRING, CMD_REPLAY_TOGGLE,      st->replayActive ? L"Detener Ink Replay + Audio" : L"Reproducir Ink Replay + Altavoces");
+        AppendMenuW(hAudioSub, MF_STRING, CMD_AUDIO_BOOKMARK,     L"Insertar Marcador en L\u00EDnea de Audio...");
+        AppendMenuW(hAudioSub, MF_STRING, CMD_AUDIO_IMPORT,       L"Importar Archivo de Audio (.wav)...");
+        AppendMenuW(hAudioSub, MF_STRING, CMD_AUDIO_TRANSCRIBE,   L"Transcribir / Etiquetar Segmentos de Audio");
+        AppendMenuW(hAudioSub, MF_STRING, CMD_AUDIO_EXPORT_HTML5, L"Exportar Tutorial Sincronizado HTML5...");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(hAudioSub), L"Audio Sincronizado e Ink Replay");
+        HMENU hLayerSub = CreatePopupMenu();
+        AppendMenuW(hLayerSub, MF_STRING, CMD_LAYER_ADD,             L"Nueva capa...");
+        AppendMenuW(hLayerSub, MF_STRING, CMD_LAYER_NEXT,            L"Cambiar capa activa");
+        AppendMenuW(hLayerSub, MF_STRING, CMD_LAYER_TOGGLE_VIS,      L"Mostrar / Ocultar capa activa");
+        AppendMenuW(hLayerSub, MF_STRING, CMD_LAYER_TOGGLE_LOCK,     L"Bloquear / Desbloquear capa activa");
+        AppendMenuW(hLayerSub, MF_STRING, CMD_TEACHER_PRIVATE_LAYER, L"Crear Capa Privada Docente (Oculta en Proyecci\u00F3n/PDF)");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(hLayerSub), L"Capas del Documento");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, CMD_ADD_TAPE,            L"Insertar Study Tape (Ocultar/Revelar)...");
         AppendMenuW(menu, MF_STRING, CMD_ANCHOR_INK,          L"Anclar tinta seleccionada a objeto");
         AppendMenuW(menu, MF_STRING, CMD_ADD_INKLINK,         L"Vincular p\u00E1gina PDF \u2194 Lienzo (InkLink)");
         AppendMenuW(menu, MF_STRING, CMD_TOGGLE_COLLAPSE,     L"Colapsar / Expandir rango PDF actual");
+        AppendMenuW(menu, MF_STRING, CMD_TAG_OBJECT_BOARD,    L"Etiquetar Objeto (#examen / #duda) y Ver Tablero...");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, CMD_STUDY_DECK,          L"Repasar Flashcards (SM-2)...");
-        AppendMenuW(menu, MF_STRING, CMD_FTS_SEARCH,          L"Buscar en \u00CDndice Unicode (FTS Vault)...");
-        AppendMenuW(menu, MF_STRING, CMD_REPLAY_TOGGLE,       L"Ink Replay + L\u00EDnea Temporal (Play/Stop)");
-        AppendMenuW(menu, MF_STRING, CMD_AUDIO_REC,           L"Grabar / Exportar Audio WAV (16-bit PCM)...");
-        AppendMenuW(menu, MF_STRING, CMD_TOGGLE_STAB,         L"Estabilizaci\u00F3n de Tinta (Bajo/Medio/Alto)");
+        AppendMenuW(menu, MF_STRING, CMD_OPEN_PROJECTOR,      L"Abrir Ventana de Proyector (Segundo Monitor)");
+        AppendMenuW(menu, MF_STRING, CMD_FREEZE_PROJECTOR,    st->projectorWnd.IsFrozen() ? L"Descongelar Proyector" : L"Congelar Proyector");
         AppendMenuW(menu, MF_STRING, CMD_PRESENTER_MODE,      L"Modo Presentador + Puntero L\u00E1ser");
-        AppendMenuW(menu, MF_STRING, CMD_FOCUS_MODE,          L"Modo Concentraci\u00F3n (Foco Sin Distracciones)");
+        AppendMenuW(menu, MF_STRING, CMD_LAN_QR,              L"Difusi\u00F3n LAN Local con C\u00F3digo QR...");
+        AppendMenuW(menu, MF_STRING, CMD_EXAM_PIN_LOCK,       st->examModeLocked ? L"Desbloquear Modo Examen (PIN)..." : L"Activar Modo Examen con PIN...");
+        AppendMenuW(menu, MF_STRING, CMD_FOCUS_MODE,          L"Modo Concentraci\u00F3n (Sin Distracciones)");
         POINT pt{ 670, 34 };
         for (std::size_t i = 0; i < st->buttons.size() && i < st->buttonRects.size(); ++i) {
             if (st->buttons[i].id == CMD_STUDY_MENU) {
@@ -1580,11 +2005,10 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         break;
     }
     case CMD_INSERT_IMAGE: {
-        static constexpr COMDLG_FILTERSPEC kFilters[] = { { L"Im\u00E1genes (*.png;*.jpg;*.bmp)", L"*.png;*.jpg;*.jpeg;*.bmp" } };
-        std::vector<std::wstring> paths;
-        if (ShowOpenDialog(st->hwndMain, L"Insertar imagen", kFilters, 1, paths, false)) {
-            OpenDocumentFile(st, paths[0]);
-        }
+        double x = 80.0, y = 80.0;
+        NextCardPlacement(st, x, y);
+        GuiDialogs::RunMultiFormatImageImport(st->hwndMain, st->doc, st->cmdStack, CurrentTarget(st), x, y, st->statusBannerUtf8);
+        AppendWalMutation(st, "add_image");
         break;
     }
     case CMD_COL_BLACK:  st->penColor = DocColor::RGBA(17, 24, 39, 255); break;
@@ -1596,9 +2020,10 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         const PaperPattern cur = (st->doc.Mode() == DocumentMode::InfiniteCanvas)
             ? st->doc.CanvasBackground()
             : (st->doc.Pages().empty() ? PaperPattern::Plain : st->doc.Pages()[st->activePageIndex].background);
-        const PaperPattern next = static_cast<PaperPattern>((static_cast<int>(cur) + 1) % 5);
+        const PaperPattern next = static_cast<PaperPattern>((static_cast<int>(cur) + 1) % 11);
         st->cmdStack.Execute(st->doc, std::make_unique<SetBackgroundCommand>(
             ObjectTarget{ st->doc.Mode() == DocumentMode::InfiniteCanvas, st->activePageIndex }, next));
+        st->statusBannerUtf8 = std::string("Plantilla de papel: ") + PaperPatternLabelUtf8(next);
         break;
     }
     case CMD_ADD_PAGE: {
@@ -1976,8 +2401,8 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         if (st->replayActive) {
             st->replayActive = false;
             KillTimer(st->hwndMain, 701);
-            st->audioSession.SetPlaying(false);
-            st->statusBannerUtf8 = "Ink Replay detenido";
+            st->audioSession.StopAudioPlayback();
+            st->statusBannerUtf8 = "Ink Replay + Audio detenido";
         } else {
             const auto range = InkEngine::ComputeReplayTimelineRange(st->doc, CurrentTarget(st));
             const std::uint64_t audioDur = st->audioSession.DurationMs();
@@ -1986,25 +2411,49 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
             st->replayCursorMs = range.first;
             st->replayActive = true;
             st->audioSession.SeekMs(st->replayCursorMs);
-            st->audioSession.SetPlaying(true);
+            if (audioDur > 0) {
+                std::string playErr;
+                st->audioSession.StartAudioPlayback(st->replayCursorMs, &playErr);
+            } else {
+                st->audioSession.SetPlaying(true);
+            }
             SetTimer(st->hwndMain, 701, 45, nullptr);
             st->statusBannerUtf8 = "Ink Replay reproduciendo (0 / " + std::to_string(st->replayMaxMs) + " ms)";
         }
         break;
     }
     case CMD_AUDIO_REC: {
-        if (!st->audioSession.IsRecording()) {
-        const auto micRep = st->audioSession.CaptureFromMicrophone(1200, 16000, false);
-        std::vector<std::uint8_t> wav;
-        if (st->audioSession.ExportWavBytes(wav)) {
-            static constexpr COMDLG_FILTERSPEC kWavFilter[] = { { L"Audio PCM WAV (*.wav)", L"*.wav" } };
-            std::wstring outWav;
-            if (ShowSaveDialog(st->hwndMain, L"Guardar Nota de Audio WAV (16-bit PCM)", kWavFilter, 1, L"wav", L"nota_estudio.wav", outWav)) {
-                std::ofstream ofs(std::filesystem::path(outWav), std::ios::binary | std::ios::trunc);
-                if (ofs) ofs.write(reinterpret_cast<const char*>(wav.data()), static_cast<std::streamsize>(wav.size()));
+        if (st->audioSession.IsContinuousRecording()) {
+            const auto rep = st->audioSession.StopContinuousMicRecording();
+            std::vector<std::uint8_t> wav;
+            if (st->audioSession.ExportWavBytes(wav) && !wav.empty()) {
+                // Embed playable AudioClip widget on current canvas/page
+                double x = 80.0, y = 80.0;
+                NextCardPlacement(st, x, y);
+                AnnotationObject clip{};
+                clip.kind = ObjectKind::AudioClip;
+                clip.layerId = st->doc.ActiveLayerId();
+                clip.bounds = { x, y, 270.0, 56.0 };
+                clip.captionUtf8 = "Audio (" + std::to_string(st->audioSession.DurationMs() / 1000) + " s)";
+                clip.textUtf8 = rep.statusNoteUtf8;
+                clip.inkStartTimeMs = 0;
+                clip.inkEndTimeMs = st->audioSession.DurationMs();
+                clip.assetKey = st->doc.RegisterAsset(wav);
+                st->cmdStack.Execute(st->doc, std::make_unique<AddObjectCommand>(CurrentTarget(st), std::move(clip)));
+                st->statusBannerUtf8 = rep.statusNoteUtf8 + " — clic en tarjeta o Replay para reproducir";
+            } else {
+                st->statusBannerUtf8 = rep.statusNoteUtf8;
             }
-            st->statusBannerUtf8 = micRep.statusNoteUtf8 + " (" + std::to_string(st->audioSession.DurationMs()) + " ms)";
-        }
+        } else {
+            st->strokeOriginEpochMs = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            std::string recErr;
+            if (st->audioSession.StartContinuousMicRecording(16000, &recErr)) {
+                st->statusBannerUtf8 = "Grabando audio continuo (Win32 waveIn) — escribe mientras hablas; pulsa de nuevo para detener";
+            } else {
+                st->statusBannerUtf8 = "No se pudo iniciar micr\xC3\xB3" "fono: " + recErr;
+            }
         }
         break;
     }
@@ -2258,22 +2707,42 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         break;
     case CMD_FILE_MENU: {
         HMENU hm = CreatePopupMenu();
-        AppendMenuW(hm, MF_STRING, CMD_OPEN,         L"Abrir documento... (Ctrl+O)");
-        AppendMenuW(hm, MF_STRING, CMD_SAVE_CUDOC,   L"Guardar proyecto .cudoc (Ctrl+S)");
-        AppendMenuW(hm, MF_STRING, CMD_EXPORT_PDF,   L"Exportar PDF...");
+        AppendMenuW(hm, MF_STRING, CMD_OPEN,                 L"Abrir documento... (Ctrl+O)");
+        AppendMenuW(hm, MF_STRING, CMD_MIGRATE_NOTEBOOK,     L"Importar / Migrar Cuaderno (Goodnotes / Notability / OneNote / Office / .tinta)...");
+        AppendMenuW(hm, MF_STRING, CMD_OPEN_VAULT_LIBRARY,   L"Biblioteca de Cuadernos y B\u00FAsqueda Global...");
+        AppendMenuW(hm, MF_STRING, CMD_SAVE_CUDOC,           L"Guardar cuaderno .cudoc (Ctrl+S)");
+        AppendMenuW(hm, MF_STRING, CMD_EXPORT_PDF,           L"Exportar PDF...");
         AppendMenuW(hm, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hm, MF_STRING, CMD_MERGE_PDF,    L"Combinar PDFs...");
-        AppendMenuW(hm, MF_STRING, CMD_SPLIT_PDF,    L"Dividir / Extraer p\u00E1ginas...");
-        AppendMenuW(hm, MF_STRING, CMD_SIGN_PDF,     L"Firmar PDF (PKCS#7)...");
-        AppendMenuW(hm, MF_STRING, CMD_VERIFY_SIG,   L"Verificar firma digital...");
+        HMENU hTabSub = CreatePopupMenu();
+        AppendMenuW(hTabSub, MF_STRING, CMD_NEW_TAB,          L"Nueva pesta\u00F1""a de cuaderno (Ctrl+T)");
+        AppendMenuW(hTabSub, MF_STRING, CMD_QUICK_NOTE,       L"Nota r\u00E1pida instant\u00E1nea (Ctrl+Shift+N)");
+        AppendMenuW(hTabSub, MF_STRING, CMD_NEXT_TAB,         L"Cambiar a siguiente pesta\u00F1""a (Ctrl+Tab)");
+        AppendMenuW(hTabSub, MF_STRING, CMD_TOGGLE_SPLIT_VIEW, st->splitViewActive ? L"Cerrar Vista Dividida" : L"Vista Dividida Lado a Lado");
+        AppendMenuW(hTabSub, MF_STRING, CMD_TOGGLE_SPREAD,    st->doc.DoublePageSpread() ? L"Vista de P\u00E1gina \u00DAnica" : L"Vista Doble P\u00E1gina (Libro)");
+        AppendMenuW(hm, MF_POPUP, reinterpret_cast<UINT_PTR>(hTabSub), L"Pesta\u00F1""as y Vista");
+        HMENU hPdfSub = CreatePopupMenu();
+        AppendMenuW(hPdfSub, MF_STRING, CMD_MERGE_PDF,            L"Combinar PDFs...");
+        AppendMenuW(hPdfSub, MF_STRING, CMD_SPLIT_PDF,            L"Dividir / Extraer p\u00E1ginas...");
+        AppendMenuW(hPdfSub, MF_STRING, CMD_IMPORT_PDF_TO_CANVAS, L"Importar p\u00E1ginas de PDF al Lienzo...");
+        AppendMenuW(hPdfSub, MF_STRING, CMD_VIEW_ATTACHMENTS,     L"Ver adjuntos incrustados en PDF...");
+        AppendMenuW(hPdfSub, MF_STRING, CMD_SIGN_PDF,             L"Firmar PDF (PKCS#7)...");
+        AppendMenuW(hPdfSub, MF_STRING, CMD_VERIFY_SIG,           L"Verificar firma digital...");
+        AppendMenuW(hPdfSub, MF_STRING, CMD_RUN_OCR,              L"Reconocer texto (OCR offline)");
+        AppendMenuW(hm, MF_POPUP, reinterpret_cast<UINT_PTR>(hPdfSub), L"Herramientas PDF");
+        HMENU hOffSub = CreatePopupMenu();
+        AppendMenuW(hOffSub, MF_STRING, CMD_EXPORT_DOCX, L"Exportar Word (.docx)...");
+        AppendMenuW(hOffSub, MF_STRING, CMD_EXPORT_PPTX, L"Exportar PowerPoint (.pptx)...");
+        AppendMenuW(hOffSub, MF_STRING, CMD_IMPORT_DOCX, L"Importar Word (.docx)...");
+        AppendMenuW(hOffSub, MF_STRING, CMD_IMPORT_PPTX, L"Importar PowerPoint (.pptx)...");
+        AppendMenuW(hm, MF_POPUP, reinterpret_cast<UINT_PTR>(hOffSub), L"Office (.docx / .pptx)");
+        HMENU hSecSub = CreatePopupMenu();
+        AppendMenuW(hSecSub, MF_STRING, CMD_SAVE_ENCRYPTED,   L"Guardar Cuaderno Cifrado (AES-256-GCM)...");
+        AppendMenuW(hSecSub, MF_STRING, CMD_OPEN_ENCRYPTED,   L"Abrir Cuaderno Cifrado...");
+        AppendMenuW(hSecSub, MF_STRING, CMD_VERSION_HISTORY,  L"Guardar / Ver Historial de Versiones...");
+        AppendMenuW(hSecSub, MF_STRING, CMD_CONFLICT_MERGE,   L"Fusionar Cuaderno Concurrente sin P\u00E9rdida...");
+        AppendMenuW(hm, MF_POPUP, reinterpret_cast<UINT_PTR>(hSecSub), L"Versiones y Cifrado");
         AppendMenuW(hm, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hm, MF_STRING, CMD_RUN_OCR,      L"Reconocer texto (OCR)");
-        AppendMenuW(hm, MF_STRING, CMD_EXPORT_DOCX,  L"Exportar Word (.docx)...");
-        AppendMenuW(hm, MF_STRING, CMD_EXPORT_PPTX,  L"Exportar PowerPoint (.pptx)...");
-        AppendMenuW(hm, MF_STRING, CMD_IMPORT_DOCX,  L"Importar Word (.docx)...");
-        AppendMenuW(hm, MF_STRING, CMD_IMPORT_PPTX,  L"Importar PowerPoint (.pptx)...");
-        AppendMenuW(hm, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(hm, MF_STRING, CMD_INSERT_IMAGE, L"Insertar imagen...");
+        AppendMenuW(hm, MF_STRING, CMD_INSERT_IMAGE, L"Insertar imagen (PNG/JPG/SVG/WEBP/TIFF)...");
         AppendMenuW(hm, MF_STRING, CMD_PRINT,        L"Imprimir (Ctrl+P)");
         POINT pt{ 54, kTopChromeH };
         ClientToScreen(st->hwndMain, &pt);
@@ -2312,6 +2781,58 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         break;
     case CMD_MORE_OVERFLOW: {
         HMENU hm = CreatePopupMenu();
+        HMENU hInkSub = CreatePopupMenu();
+        AppendMenuW(hInkSub, MF_STRING, CMD_CYCLE_PEN_STYLE,       L"Cambiar estilo de l\u00E1piz (Bol\u00EDgrafo / Pluma / L\u00E1piz / Pincel)");
+        AppendMenuW(hInkSub, MF_STRING, CMD_CUSTOM_INK_COLOR,      L"Color personalizado de tinta...");
+        AppendMenuW(hInkSub, MF_STRING, CMD_TOGGLE_PARTIAL_ERASER, st->eraserActionMode == EraserActionMode::PartialPixel ? L"Borrador: Cambiar a Trazo Completo" : L"Borrador: Cambiar a Precisi\u00F3n / P\u00EDxel");
+        AppendMenuW(hInkSub, MF_STRING, CMD_CYCLE_ERASER_FILTER,   L"Filtro de borrador (Todo / Solo Resaltador / Solo Tinta)");
+        AppendMenuW(hInkSub, MF_STRING, CMD_CLEAR_HIGHLIGHTS,      L"Limpiar todos los resaltados");
+        AppendMenuW(hInkSub, MF_STRING, CMD_TOGGLE_STAB,           L"Estabilizaci\u00F3n de trazo");
+        AppendMenuW(hInkSub, MF_STRING, CMD_TOGGLE_SNAP_GRID,      st->snapToGrid ? L"Desactivar ajuste a cuadr\u00EDcula" : L"Activar ajuste a cuadr\u00EDcula");
+        AppendMenuW(hInkSub, MF_STRING, CMD_CYCLE_GEOMETRY_TOOL,   L"Herramienta de geometr\u00ED""a (Regla / Transportador / Comp\u00E1s)");
+        AppendMenuW(hInkSub, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(hInkSub, MF_STRING, CMD_COPY_STROKE_STYLE,     L"Copiar estilo del trazo seleccionado");
+        AppendMenuW(hInkSub, MF_STRING, CMD_RESTYLE_INK,           L"Enderezar y estilizar tinta seleccionada");
+        AppendMenuW(hInkSub, MF_STRING, CMD_HTR_TO_TEXT,           L"Convertir escritura a texto editable (HTR)");
+        AppendMenuW(hInkSub, MF_STRING, CMD_HTR_TO_MATH,           L"Convertir escritura a ecuaci\u00F3n 2D (HTR)");
+        AppendMenuW(hm, MF_POPUP, reinterpret_cast<UINT_PTR>(hInkSub), L"Tinta y Escritura");
+
+        HMENU hObjSub = CreatePopupMenu();
+        AppendMenuW(hObjSub, MF_STRING, CMD_CLIPBOARD_PASTE,        L"Pegar imagen o texto (Ctrl+V)");
+        AppendMenuW(hObjSub, MF_STRING, CMD_GROUP_OBJECTS,          L"Agrupar selecci\u00F3n (Ctrl+G)");
+        AppendMenuW(hObjSub, MF_STRING, CMD_UNGROUP_OBJECTS,        L"Desagrupar selecci\u00F3n (Ctrl+Shift+G)");
+        AppendMenuW(hObjSub, MF_STRING, CMD_DUPLICATE_OBJECTS,      L"Duplicar selecci\u00F3n (Ctrl+D)");
+        AppendMenuW(hObjSub, MF_STRING, CMD_ADD_CONNECTOR,          L"Insertar conector magn\u00E9tico");
+        AppendMenuW(hObjSub, MF_STRING, CMD_ADD_REDACTION,          L"Insertar censura PDF permanente");
+        AppendMenuW(hObjSub, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(hObjSub, MF_STRING, CMD_TEXT_BOLD,              L"Texto: Negrita (Ctrl+B)");
+        AppendMenuW(hObjSub, MF_STRING, CMD_TEXT_ITALIC,            L"Texto: Cursiva (Ctrl+I)");
+        AppendMenuW(hObjSub, MF_STRING, CMD_TEXT_UNDERLINE,         L"Texto: Subrayado (Ctrl+U)");
+        AppendMenuW(hObjSub, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(hObjSub, MF_STRING, CMD_IMG_ENHANCE_WHITEBOARD, L"Imagen: Mejorar contraste de pizarra");
+        AppendMenuW(hObjSub, MF_STRING, CMD_IMG_REMOVE_BG,          L"Imagen: Quitar fondo blanco");
+        AppendMenuW(hObjSub, MF_STRING, CMD_IMG_ROTATE_90,          L"Imagen: Rotar +90\u00B0");
+        AppendMenuW(hObjSub, MF_STRING, CMD_IMG_TOGGLE_OPACITY,     L"Imagen: Alternar opacidad 55% / 100%");
+        AppendMenuW(hObjSub, MF_STRING, CMD_IMG_CROP,               L"Imagen: Recortar m\u00E1rgenes");
+        AppendMenuW(hObjSub, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(hObjSub, MF_STRING, CMD_STICKER_OPAMP,          L"Elemento: Amplificador Op-Amp");
+        AppendMenuW(hObjSub, MF_STRING, CMD_STICKER_RESISTOR,       L"Elemento: Resistencia vectorial");
+        AppendMenuW(hObjSub, MF_STRING, CMD_STICKER_AXES,           L"Elemento: Ejes XY");
+        AppendMenuW(hObjSub, MF_STRING, CMD_STICKER_NOTE,           L"Elemento: Nota adhesiva");
+        AppendMenuW(hm, MF_POPUP, reinterpret_cast<UINT_PTR>(hObjSub), L"Objetos, Texto e Im\u00E1genes");
+
+        HMENU hPaperSub = CreatePopupMenu();
+        AppendMenuW(hPaperSub, MF_STRING, CMD_PAPER_NEXT,       L"Siguiente plantilla de papel");
+        AppendMenuW(hPaperSub, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(hPaperSub, MF_STRING, CMD_PAPER_ISOMETRIC,  L"Papel Isom\u00E9trico 30\u00B0");
+        AppendMenuW(hPaperSub, MF_STRING, CMD_PAPER_LOGLOG,     L"Papel Log-Log");
+        AppendMenuW(hPaperSub, MF_STRING, CMD_PAPER_POLAR,      L"Papel Polar");
+        AppendMenuW(hPaperSub, MF_STRING, CMD_PAPER_SMITH,      L"Carta de Smith");
+        AppendMenuW(hPaperSub, MF_STRING, CMD_PAPER_CORNELL,    L"Plantilla Cornell");
+        AppendMenuW(hPaperSub, MF_STRING, CMD_PAPER_MUSIC,      L"Pentagrama musical");
+        AppendMenuW(hm, MF_POPUP, reinterpret_cast<UINT_PTR>(hPaperSub), L"Plantillas de Papel");
+
+        AppendMenuW(hm, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(hm, MF_STRING, CMD_STEM_MENU,       L"Ingenier\u00EDa STEM (+F\u00F3rmula / Circuito / Gr\u00E1fica)...");
         AppendMenuW(hm, MF_STRING, CMD_STUDY_MENU,      L"Estudio SM-2 / Capas / Audio...");
         AppendMenuW(hm, MF_STRING, CMD_TOGGLE_ACADEMIC, L"Panel Acad\u00E9mico (TEC Digital y HorariosTEC)");
@@ -2319,8 +2840,6 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         AppendMenuW(hm, MF_STRING, CMD_ADD_PAGE,        L"A\u00F1adir p\u00E1gina");
         AppendMenuW(hm, MF_STRING, CMD_ROTATE_PAGE,     L"Rotar p\u00E1gina 90\u00B0");
         AppendMenuW(hm, MF_STRING, CMD_DEL_PAGE,        L"Eliminar p\u00E1gina actual");
-        AppendMenuW(hm, MF_STRING, CMD_PAPER_NEXT,      L"Cambiar patr\u00F3n de papel");
-        AppendMenuW(hm, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(hm, MF_STRING, CMD_UNDO,            L"Deshacer (Ctrl+Z)");
         AppendMenuW(hm, MF_STRING, CMD_REDO,            L"Rehacer (Ctrl+Y)");
         AppendMenuW(hm, MF_STRING, CMD_TOGGLE_RULER,    L"Regla graduada");
@@ -2383,6 +2902,456 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
             const auto hits = st->ftsIndex.Query(WideToUtf8(qW));
             st->academicStatusUtf8 = "B\xC3\xBA" "squeda offline: " + std::to_string(hits.size()) + " coincidencias";
             st->statusBannerUtf8 = st->academicStatusUtf8;
+        }
+        break;
+    }
+    case CMD_MIGRATE_NOTEBOOK: {
+        if (GuiDialogs::RunNotebookMigrationDialog(st->hwndMain, st->doc, st->audioSession, st->vault, st->statusBannerUtf8)) {
+            st->cmdStack.Clear();
+            st->pageCache.InvalidateAll(++st->asyncGen);
+            st->currentDocPath.clear();
+            CenterCameraOnPage(st, 0);
+            LayoutMainChildren(st);
+        }
+        break;
+    }
+    case CMD_OPEN_VAULT_LIBRARY:
+        GuiDialogs::RunVaultLibraryManager(st->hwndMain, st->doc, st->vault, st->ftsIndex, st->currentDocPath, MakePromptAdapter(st), st->statusBannerUtf8);
+        break;
+    case CMD_SAVE_ENCRYPTED:
+        GuiDialogs::RunSecurityOrLanFlow(st->hwndMain, st->doc, 0, MakePromptAdapter(st), st->statusBannerUtf8);
+        break;
+    case CMD_OPEN_ENCRYPTED:
+        GuiDialogs::RunSecurityOrLanFlow(st->hwndMain, st->doc, 1, MakePromptAdapter(st), st->statusBannerUtf8);
+        st->cmdStack.Clear();
+        st->pageCache.InvalidateAll(++st->asyncGen);
+        CenterCameraOnPage(st, 0);
+        LayoutMainChildren(st);
+        break;
+    case CMD_VERSION_HISTORY:
+        GuiDialogs::RunVersionHistoryOrMerge(st->hwndMain, st->doc, st->versionHistory, st->activePageIndex, false, st->statusBannerUtf8);
+        break;
+    case CMD_CONFLICT_MERGE:
+        GuiDialogs::RunVersionHistoryOrMerge(st->hwndMain, st->doc, st->versionHistory, st->activePageIndex, true, st->statusBannerUtf8);
+        st->pageCache.InvalidateAll(++st->asyncGen);
+        break;
+    case CMD_VIEW_ATTACHMENTS: {
+        std::ostringstream os;
+        os << "Adjuntos incrustados en el documento (" << st->doc.Attachments().size() << "):\r\n\r\n";
+        for (const auto& a : st->doc.Attachments()) {
+            os << "  - " << a.filenameUtf8 << " (" << a.mimeTypeUtf8 << ", " << a.sizeBytes << " bytes)\r\n";
+        }
+        if (st->doc.Attachments().empty()) os << "  (Este documento no contiene archivos adjuntos incrustados.)";
+        GuiDialogs::ShowReportDialog(st->hwndMain, L"Adjuntos del Documento", Utf8ToWide(os.str()));
+        break;
+    }
+    case CMD_QUICK_NOTE:
+        AddNewDocTab(st, true);
+        break;
+    case CMD_NEW_TAB:
+        AddNewDocTab(st, false);
+        break;
+    case CMD_NEXT_TAB:
+        if (st->tabs.size() > 1) SwitchToDocTab(st, st->activeTabIdx + 1);
+        else st->statusBannerUtf8 = "Abra otra pesta\xC3\xB1""a con Ctrl+T o Nota R\xC3\xA1pida";
+        break;
+    case CMD_TOGGLE_SPREAD:
+        st->doc.SetDoublePageSpread(!st->doc.DoublePageSpread());
+        st->statusBannerUtf8 = st->doc.DoublePageSpread() ? "Vista Doble P\xC3\xA1gina (Libro) activa" : "Vista P\xC3\xA1gina \xC3\x9Anica activa";
+        break;
+    case CMD_TOGGLE_SPLIT_VIEW:
+        st->splitViewActive = !st->splitViewActive;
+        if (st->splitViewActive) {
+            st->splitCamera = st->camera;
+            st->splitCamera.panY += 420.0;
+        }
+        st->statusBannerUtf8 = st->splitViewActive ? "Vista Dividida lado a lado activada" : "Vista Dividida cerrada";
+        break;
+    case CMD_OPEN_PROJECTOR: {
+        ViewportOverlayState ov{};
+        PopulateViewportOverlay(st, ov);
+        if (st->projectorWnd.Open(GetModuleHandleW(nullptr), st->hwndMain, &st->doc, &st->camera, &st->pageCache, &ov)) {
+            st->statusBannerUtf8 = "Ventana de Proyector activa (capas privadas ocultas; tecla F para congelar)";
+        }
+        break;
+    }
+    case CMD_FREEZE_PROJECTOR:
+        if (st->projectorWnd.IsOpen()) {
+            st->projectorWnd.SetFrozen(!st->projectorWnd.IsFrozen());
+            st->statusBannerUtf8 = st->projectorWnd.IsFrozen() ? "Proyector CONGELADO (puedes editar en privado)" : "Proyector descongelado en vivo";
+        } else {
+            st->statusBannerUtf8 = "Abra primero la Ventana de Proyector";
+        }
+        break;
+    case CMD_IMPORT_PDF_TO_CANVAS: {
+        static constexpr COMDLG_FILTERSPEC kPdfF[] = { { L"Archivos PDF (*.pdf)", L"*.pdf" } };
+        std::vector<std::wstring> paths;
+        if (!ShowOpenDialog(st->hwndMain, L"Importar p\u00E1ginas de PDF al Lienzo", kPdfF, 1, paths, false)) break;
+        PdfDocument pdf;
+        std::string err;
+        if (!pdf.LoadFromFile(paths[0], &err)) {
+            st->statusBannerUtf8 = "Error PDF: " + err;
+            break;
+        }
+        if (st->doc.Mode() != DocumentMode::InfiniteCanvas) {
+            st->doc.SetMode(DocumentMode::InfiniteCanvas);
+            LayoutMainChildren(st);
+        }
+        const std::size_t nImport = (std::min<std::size_t>)(pdf.PageCount(), 6u);
+        double cx = 60.0, cy = 60.0;
+        for (std::size_t p = 0; p < nImport; ++p) {
+            RasterImageBgra32 img{};
+            std::vector<std::uint8_t> pngBytes;
+            if (WinRtPdfRenderer::RenderPageToBgra32(paths[0], static_cast<int>(p), 720, 0, {}, img, nullptr, nullptr) &&
+                WinRtPdfRenderer::EncodeBgra32ToPngBytes(img, pngBytes)) {
+                AnnotationObject pic{};
+                pic.kind = ObjectKind::Image;
+                pic.layerId = st->doc.ActiveLayerId();
+                pic.bounds = { cx, cy, 420.0, 420.0 * (static_cast<double>(img.height) / (std::max)(1, img.width)) };
+                pic.pngBytes = std::move(pngBytes);
+                pic.captionUtf8 = "PDF P\xC3\xA1g. " + std::to_string(p + 1);
+                st->cmdStack.Execute(st->doc, std::make_unique<AddObjectCommand>(ObjectTarget{ true, 0 }, std::move(pic)));
+                cx += 456.0;
+            }
+        }
+        st->statusBannerUtf8 = "Importadas " + std::to_string(nImport) + " p\xC3\xA1gina(s) del PDF al Lienzo Infinito";
+        break;
+    }
+    case CMD_TOGGLE_PARTIAL_ERASER:
+        st->eraserActionMode = (st->eraserActionMode == EraserActionMode::WholeStroke)
+            ? EraserActionMode::PartialPixel : EraserActionMode::WholeStroke;
+        st->activeTool = ToolKind::Eraser;
+        st->statusBannerUtf8 = (st->eraserActionMode == EraserActionMode::PartialPixel)
+            ? "Borrador de Precisi\xC3\xB3n / P\xC3\xADxel activo (divide trazos)"
+            : "Borrador de Trazo Completo activo";
+        break;
+    case CMD_CYCLE_PEN_STYLE: {
+        const int next = (static_cast<int>(st->penStyle) + 1) % 4;
+        st->penStyle = static_cast<InkPenStyle>(next);
+        static const char* kStyleNames[4] = { "Bol\xC3\xADgrafo", "Pluma Fuente", "L\xC3\xA1piz Grafito", "Pincel Caligr\xC3\xA1" "fico" };
+        st->activeTool = ToolKind::Pen;
+        st->statusBannerUtf8 = std::string("Estilo de l\xC3\xA1piz: ") + kStyleNames[next];
+        break;
+    }
+    case CMD_CUSTOM_INK_COLOR: {
+        static COLORREF customPalette[16] = {
+            RGB(26,115,232), RGB(220,38,38), RGB(21,128,61), RGB(245,158,11),
+            RGB(124,58,237), RGB(14,116,144), RGB(190,24,93), RGB(17,24,39),
+            RGB(71,85,105), RGB(234,88,12), RGB(37,99,235), RGB(5,150,105),
+            RGB(168,85,247), RGB(217,119,6), RGB(225,29,72), RGB(15,23,42)
+        };
+        CHOOSECOLORW cc{};
+        cc.lStructSize = sizeof(cc);
+        cc.hwndOwner = st->hwndMain;
+        cc.rgbResult = RGB(st->penColor.r, st->penColor.g, st->penColor.b);
+        cc.lpCustColors = customPalette;
+        cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+        if (ChooseColorW(&cc)) {
+            st->penColor = DocColor::RGBA(GetRValue(cc.rgbResult), GetGValue(cc.rgbResult), GetBValue(cc.rgbResult), 255);
+            st->statusBannerUtf8 = "Color de tinta personalizado aplicado";
+        }
+        break;
+    }
+    case CMD_TOGGLE_SNAP_GRID:
+        st->snapToGrid = !st->snapToGrid;
+        st->statusBannerUtf8 = st->snapToGrid ? "Ajuste a cuadr\xC3\xAD" "cula ACTIVADO" : "Ajuste a cuadr\xC3\xAD" "cula desactivado";
+        break;
+    case CMD_CYCLE_GEOMETRY_TOOL: {
+        if (!st->rulerState.visible) {
+            RECT rc{};
+            GetClientRect(st->hwndViewport, &rc);
+            const DocPoint cW = st->camera.ScreenToWorld((rc.right - rc.left) * 0.5, (rc.bottom - rc.top) * 0.55);
+            st->rulerState.centerX = cW.x;
+            st->rulerState.centerY = cW.y;
+            st->rulerState.mode = RulerMode::Straightedge;
+            st->rulerState.visible = true;
+            st->statusBannerUtf8 = "Regla Recta activa";
+        } else if (st->rulerState.mode == RulerMode::Straightedge) {
+            st->rulerState.mode = RulerMode::Protractor;
+            st->statusBannerUtf8 = "Transportador 180\xC2\xB0 activo (traza arcos precisos)";
+        } else if (st->rulerState.mode == RulerMode::Protractor) {
+            st->rulerState.mode = RulerMode::Compass;
+            st->rulerState.compassRadiusPt = 110.0;
+            st->statusBannerUtf8 = "Comp\xC3\xA1s geom\xC3\xA9trico activo (radio 110 pt)";
+        } else {
+            st->rulerState.visible = false;
+            st->rulerState.mode = RulerMode::Straightedge;
+            st->statusBannerUtf8 = "Herramienta geom\xC3\xA9trica oculta";
+        }
+        break;
+    }
+    case CMD_COPY_STROKE_STYLE: {
+        if (const auto* o = CanvasManip::FindObjectConst(st->doc, CurrentTarget(st), st->selectedObjectId)) {
+            st->penColor = o->strokeColor;
+            st->penWidth = std::clamp(o->strokeWidth, 0.8, 24.0);
+            st->penStyle = o->penStyle;
+            st->statusBannerUtf8 = "Estilo del objeto copiado al l\xC3\xA1piz activo";
+        } else {
+            st->statusBannerUtf8 = "Seleccione un trazo u objeto para copiar su estilo";
+        }
+        break;
+    }
+    case CMD_RESTYLE_INK: {
+        const ObjectTarget tgt = CurrentTarget(st);
+        std::vector<std::uint64_t> ids = st->lassoSelectedIds;
+        if (ids.empty() && st->selectedObjectId != 0) ids.push_back(st->selectedObjectId);
+        const bool ok = InkEngine::NeatenAndRestyleStrokes(st->doc, tgt, ids);
+        st->statusBannerUtf8 = ok
+            ? ("Estilizados y enderezados " + std::to_string(ids.size()) + " trazo(s)")
+            : "Seleccione o encierre con Lazo los trazos a estilizar";
+        break;
+    }
+    case CMD_HTR_TO_TEXT:
+    case CMD_HTR_TO_MATH: {
+        std::vector<std::uint64_t> ids = st->lassoSelectedIds;
+        if (ids.empty() && st->selectedObjectId != 0) ids.push_back(st->selectedObjectId);
+        GuiDialogs::RunOfflineInkHtr(st->hwndMain, st->doc, st->cmdStack, CurrentTarget(st), ids, (id == CMD_HTR_TO_MATH), st->statusBannerUtf8);
+        break;
+    }
+    case CMD_GROUP_OBJECTS:
+    case CMD_UNGROUP_OBJECTS: {
+        std::vector<std::uint64_t> ids = st->lassoSelectedIds;
+        if (ids.empty() && st->selectedObjectId != 0) ids.push_back(st->selectedObjectId);
+        if (CanvasManip::GroupSelectedObjects(st->doc, st->cmdStack, CurrentTarget(st), ids, id == CMD_UNGROUP_OBJECTS)) {
+            st->statusBannerUtf8 = (id == CMD_UNGROUP_OBJECTS) ? "Objetos desagrupados" : ("Agrupados " + std::to_string(ids.size()) + " objetos");
+        } else {
+            st->statusBannerUtf8 = "Seleccione uno o m\xC3\xA1s objetos primero";
+        }
+        break;
+    }
+    case CMD_DUPLICATE_OBJECTS: {
+        std::vector<std::uint64_t> ids = st->lassoSelectedIds;
+        if (ids.empty() && st->selectedObjectId != 0) ids.push_back(st->selectedObjectId);
+        const auto dup = CanvasManip::DuplicateSelectedObjects(st->doc, st->cmdStack, CurrentTarget(st), ids);
+        if (!dup.empty()) {
+            st->lassoSelectedIds = dup;
+            st->selectedObjectId = dup.back();
+            st->statusBannerUtf8 = "Duplicado(s) " + std::to_string(dup.size()) + " objeto(s)";
+        }
+        break;
+    }
+    case CMD_CLIPBOARD_PASTE: {
+        double x = 80.0, y = 80.0;
+        NextCardPlacement(st, x, y);
+        if (!CanvasManip::PasteClipboardIntoDocument(st->hwndMain, st->doc, st->cmdStack, CurrentTarget(st), x, y, st->statusBannerUtf8)) {
+            st->statusBannerUtf8 = "No hay imagen ni texto compatible en el portapapeles";
+        }
+        break;
+    }
+    case CMD_ADD_REDACTION: {
+        double x = 90.0, y = 120.0;
+        NextCardPlacement(st, x, y);
+        AnnotationObject red{};
+        red.kind = ObjectKind::Shape;
+        red.shapeKind = ShapeKind::Rectangle;
+        red.layerId = st->doc.ActiveLayerId();
+        red.bounds = { x, y, 220.0, 32.0 };
+        red.isRedaction = true;
+        red.fillColor = DocColor::RGBA(0, 0, 0, 255);
+        red.strokeColor = DocColor::RGBA(0, 0, 0, 255);
+        st->cmdStack.Execute(st->doc, std::make_unique<AddObjectCommand>(CurrentTarget(st), std::move(red)));
+        st->statusBannerUtf8 = "Censura PDF permanente insertada (quema caja negra al exportar)";
+        break;
+    }
+    case CMD_ADD_CONNECTOR: {
+        const ObjectTarget tgt = CurrentTarget(st);
+        const auto& vec = tgt.isCanvas ? st->doc.CanvasObjects() : st->doc.Pages()[tgt.pageIndex].objects;
+        AnnotationObject conn{};
+        conn.kind = ObjectKind::Shape;
+        conn.shapeKind = ShapeKind::Connector;
+        conn.layerId = st->doc.ActiveLayerId();
+        conn.strokeColor = st->penColor;
+        conn.strokeWidth = 2.0;
+        if (vec.size() >= 2) {
+            const auto& a = vec[vec.size() - 2];
+            const auto& b = vec[vec.size() - 1];
+            conn.connectorFromId = a.id;
+            conn.connectorToId = b.id;
+            conn.shapeStart = { a.bounds.x + a.bounds.w * 0.5, a.bounds.y + a.bounds.h * 0.5 };
+            conn.shapeEnd = { b.bounds.x + b.bounds.w * 0.5, b.bounds.y + b.bounds.h * 0.5 };
+        } else {
+            conn.shapeStart = { 120.0, 140.0 };
+            conn.shapeEnd = { 320.0, 210.0 };
+        }
+        conn.RecomputeBounds();
+        st->cmdStack.Execute(st->doc, std::make_unique<AddObjectCommand>(tgt, std::move(conn)));
+        st->statusBannerUtf8 = "Conector magn\xC3\xA9tico enlazado";
+        break;
+    }
+    case CMD_IMPORT_IMAGE_MULTI: {
+        double x = 80.0, y = 80.0;
+        NextCardPlacement(st, x, y);
+        GuiDialogs::RunMultiFormatImageImport(st->hwndMain, st->doc, st->cmdStack, CurrentTarget(st), x, y, st->statusBannerUtf8);
+        break;
+    }
+    case CMD_IMG_ENHANCE_WHITEBOARD:
+    case CMD_IMG_REMOVE_BG:
+    case CMD_IMG_ROTATE_90:
+    case CMD_IMG_TOGGLE_OPACITY:
+    case CMD_IMG_CROP: {
+        const int m = (id == CMD_IMG_ENHANCE_WHITEBOARD) ? 0
+            : (id == CMD_IMG_REMOVE_BG) ? 1
+            : (id == CMD_IMG_ROTATE_90) ? 2
+            : (id == CMD_IMG_TOGGLE_OPACITY) ? 3 : 4;
+        GuiDialogs::EnhanceSelectedImage(st->doc, st->cmdStack, CurrentTarget(st), st->selectedObjectId, m, st->statusBannerUtf8);
+        break;
+    }
+    case CMD_STICKER_OPAMP:
+    case CMD_STICKER_RESISTOR:
+    case CMD_STICKER_AXES:
+    case CMD_STICKER_NOTE: {
+        double x = 90.0, y = 90.0;
+        NextCardPlacement(st, x, y);
+        const int sk = (id == CMD_STICKER_OPAMP) ? 0 : (id == CMD_STICKER_RESISTOR) ? 1 : (id == CMD_STICKER_AXES) ? 2 : 3;
+        GuiDialogs::InsertEngineeringSticker(st->doc, st->cmdStack, CurrentTarget(st), x, y, sk, st->statusBannerUtf8);
+        break;
+    }
+    case CMD_PAPER_ISOMETRIC:
+    case CMD_PAPER_LOGLOG:
+    case CMD_PAPER_POLAR:
+    case CMD_PAPER_SMITH:
+    case CMD_PAPER_CORNELL:
+    case CMD_PAPER_MUSIC: {
+        const PaperPattern pat = (id == CMD_PAPER_ISOMETRIC) ? PaperPattern::Isometric
+            : (id == CMD_PAPER_LOGLOG) ? PaperPattern::LogLog
+            : (id == CMD_PAPER_POLAR) ? PaperPattern::Polar
+            : (id == CMD_PAPER_SMITH) ? PaperPattern::SmithChart
+            : (id == CMD_PAPER_CORNELL) ? PaperPattern::Cornell : PaperPattern::MusicStaff;
+        st->cmdStack.Execute(st->doc, std::make_unique<SetBackgroundCommand>(
+            ObjectTarget{ st->doc.Mode() == DocumentMode::InfiniteCanvas, st->activePageIndex }, pat));
+        st->statusBannerUtf8 = std::string("Plantilla aplicada: ") + PaperPatternLabelUtf8(pat);
+        break;
+    }
+    case CMD_AUDIO_BOOKMARK: {
+        std::wstring lbl = L"Explicaci\u00F3n clave";
+        if (ShowTextPrompt(st->hwndMain, L"Marcador de Audio", L"Etiqueta del marcador temporal:", lbl) && !lbl.empty()) {
+            const std::uint64_t tMs = st->replayActive ? st->replayCursorMs : st->audioSession.DurationMs();
+            st->audioSession.AddBookmark(WideToUtf8(lbl), tMs);
+            st->statusBannerUtf8 = "Marcador de audio guardado en " + std::to_string(tMs / 1000) + " s";
+        }
+        break;
+    }
+    case CMD_AUDIO_IMPORT: {
+        static constexpr COMDLG_FILTERSPEC kW[] = { { L"Audio WAV PCM (*.wav)", L"*.wav" } };
+        std::vector<std::wstring> paths;
+        if (ShowOpenDialog(st->hwndMain, L"Importar Audio WAV", kW, 1, paths, false)) {
+            std::ifstream ifs(std::filesystem::path(paths[0]), std::ios::binary | std::ios::ate);
+            if (ifs.is_open()) {
+                const auto sz = ifs.tellg();
+                std::vector<std::uint8_t> buf(static_cast<std::size_t>(sz));
+                ifs.seekg(0, std::ios::beg);
+                ifs.read(reinterpret_cast<char*>(buf.data()), sz);
+                if (st->audioSession.LoadFromWavBytes(buf.data(), buf.size())) {
+                    st->statusBannerUtf8 = "Audio WAV importado (" + std::to_string(st->audioSession.DurationMs() / 1000) + " s)";
+                }
+            }
+        }
+        break;
+    }
+    case CMD_AUDIO_TRANSCRIBE: {
+        const auto segs = st->audioSession.TranscribeOffline();
+        std::ostringstream os;
+        os << "Segmentos de voz detectados offline (" << segs.size() << "):\r\n\r\n";
+        for (const auto& s : segs) {
+            os << "  [" << (s.startMs / 1000.0) << "s - " << (s.endMs / 1000.0) << "s] " << s.textUtf8 << "\r\n";
+        }
+        if (segs.empty()) os << "  (Grabe o importe audio WAV primero para segmentar voz offline.)";
+        GuiDialogs::ShowReportDialog(st->hwndMain, L"Transcripci\u00F3n y Segmentos de Audio Offline", Utf8ToWide(os.str()));
+        st->statusBannerUtf8 = "Transcripci\xC3\xB3n offline: " + std::to_string(segs.size()) + " segmento(s)";
+        break;
+    }
+    case CMD_AUDIO_EXPORT_HTML5: {
+        static constexpr COMDLG_FILTERSPEC kH[] = { { L"Tutorial Interactivo HTML5 (*.html)", L"*.html" } };
+        std::wstring outPath;
+        if (ShowSaveDialog(st->hwndMain, L"Exportar Tutorial HTML5 Sincronizado", kH, 1, L"html", L"tutorial_cuadernu.html", outPath)) {
+            std::string err;
+            if (st->audioSession.ExportSyncedTutorialHtml5(st->doc, WideToUtf8(outPath), &err)) {
+                st->statusBannerUtf8 = "Tutorial HTML5 sincronizado exportado";
+            } else {
+                st->statusBannerUtf8 = "Error HTML5: " + err;
+            }
+        }
+        break;
+    }
+    case CMD_ADD_TABLE: {
+        double x = 80.0, y = 80.0;
+        NextCardPlacement(st, x, y);
+        GuiDialogs::RunReactiveTableDialog(st->hwndMain, st->doc, st->cmdStack, CurrentTarget(st), x, y, MakePromptAdapter(st), st->statusBannerUtf8);
+        break;
+    }
+    case CMD_ADD_CODE_BLOCK: {
+        double x = 80.0, y = 80.0;
+        NextCardPlacement(st, x, y);
+        GuiDialogs::RunEngineeringToolboxOrCodeBlock(st->hwndMain, st->doc, st->cmdStack, CurrentTarget(st), x, y, 2, MakePromptAdapter(st), st->statusBannerUtf8);
+        break;
+    }
+    case CMD_ADV_MATH: {
+        double x = 80.0, y = 80.0;
+        NextCardPlacement(st, x, y);
+        GuiDialogs::RunAdvancedMathDialog(st->hwndMain, st->doc, st->cmdStack, CurrentTarget(st), x, y, MakePromptAdapter(st), st->statusBannerUtf8);
+        break;
+    }
+    case CMD_CHECK_MY_WORK:
+    case CMD_TEACH_ME:
+    case CMD_SUMMARIZE_NOTES:
+    case CMD_LOCAL_QA:
+    case CMD_COMPARE_4_CASIO: {
+        double x = 80.0, y = 80.0;
+        NextCardPlacement(st, x, y);
+        const int m = (id == CMD_CHECK_MY_WORK) ? 0
+            : (id == CMD_TEACH_ME) ? 1
+            : (id == CMD_SUMMARIZE_NOTES) ? 2
+            : (id == CMD_LOCAL_QA) ? 3 : 4;
+        GuiDialogs::RunCheckMyWorkOrTeachMe(st->hwndMain, st->doc, st->cmdStack, CurrentTarget(st), x, y, m, MakePromptAdapter(st), st->statusBannerUtf8);
+        break;
+    }
+    case CMD_RECOGNIZE_CIRCUIT:
+    case CMD_ENG_TOOLBOX:
+    case CMD_FORMULA_AST_SEARCH: {
+        double x = 80.0, y = 80.0;
+        NextCardPlacement(st, x, y);
+        const int m = (id == CMD_RECOGNIZE_CIRCUIT) ? 0 : (id == CMD_ENG_TOOLBOX) ? 1 : 3;
+        GuiDialogs::RunEngineeringToolboxOrCodeBlock(st->hwndMain, st->doc, st->cmdStack, CurrentTarget(st), x, y, m, MakePromptAdapter(st), st->statusBannerUtf8);
+        break;
+    }
+    case CMD_LAN_QR:
+        GuiDialogs::RunSecurityOrLanFlow(st->hwndMain, st->doc, 2, MakePromptAdapter(st), st->statusBannerUtf8);
+        break;
+    case CMD_EXAM_PIN_LOCK: {
+        std::wstring pinW;
+        if (!st->examModeLocked) {
+            if (ShowTextPrompt(st->hwndMain, L"Activar Modo Examen", L"Establezca un PIN de 4 d\u00EDgitos para bloquear funciones asistidas:", pinW) && !pinW.empty()) {
+                st->examPinUtf8 = WideToUtf8(pinW);
+                st->examModeLocked = true;
+                st->statusBannerUtf8 = "Modo Examen ACTIVADO (bloqueado por PIN)";
+            }
+        } else {
+            if (ShowTextPrompt(st->hwndMain, L"Desbloquear Modo Examen", L"Ingrese el PIN para desactivar el Modo Examen:", pinW)) {
+                if (WideToUtf8(pinW) == st->examPinUtf8) {
+                    st->examModeLocked = false;
+                    st->examPinUtf8.clear();
+                    st->statusBannerUtf8 = "Modo Examen desactivado";
+                } else {
+                    st->statusBannerUtf8 = "PIN incorrecto";
+                }
+            }
+        }
+        break;
+    }
+    case CMD_TEXT_BOLD:
+    case CMD_TEXT_ITALIC:
+    case CMD_TEXT_UNDERLINE: {
+        const ObjectTarget tgt = CurrentTarget(st);
+        if (AnnotationObject* obj = CanvasManip::FindObjectMut(st->doc, tgt, st->selectedObjectId)) {
+            if (obj->kind == ObjectKind::TextBox) {
+                AnnotationObject before = *obj;
+                AnnotationObject after = *obj;
+                if (id == CMD_TEXT_BOLD) after.bold = !after.bold;
+                else if (id == CMD_TEXT_ITALIC) after.italic = !after.italic;
+                else after.underline = !after.underline;
+                st->cmdStack.Execute(st->doc, std::make_unique<ModifyObjectCommand>(tgt, std::move(before), std::move(after)));
+                st->statusBannerUtf8 = "Formato de texto actualizado";
+            }
         }
         break;
     }
@@ -2526,6 +3495,28 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
 
+            // Side-by-side Split View right pane composited smoothly via Direct2D offscreen pass (F-066, F-067)
+            RasterImageBgra32 splitPatch;
+            if (st->splitViewActive && !st->appearancePopoverOpen && vw > 240 && vh > 80) {
+                const int halfW = vw / 2;
+                const int rightW = vw - halfW;
+                ViewportOverlayState sov = ov;
+                sov.floatingOverlayBgra = nullptr;
+                sov.showSelectionHandles = false;
+                if (st->renderer.RenderHwndViewportToOffscreen(st->doc, st->splitCamera, rightW, vh, &st->pageCache, splitPatch, &sov) &&
+                    splitPatch.Valid()) {
+                    // Subtle 2px vertical splitter line on left edge of split pane
+                    for (int y = 0; y < vh; ++y) {
+                        for (int x = 0; x < 2 && x < rightW; ++x) {
+                            std::uint8_t* p = &splitPatch.pixels[(static_cast<std::size_t>(y) * rightW + x) * 4u];
+                            p[0] = 225; p[1] = 175; p[2] = 130; p[3] = 255;
+                        }
+                    }
+                    ov.floatingOverlayBgra = &splitPatch;
+                    ov.floatingOverlayScreenRect = { static_cast<double>(halfW), 0.0, static_cast<double>(rightW), static_cast<double>(vh) };
+                }
+            }
+
             HWND mainH = st->hwndMain;
             st->renderer.RenderViewport(
                 st->doc, st->camera,
@@ -2538,11 +3529,82 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EndPaint(hwnd, &ps);
         return 0;
     }
+    case WM_COMMAND: {
+        if (st && LOWORD(wp) == CMD_INLINE_EDIT_CTRL && HIWORD(wp) == EN_KILLFOCUS) {
+            CommitInlineTextEdit(st, true);
+            return 0;
+        }
+        break;
+    }
+    case WM_LBUTTONDBLCLK: {
+        if (!st) break;
+        CommitInlineTextEdit(st, true);
+        const DocPoint wpWorld = st->camera.ScreenToWorld(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        bool isCanvas = (st->doc.Mode() == DocumentMode::InfiniteCanvas);
+        std::size_t pgIdx = st->activePageIndex;
+        double lx = wpWorld.x, ly = wpWorld.y;
+        if (!isCanvas && !st->doc.Layout().HitTestWorldPoint(wpWorld.x, wpWorld.y, pgIdx, lx, ly)) return 0;
+        const double tol = std::clamp(8.0 / (std::max)(0.25, st->camera.zoom), 3.0, 18.0);
+        const auto hits = CollectHits(st, isCanvas, pgIdx, lx, ly, tol);
+        if (hits.empty()) return 0;
+        const ObjectTarget tgt{ isCanvas, pgIdx };
+        const AnnotationObject* obj = CanvasManip::FindObjectConst(st->doc, tgt, hits.back());
+        if (!obj) return 0;
+        st->selectedObjectId = obj->id;
+        st->selectedIsCanvas = isCanvas;
+        st->selectedPageIndex = pgIdx;
+        if (obj->kind == ObjectKind::TextBox) {
+            BeginInlineTextEdit(st, tgt, *obj);
+        } else if (obj->kind == ObjectKind::MathBlock) {
+            std::wstring exprW = Utf8ToWide(obj->formulaExprUtf8);
+            if (ShowTextPrompt(st->hwndMain, L"Editar F\u00F3rmula 2D", L"Expresi\u00F3n:", exprW) && !exprW.empty()) {
+                AnnotationObject before = *obj;
+                AnnotationObject after = *obj;
+                after.formulaExprUtf8 = WideToUtf8(exprW);
+                const auto ev = Cas::EvaluateExpression(after.formulaExprUtf8);
+                if (ev.ok) after.evaluatedResultUtf8 = ev.formattedResultUtf8;
+                st->cmdStack.Execute(st->doc, std::make_unique<ModifyObjectCommand>(tgt, std::move(before), std::move(after)));
+                st->statusBannerUtf8 = "F\xC3\xB3rmula recalculada";
+                UpdateWindowTitle(st);
+                InvalidateViews(st);
+            }
+        } else if (obj->kind == ObjectKind::TableBlock) {
+            ExecuteToolbarCommand(st, CMD_ADD_TABLE);
+        } else if (obj->kind == ObjectKind::CircuitBlock) {
+            std::wstring netW = Utf8ToWide(obj->circuitNetlistUtf8);
+            for (wchar_t& ch : netW) if (ch == L'\n') ch = L';';
+            if (ShowTextPrompt(st->hwndMain, L"Editar Circuito SPICE/MNA", L"Netlist (separado por ';'):", netW) && !netW.empty()) {
+                std::string net = WideToUtf8(netW);
+                for (char& ch : net) if (ch == ';') ch = '\n';
+                std::vector<Circuit::CircuitComponent> comps;
+                std::string perr;
+                AnnotationObject before = *obj;
+                AnnotationObject after = *obj;
+                after.circuitNetlistUtf8 = net;
+                if (Circuit::ParseNetlistText(net, comps, &perr)) {
+                    const auto sol = Circuit::SolveMnaCircuit(comps, 0.0);
+                    after.evaluatedResultUtf8 = sol.ok ? sol.summaryUtf8 : sol.errorUtf8;
+                }
+                st->cmdStack.Execute(st->doc, std::make_unique<ModifyObjectCommand>(tgt, std::move(before), std::move(after)));
+                st->statusBannerUtf8 = "Circuito recalculado";
+                UpdateWindowTitle(st);
+                InvalidateViews(st);
+            }
+        } else if (obj->kind == ObjectKind::AudioClip) {
+            if (const auto* bytes = st->doc.FindAsset(obj->assetKey)) {
+                st->audioSession.LoadFromWavBytes(bytes->data(), bytes->size());
+            }
+            ExecuteToolbarCommand(st, CMD_REPLAY_TOGGLE);
+        }
+        return 0;
+    }
     case WM_CAPTURECHANGED: {
         if (st) {
             st->draggingOpacitySlider = false;
             st->panning = false;
             st->drawing = false;
+            st->transformDrag.active = false;
+            st->pdfSelectingText = false;
             st->laserPointer.active = false;
         }
         return 0;
@@ -2553,12 +3615,16 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0 || st->doc.Mode() == DocumentMode::InfiniteCanvas;
         POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         ScreenToClient(hwnd, &pt);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        const bool onSplitRight = st->splitViewActive && pt.x > (rc.right / 2);
+        Camera2D& activeCam = onSplitRight ? st->splitCamera : st->camera;
         if (ctrl) {
             const double factor = (delta > 0) ? 1.12 : 0.89;
-            st->camera.ZoomByFactorAtAnchor(pt.x, pt.y, factor);
+            activeCam.ZoomByFactorAtAnchor(onSplitRight ? (pt.x - rc.right / 2) : pt.x, pt.y, factor);
         } else {
-            st->camera.panY -= (static_cast<double>(delta) / WHEEL_DELTA) * (72.0 / (std::max)(0.2, st->camera.zoom));
-            RefreshActivePageFromCamera(st);
+            activeCam.panY -= (static_cast<double>(delta) / WHEEL_DELTA) * (72.0 / (std::max)(0.2, activeCam.zoom));
+            if (!onSplitRight) RefreshActivePageFromCamera(st);
         }
         InvalidateViews(st);
         return 0;
@@ -2566,8 +3632,11 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_RBUTTONDOWN:
     case WM_MBUTTONDOWN: {
         if (!st) break;
+        CommitInlineTextEdit(st, true);
         st->panning = true;
-        st->lastPanPt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        st->rbuttonMoved = false;
+        st->rbuttonDownPt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        st->lastPanPt = st->rbuttonDownPt;
         SetCapture(hwnd);
         return 0;
     }
@@ -2576,12 +3645,36 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (st && st->panning) {
             st->panning = false;
             ReleaseCapture();
+            if (msg == WM_RBUTTONUP && !st->rbuttonMoved) {
+                HMENU cm = CreatePopupMenu();
+                AppendMenuW(cm, MF_STRING, CMD_CLIPBOARD_PASTE, L"Pegar (Ctrl+V)");
+                if (st->selectedObjectId != 0 || !st->lassoSelectedIds.empty()) {
+                    AppendMenuW(cm, MF_STRING, CMD_DUPLICATE_OBJECTS, L"Duplicar (Ctrl+D)");
+                    AppendMenuW(cm, MF_STRING, CMD_GROUP_OBJECTS,     L"Agrupar (Ctrl+G)");
+                    AppendMenuW(cm, MF_STRING, CMD_UNGROUP_OBJECTS,   L"Desagrupar");
+                    AppendMenuW(cm, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(cm, MF_STRING, CMD_COPY_STROKE_STYLE, L"Copiar estilo al l\u00E1piz");
+                    AppendMenuW(cm, MF_STRING, CMD_RESTYLE_INK,       L"Enderezar / Estilizar tinta");
+                    AppendMenuW(cm, MF_STRING, CMD_HTR_TO_TEXT,       L"Escritura -> Texto editable");
+                    AppendMenuW(cm, MF_STRING, CMD_HTR_TO_MATH,       L"Escritura -> Ecuaci\u00F3n 2D");
+                    AppendMenuW(cm, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(cm, MF_STRING, CMD_IMG_ENHANCE_WHITEBOARD, L"Imagen: Mejorar pizarra");
+                    AppendMenuW(cm, MF_STRING, CMD_IMG_ROTATE_90,          L"Imagen: Rotar +90\u00B0");
+                    AppendMenuW(cm, MF_STRING, CMD_TEXT_BOLD,              L"Texto: Negrita");
+                }
+                POINT spt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                ClientToScreen(hwnd, &spt);
+                const UINT cmd = TrackPopupMenu(cm, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, spt.x, spt.y, 0, st->hwndMain, nullptr);
+                DestroyMenu(cm);
+                if (cmd != 0) ExecuteToolbarCommand(st, static_cast<WORD>(cmd));
+            }
         }
         return 0;
     }
     case WM_POINTERDOWN:
     case WM_LBUTTONDOWN: {
         if (!st) break;
+        CommitInlineTextEdit(st, true);
         if (msg == WM_LBUTTONDOWN && st->appearancePopoverOpen) {
             POINT ptMain{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             MapWindowPoints(hwnd, st->hwndMain, &ptMain, 1);
@@ -2606,21 +3699,223 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const UINT32 pid = GET_POINTERID_WPARAM(wp);
             POINTER_INFO pi{};
             if (GetPointerInfo(pid, &pi)) {
+                // Strict Palm Rejection (F-036): ignore touch while pen is active/recent
+                if (pi.pointerType == PT_TOUCH && (GetTickCount64() - st->lastPenInputTickMs) < 1200ull) {
+                    return 0;
+                }
                 POINT pt = pi.ptPixelLocation;
                 ScreenToClient(hwnd, &pt);
                 sp = { static_cast<double>(pt.x), static_cast<double>(pt.y) };
                 POINTER_PEN_INFO pen{};
                 if (pi.pointerType == PT_PEN && GetPointerPenInfo(pid, &pen)) {
+                    st->lastPenInputTickMs = GetTickCount64();
                     pressure = std::clamp(static_cast<float>(pen.pressure) / 1024.0f, 0.1f, 1.0f);
                     tiltX = static_cast<float>(pen.tiltX);
                     tiltY = static_cast<float>(pen.tiltY);
+                    // Inverted stylus eraser (F-037) & Barrel button temporary Lasso (F-038)
+                    if ((pen.penFlags & PEN_FLAG_INVERTED) || (pen.penFlags & PEN_FLAG_ERASER)) {
+                        if (!st->invertedTempEraser) {
+                            st->savedToolBeforeStylusMod = st->activeTool;
+                            st->activeTool = ToolKind::Eraser;
+                            st->invertedTempEraser = true;
+                        }
+                    } else if (pen.penFlags & PEN_FLAG_BARREL) {
+                        if (!st->barrelTempLasso) {
+                            st->savedToolBeforeStylusMod = st->activeTool;
+                            st->activeTool = ToolKind::Lasso;
+                            st->barrelTempLasso = true;
+                        }
+                    }
                 }
             }
         } else {
             extractPointerWorld(lp, pressure, sp);
         }
 
-        if (st->activeTool == ToolKind::Hand || (GetKeyState(VK_SPACE) & 0x8000)) {
+        const DocPoint wpWorld = st->camera.ScreenToWorld(sp.x, sp.y);
+        bool isCanvas = (st->doc.Mode() == DocumentMode::InfiniteCanvas);
+        std::size_t pgIdx = st->activePageIndex;
+        double lx = wpWorld.x, ly = wpWorld.y;
+        bool insidePage = isCanvas;
+        if (!isCanvas) {
+            // Check collapsed page header banner click first (F-055)
+            for (std::size_t pi = 0; pi < st->doc.Layout().PageCount(); ++pi) {
+                const auto* pl = st->doc.Layout().PlacementAt(pi);
+                if (pl && pl->collapsedHeader && pl->WorldRect().Contains(wpWorld.x, wpWorld.y)) {
+                    st->doc.ToggleCollapsedRange(static_cast<int>(pl->pageIndex), static_cast<int>(pl->collapsedEndPage0));
+                    st->statusBannerUtf8 = "Rango de p\xC3\xA1ginas expandido";
+                    UpdateWindowTitle(st);
+                    InvalidateViews(st);
+                    return 0;
+                }
+            }
+            insidePage = st->doc.Layout().HitTestWorldPoint(wpWorld.x, wpWorld.y, pgIdx, lx, ly);
+            if (insidePage) st->activePageIndex = pgIdx;
+        }
+
+        const bool spacePan = (GetKeyState(VK_SPACE) & 0x8000) != 0;
+        if (st->activeTool == ToolKind::Hand && !spacePan && insidePage) {
+            const ObjectTarget tgt{ isCanvas, pgIdx };
+            double originX = 0.0, originY = 0.0;
+            if (!isCanvas) {
+                if (const auto* pl = st->doc.Layout().PlacementAt(pgIdx)) {
+                    const DocRect wr = pl->WorldRect();
+                    originX = wr.x; originY = wr.y;
+                    // 1. Clickable InkLink badge navigation (F-132)
+                    if (const InkLink* lk = CanvasManip::HitTestInkLink(st->doc, pgIdx, { lx, ly }, wr.w, wr.h)) {
+                        if (lk->targetIsCanvas) {
+                            st->doc.SetMode(DocumentMode::InfiniteCanvas);
+                            if (const auto* tObj = st->doc.FindCanvasObject(lk->targetObjectId)) {
+                                st->selectedObjectId = tObj->id;
+                                st->camera.panX = tObj->bounds.x - 100.0;
+                                st->camera.panY = tObj->bounds.y - 80.0;
+                            }
+                        } else if (lk->targetPageIndex0 >= 0 && static_cast<std::size_t>(lk->targetPageIndex0) < st->doc.Pages().size()) {
+                            st->doc.SetMode(DocumentMode::PaginatedPdf);
+                            CenterCameraOnPage(st, static_cast<std::size_t>(lk->targetPageIndex0));
+                        }
+                        st->statusBannerUtf8 = "Navegado a enlace: " + lk->labelUtf8;
+                        LayoutMainChildren(st);
+                        InvalidateViews(st);
+                        return 0;
+                    }
+                    // 2. Clickable PDF hyperlink (F-082)
+                    if (const PdfLinkRect* plk = CanvasManip::HitTestPdfLink(st->doc.Pages()[pgIdx], { lx, ly }, wr.w, wr.h)) {
+                        if (!plk->uriUtf8.empty()) {
+                            ShellExecuteW(st->hwndMain, L"open", Utf8ToWide(plk->uriUtf8).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                            st->statusBannerUtf8 = "Enlace abierto: " + plk->uriUtf8;
+                        } else if (plk->targetPage0 >= 0 && static_cast<std::size_t>(plk->targetPage0) < st->doc.Pages().size()) {
+                            CenterCameraOnPage(st, static_cast<std::size_t>(plk->targetPage0));
+                            st->statusBannerUtf8 = "Ir a p\xC3\xA1gina " + std::to_string(plk->targetPage0 + 1);
+                        }
+                        InvalidateViews(st);
+                        return 0;
+                    }
+                    // 3. Interactive AcroForm field (F-084)
+                    const int ffIdx = CanvasManip::HitTestFormField(st->doc.Pages()[pgIdx], { lx, ly }, wr.w, wr.h);
+                    if (ffIdx >= 0) {
+                        auto& ff = st->doc.MutablePages()[pgIdx].formFields[static_cast<std::size_t>(ffIdx)];
+                        if (!ff.readOnly) {
+                            if (ff.fieldTypeUtf8 == "Btn") {
+                                ff.checked = !ff.checked;
+                                st->doc.BumpRevision();
+                                st->statusBannerUtf8 = "Casilla '" + ff.nameUtf8 + "' actualizada";
+                            } else {
+                                std::wstring vW = Utf8ToWide(ff.valueUtf8);
+                                if (ShowTextPrompt(st->hwndMain, L"Campo de Formulario PDF", Utf8ToWide(ff.nameUtf8).c_str(), vW)) {
+                                    ff.valueUtf8 = WideToUtf8(vW);
+                                    st->doc.BumpRevision();
+                                    st->statusBannerUtf8 = "Campo '" + ff.nameUtf8 + "' guardado";
+                                }
+                            }
+                            InvalidateViews(st);
+                            return 0;
+                        }
+                    }
+                }
+            }
+
+            // 4. Hit-test 8 resize handles + rotation stalk on currently selected object (F-026, F-103)
+            if (st->selectedObjectId != 0 && st->selectedIsCanvas == isCanvas && (isCanvas || st->selectedPageIndex == pgIdx)) {
+                if (const auto* selObj = CanvasManip::FindObjectConst(st->doc, tgt, st->selectedObjectId)) {
+                    const auto hKind = CanvasManip::HitTestSelectionHandles(
+                        selObj->bounds, originX, originY, st->camera,
+                        static_cast<int>(std::lround(sp.x)), static_cast<int>(std::lround(sp.y)));
+                    if (hKind != CanvasManip::HandleKind::None && hKind != CanvasManip::HandleKind::Body) {
+                        st->transformDrag = CanvasManip::ActiveTransformDrag{};
+                        st->transformDrag.active = true;
+                        st->transformDrag.handle = hKind;
+                        st->transformDrag.target = tgt;
+                        st->transformDrag.objectIds = { selObj->id };
+                        st->transformDrag.beforeSnapshots = { *selObj };
+                        st->transformDrag.startWorld = { lx, ly };
+                        st->transformDrag.initialBounds = selObj->bounds;
+                        const double cx = selObj->bounds.x + selObj->bounds.w * 0.5;
+                        const double cy = selObj->bounds.y + selObj->bounds.h * 0.5;
+                        st->transformDrag.initialAngleRad = std::atan2(ly - cy, lx - cx);
+                        st->transformDrag.initialRotDeg = selObj->rotationDeg;
+                        SetCapture(hwnd);
+                        return 0;
+                    }
+                }
+            }
+
+            // 5. Direct object hit -> Drag-to-move, Multi-lasso drag, 3D surface rotation (F-237), or Audio Seek (F-156)
+            const double tol = std::clamp(8.0 / (std::max)(0.25, st->camera.zoom), 3.0, 18.0);
+            const auto hits = CollectHits(st, isCanvas, pgIdx, lx, ly, tol);
+            const bool shiftHeld = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            if (!hits.empty()) {
+                const std::uint64_t hitId = hits.back();
+                const auto* hitObj = CanvasManip::FindObjectConst(st->doc, tgt, hitId);
+                if (hitObj && shiftHeld && (hitObj->kind == ObjectKind::AudioClip || (hitObj->kind == ObjectKind::InkStroke && hitObj->inkStartTimeMs > 0))) {
+                    st->audioSession.SeekMs(hitObj->inkStartTimeMs);
+                    if (st->audioSession.DurationMs() > 0) {
+                        st->audioSession.StartAudioPlayback(hitObj->inkStartTimeMs);
+                    }
+                    st->replayCursorMs = hitObj->inkStartTimeMs;
+                    st->statusBannerUtf8 = "Audio posicionado en " + std::to_string(hitObj->inkStartTimeMs / 1000) + " s";
+                    InvalidateViews(st);
+                    return 0;
+                }
+
+                // Expand selection with group or existing multi-lasso selection
+                std::vector<std::uint64_t> dragIds;
+                const bool inLasso = std::find(st->lassoSelectedIds.begin(), st->lassoSelectedIds.end(), hitId) != st->lassoSelectedIds.end();
+                if (inLasso && st->lassoSelectedIds.size() > 1) {
+                    dragIds = st->lassoSelectedIds;
+                } else {
+                    dragIds = { hitId };
+                    CanvasManip::ExpandSelectionWithGroupIds(st->doc, tgt, dragIds);
+                    st->lassoSelectedIds = (dragIds.size() > 1) ? dragIds : std::vector<std::uint64_t>{};
+                }
+                st->selectedObjectId = hitId;
+                st->selectedIsCanvas = isCanvas;
+                st->selectedPageIndex = pgIdx;
+
+                st->transformDrag = CanvasManip::ActiveTransformDrag{};
+                st->transformDrag.active = true;
+                st->transformDrag.handle = CanvasManip::HandleKind::Body;
+                st->transformDrag.target = tgt;
+                st->transformDrag.objectIds = dragIds;
+                st->transformDrag.startWorld = { lx, ly };
+                for (std::uint64_t id : dragIds) {
+                    if (const auto* o = CanvasManip::FindObjectConst(st->doc, tgt, id)) {
+                        st->transformDrag.beforeSnapshots.push_back(*o);
+                    }
+                }
+                if (hitObj && CanvasManip::IsPlot3DObject(*hitObj) && (shiftHeld || dragIds.size() == 1)) {
+                    // Drag inside center of 3D surface rotates yaw/pitch interactively; edge moves box
+                    const bool nearEdge = (lx - hitObj->bounds.x < 22.0) || (hitObj->bounds.Right() - lx < 22.0) ||
+                                          (ly - hitObj->bounds.y < 28.0) || (hitObj->bounds.Bottom() - ly < 22.0);
+                    if (shiftHeld || !nearEdge) {
+                        st->transformDrag.is3DRotateDrag = true;
+                        try {
+                            auto j = nlohmann::json::parse(hitObj->plotConfigUtf8);
+                            st->transformDrag.startYawDeg = j.value("yawDeg", 42.0);
+                            st->transformDrag.startPitchDeg = j.value("pitchDeg", 28.0);
+                        } catch (...) {}
+                    }
+                }
+                st->panMoved = false;
+                st->panStartPt = { static_cast<LONG>(sp.x), static_cast<LONG>(sp.y) };
+                SetCapture(hwnd);
+                InvalidateViews(st);
+                return 0;
+            }
+
+            // 6. Shift-drag on PDF page selects PDF text (F-075, F-076)
+            if (!isCanvas && shiftHeld) {
+                st->pdfSelectingText = true;
+                st->pdfSelPage = pgIdx;
+                st->pdfSelAnchorLocal = { lx, ly };
+                st->pdfSelRectLocal = { lx, ly, 1.0, 1.0 };
+                SetCapture(hwnd);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+        }
+
+        if (st->activeTool == ToolKind::Hand || spacePan) {
             st->panning = true;
             st->panMoved = false;
             st->panStartPt = { static_cast<LONG>(sp.x), static_cast<LONG>(sp.y) };
@@ -2629,7 +3924,6 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
 
-        const DocPoint wpWorld = st->camera.ScreenToWorld(sp.x, sp.y);
         if (st->activeTool == ToolKind::Laser) {
             st->drawing = true;
             st->laserPointer.active = true;
@@ -2642,25 +3936,45 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
 
-        bool isCanvas = (st->doc.Mode() == DocumentMode::InfiniteCanvas);
-        std::size_t pgIdx = st->activePageIndex;
-        double lx = wpWorld.x, ly = wpWorld.y;
-        if (!isCanvas) {
-            if (!st->doc.Layout().HitTestWorldPoint(wpWorld.x, wpWorld.y, pgIdx, lx, ly)) {
-                return 0;
-            }
-            st->activePageIndex = pgIdx;
-        }
+        if (!insidePage) return 0;
 
         if (st->activeTool == ToolKind::Eraser) {
             const ObjectTarget erTarget{ isCanvas, pgIdx };
-            const auto rawHits = CollectHits(st, isCanvas, pgIdx, lx, ly, 10.0);
+            const double erRad = 11.0 / (std::max)(0.4, st->camera.zoom);
+            const auto rawHits = CollectHits(st, isCanvas, pgIdx, lx, ly, erRad);
             const auto hits = InkEngine::FilterHitsByEraserMode(st->doc, erTarget, rawHits, st->eraserFilterMode, true);
             if (!hits.empty()) {
-                st->cmdStack.Execute(st->doc, std::make_unique<BatchEraseObjectsCommand>(erTarget, hits));
+                if (st->eraserActionMode == EraserActionMode::PartialPixel) {
+                    bool anySplit = false;
+                    for (std::uint64_t hid : hits) {
+                        const auto* o = CanvasManip::FindObjectConst(st->doc, erTarget, hid);
+                        if (!o) continue;
+                        if (o->kind == ObjectKind::InkStroke) {
+                            std::vector<AnnotationObject> splits;
+                            if (InkEngine::EraseStrokePartial(*o, { lx, ly }, erRad, splits)) {
+                                st->cmdStack.Execute(st->doc, std::make_unique<ReplaceStrokeWithSplitsCommand>(erTarget, *o, std::move(splits)));
+                                anySplit = true;
+                            }
+                        } else {
+                            st->cmdStack.Execute(st->doc, std::make_unique<RemoveObjectCommand>(erTarget, hid));
+                            anySplit = true;
+                        }
+                    }
+                    if (anySplit) {
+                        st->statusBannerUtf8 = "Borrado parcial aplicado";
+                        AppendWalMutation(st, "erase_partial");
+                    }
+                } else {
+                    st->cmdStack.Execute(st->doc, std::make_unique<BatchEraseObjectsCommand>(erTarget, hits));
+                    AppendWalMutation(st, "erase_whole");
+                }
                 UpdateWindowTitle(st);
                 InvalidateViews(st);
             }
+            st->drawing = true;
+            st->draftIsCanvas = isCanvas;
+            st->draftPageIdx = pgIdx;
+            SetCapture(hwnd);
             return 0;
         }
 
@@ -2675,10 +3989,17 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 tb.strokeColor = st->penColor;
                 tb.fontSizePt = 14.0;
                 st->cmdStack.Execute(st->doc, std::make_unique<AddObjectCommand>(ObjectTarget{ isCanvas, pgIdx }, std::move(tb)));
+                AppendWalMutation(st, "add_textbox");
                 UpdateWindowTitle(st);
                 InvalidateViews(st);
             }
             return 0;
+        }
+
+        if (st->snapToGrid && st->activeTool != ToolKind::Lasso && st->activeTool != ToolKind::Crop) {
+            const PaperPattern pat = isCanvas ? st->doc.CanvasBackground() : st->doc.Pages()[pgIdx].background;
+            const DocPoint sn = InkEngine::SnapPointToGrid({ lx, ly }, pat, 24.0);
+            lx = sn.x; ly = sn.y;
         }
 
         st->drawing = true;
@@ -2691,6 +4012,8 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         st->draftObj.strokeColor = st->penColor;
         st->draftObj.strokeWidth = (st->activeTool == ToolKind::Highlighter) ? 14.0 : st->penWidth;
         st->draftObj.isHighlighter = (st->activeTool == ToolKind::Highlighter);
+        st->draftObj.penStyle = st->penStyle;
+        st->draftObj.opacity = st->penOpacity;
 
         if (st->activeTool == ToolKind::Pen || st->activeTool == ToolKind::Highlighter || st->activeTool == ToolKind::Lasso) {
             st->draftObj.kind = ObjectKind::InkStroke;
@@ -2742,11 +4065,15 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const UINT32 pid = GET_POINTERID_WPARAM(wp);
             POINTER_INFO pi{};
             if (GetPointerInfo(pid, &pi)) {
+                if (pi.pointerType == PT_TOUCH && (GetTickCount64() - st->lastPenInputTickMs) < 1200ull) {
+                    return 0;
+                }
                 POINT pt = pi.ptPixelLocation;
                 ScreenToClient(hwnd, &pt);
                 sp = { static_cast<double>(pt.x), static_cast<double>(pt.y) };
                 POINTER_PEN_INFO pen{};
                 if (pi.pointerType == PT_PEN && GetPointerPenInfo(pid, &pen)) {
+                    st->lastPenInputTickMs = GetTickCount64();
                     pressure = std::clamp(static_cast<float>(pen.pressure) / 1024.0f, 0.1f, 1.0f);
                     tiltX = static_cast<float>(pen.tiltX);
                     tiltY = static_cast<float>(pen.tiltY);
@@ -2756,9 +4083,74 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             extractPointerWorld(lp, pressure, sp);
         }
 
+        if (st->transformDrag.active) {
+            if (std::hypot(sp.x - st->panStartPt.x, sp.y - st->panStartPt.y) > 3.0) st->panMoved = true;
+            const DocPoint wpWorld = st->camera.ScreenToWorld(sp.x, sp.y);
+            double lx = wpWorld.x, ly = wpWorld.y;
+            if (!st->transformDrag.target.isCanvas) {
+                if (const auto* pl = st->doc.Layout().PlacementAt(st->transformDrag.target.pageIndex)) {
+                    const DocRect wr = pl->WorldRect();
+                    lx -= wr.x; ly -= wr.y;
+                }
+            }
+            const double dx = lx - st->transformDrag.startWorld.x;
+            const double dy = ly - st->transformDrag.startWorld.y;
+
+            if (st->transformDrag.is3DRotateDrag && !st->transformDrag.objectIds.empty()) {
+                if (AnnotationObject* obj = CanvasManip::FindObjectMut(st->doc, st->transformDrag.target, st->transformDrag.objectIds[0])) {
+                    CanvasManip::UpdatePlot3DRotation(*obj, st->transformDrag.startYawDeg + dx * 0.75, st->transformDrag.startPitchDeg - dy * 0.55);
+                    st->doc.BumpRevision();
+                }
+            } else if (st->transformDrag.handle == CanvasManip::HandleKind::Body) {
+                for (std::size_t i = 0; i < st->transformDrag.objectIds.size() && i < st->transformDrag.beforeSnapshots.size(); ++i) {
+                    if (AnnotationObject* obj = CanvasManip::FindObjectMut(st->doc, st->transformDrag.target, st->transformDrag.objectIds[i])) {
+                        *obj = st->transformDrag.beforeSnapshots[i];
+                        CanvasManip::TranslateAnnotationObject(*obj, dx, dy);
+                        InkEngine::UpdateMagneticConnectors(st->doc, st->transformDrag.target, obj->id);
+                    }
+                }
+                st->doc.BumpRevision();
+            } else if (st->transformDrag.handle == CanvasManip::HandleKind::Rotate && !st->transformDrag.objectIds.empty()) {
+                if (AnnotationObject* obj = CanvasManip::FindObjectMut(st->doc, st->transformDrag.target, st->transformDrag.objectIds[0])) {
+                    const double cx = st->transformDrag.initialBounds.x + st->transformDrag.initialBounds.w * 0.5;
+                    const double cy = st->transformDrag.initialBounds.y + st->transformDrag.initialBounds.h * 0.5;
+                    const double ang = std::atan2(ly - cy, lx - cx);
+                    const double deltaDeg = (ang - st->transformDrag.initialAngleRad) * (180.0 / 3.14159265358979323846);
+                    obj->rotationDeg = std::fmod(st->transformDrag.initialRotDeg + deltaDeg + 3600.0, 360.0);
+                    st->doc.BumpRevision();
+                }
+            } else if (!st->transformDrag.objectIds.empty() && !st->transformDrag.beforeSnapshots.empty()) {
+                if (AnnotationObject* obj = CanvasManip::FindObjectMut(st->doc, st->transformDrag.target, st->transformDrag.objectIds[0])) {
+                    const DocRect nb = CanvasManip::ComputeResizedBounds(st->transformDrag.handle, st->transformDrag.initialBounds, dx, dy);
+                    CanvasManip::ResizeAnnotationObject(*obj, st->transformDrag.beforeSnapshots[0], nb);
+                    InkEngine::UpdateMagneticConnectors(st->doc, st->transformDrag.target, obj->id);
+                    st->doc.BumpRevision();
+                }
+            }
+            InvalidateViews(st);
+            return 0;
+        }
+
+        if (st->pdfSelectingText) {
+            const DocPoint wpWorld = st->camera.ScreenToWorld(sp.x, sp.y);
+            if (const auto* pl = st->doc.Layout().PlacementAt(st->pdfSelPage)) {
+                const DocRect wr = pl->WorldRect();
+                const double lx = wpWorld.x - wr.x;
+                const double ly = wpWorld.y - wr.y;
+                st->pdfSelRectLocal = DocRect::FromMinMax(
+                    (std::min)(st->pdfSelAnchorLocal.x, lx), (std::min)(st->pdfSelAnchorLocal.y, ly),
+                    (std::max)(st->pdfSelAnchorLocal.x, lx), (std::max)(st->pdfSelAnchorLocal.y, ly));
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+
         if (st->panning) {
             if (std::hypot(sp.x - st->panStartPt.x, sp.y - st->panStartPt.y) > 3.5) {
                 st->panMoved = true;
+            }
+            if (std::hypot(sp.x - st->rbuttonDownPt.x, sp.y - st->rbuttonDownPt.y) > 4.0) {
+                st->rbuttonMoved = true;
             }
             const double dx = sp.x - st->lastPanPt.x;
             const double dy = sp.y - st->lastPanPt.y;
@@ -2781,7 +4173,7 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (st->laserPointer.trail.size() > 28) {
                 st->laserPointer.trail.erase(st->laserPointer.trail.begin());
             }
-            InvalidateRect(hwnd, nullptr, FALSE);
+            InvalidateViews(st);
             return 0;
         }
 
@@ -2794,6 +4186,34 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
         }
 
+        // Continuous erasing on drag (both WholeStroke & PartialPixel modes)
+        if (st->activeTool == ToolKind::Eraser) {
+            const ObjectTarget erTarget{ st->draftIsCanvas, st->draftPageIdx };
+            const double erRad = 11.0 / (std::max)(0.4, st->camera.zoom);
+            const auto rawHits = CollectHits(st, st->draftIsCanvas, st->draftPageIdx, lx, ly, erRad);
+            const auto hits = InkEngine::FilterHitsByEraserMode(st->doc, erTarget, rawHits, st->eraserFilterMode, true);
+            if (!hits.empty()) {
+                if (st->eraserActionMode == EraserActionMode::PartialPixel) {
+                    for (std::uint64_t hid : hits) {
+                        const auto* o = CanvasManip::FindObjectConst(st->doc, erTarget, hid);
+                        if (!o) continue;
+                        if (o->kind == ObjectKind::InkStroke) {
+                            std::vector<AnnotationObject> splits;
+                            if (InkEngine::EraseStrokePartial(*o, { lx, ly }, erRad, splits)) {
+                                st->cmdStack.Execute(st->doc, std::make_unique<ReplaceStrokeWithSplitsCommand>(erTarget, *o, std::move(splits)));
+                            }
+                        } else {
+                            st->cmdStack.Execute(st->doc, std::make_unique<RemoveObjectCommand>(erTarget, hid));
+                        }
+                    }
+                } else {
+                    st->cmdStack.Execute(st->doc, std::make_unique<BatchEraseObjectsCommand>(erTarget, hits));
+                }
+                InvalidateViews(st);
+            }
+            return 0;
+        }
+
         if (st->draftObj.kind == ObjectKind::InkStroke) {
             if (st->hasPredictedTip && st->draftObj.inkPoints.size() >= 2) {
                 st->draftObj.inkPoints.pop_back();
@@ -2801,10 +4221,17 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
 
             auto appendLocalSample = [&](double sxLocal, double syLocal, float pr, float tx, float ty) {
-                if (st->activeTool != ToolKind::Lasso && st->rulerState.visible) {
-                    const DocPoint snapped = InkEngine::ProjectPointOntoRuler({ sxLocal, syLocal }, st->rulerState);
-                    sxLocal = snapped.x;
-                    syLocal = snapped.y;
+                if (st->activeTool != ToolKind::Lasso) {
+                    if (st->rulerState.visible) {
+                        const DocPoint snapped = InkEngine::ProjectPointOntoRuler({ sxLocal, syLocal }, st->rulerState);
+                        sxLocal = snapped.x;
+                        syLocal = snapped.y;
+                    } else if (st->snapToGrid) {
+                        const PaperPattern pat = st->draftIsCanvas ? st->doc.CanvasBackground() : st->doc.Pages()[st->draftPageIdx].background;
+                        const DocPoint sn = InkEngine::SnapPointToGrid({ sxLocal, syLocal }, pat, 24.0);
+                        sxLocal = sn.x;
+                        syLocal = sn.y;
+                    }
                 }
                 if (!st->draftObj.inkPoints.empty()) {
                     const auto& prev = st->draftObj.inkPoints.back();
@@ -2825,7 +4252,6 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     if (pi.pointerType == PT_PEN) {
                         std::vector<POINTER_PEN_INFO> penHist(count);
                         if (GetPointerPenInfoHistory(pid, &count, penHist.data()) && count > 0) {
-                            // Win32 returns coalesced history newest-first -> iterate oldest-to-newest
                             for (int hi = static_cast<int>(count) - 1; hi >= 0; --hi) {
                                 POINT hpt = penHist[static_cast<std::size_t>(hi)].pointerInfo.ptPixelLocation;
                                 ScreenToClient(hwnd, &hpt);
@@ -2869,7 +4295,7 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 appendLocalSample(lx, ly, pressure, tiltX, tiltY);
             }
 
-            if (st->activeTool != ToolKind::Lasso && !st->rulerState.visible && st->draftObj.inkPoints.size() >= 3) {
+            if (st->activeTool != ToolKind::Lasso && !st->rulerState.visible && !st->snapToGrid && st->draftObj.inkPoints.size() >= 3) {
                 InkPoint pred{};
                 if (InkEngine::PredictNextInkPoint(st->draftObj.inkPoints, pred, 12.0) &&
                     std::hypot(pred.x - st->draftObj.inkPoints.back().x, pred.y - st->draftObj.inkPoints.back().y) >= 0.4) {
@@ -2894,47 +4320,114 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_POINTERUP:
     case WM_LBUTTONUP: {
         if (!st) break;
+        auto restoreStylusTempTool = [&]() {
+            if (st->invertedTempEraser || st->barrelTempLasso) {
+                st->activeTool = st->savedToolBeforeStylusMod;
+                st->invertedTempEraser = false;
+                st->barrelTempLasso = false;
+            }
+        };
         if (msg == WM_LBUTTONUP && st->draggingOpacitySlider) {
             st->draggingOpacitySlider = false;
             ReleaseCapture();
+            return 0;
+        }
+        if (st->transformDrag.active) {
+            st->transformDrag.active = false;
+            ReleaseCapture();
+            if (st->panMoved && !st->transformDrag.beforeSnapshots.empty()) {
+                // Commit undoable batch transform snapshot!
+                std::vector<AnnotationObject> afterSnaps;
+                for (std::uint64_t id : st->transformDrag.objectIds) {
+                    if (const auto* cur = CanvasManip::FindObjectConst(st->doc, st->transformDrag.target, id)) {
+                        afterSnaps.push_back(*cur);
+                    }
+                }
+                if (afterSnaps.size() == st->transformDrag.beforeSnapshots.size()) {
+                    // Restore pre-drag state cleanly so CommandStack::Execute records proper before->after
+                    for (std::size_t i = 0; i < st->transformDrag.objectIds.size(); ++i) {
+                        if (AnnotationObject* m = CanvasManip::FindObjectMut(st->doc, st->transformDrag.target, st->transformDrag.objectIds[i])) {
+                            *m = st->transformDrag.beforeSnapshots[i];
+                        }
+                    }
+                    st->cmdStack.Execute(st->doc, std::make_unique<BatchModifyObjectsCommand>(
+                        st->transformDrag.target,
+                        std::move(st->transformDrag.beforeSnapshots),
+                        std::move(afterSnaps),
+                        st->transformDrag.is3DRotateDrag ? "Rotar 3D" : "Transformar objeto"));
+                    AppendWalMutation(st, "transform_obj");
+                }
+            } else if (!st->panMoved && st->selectedObjectId != 0) {
+                AppActions::ToggleStudyTapeIfHit(
+                    st->doc, st->cmdStack, st->transformDrag.target,
+                    st->selectedObjectId, st->statusBannerUtf8);
+            }
+            UpdateWindowTitle(st);
+            InvalidateViews(st);
+            restoreStylusTempTool();
+            return 0;
+        }
+        if (st->pdfSelectingText) {
+            st->pdfSelectingText = false;
+            ReleaseCapture();
+            if (st->pdfSelPage < st->doc.Pages().size() && !st->pdfSelRectLocal.Empty()) {
+                const auto& pg = st->doc.Pages()[st->pdfSelPage];
+                std::vector<DocRect> quads;
+                const std::string extracted = CanvasManip::ExtractPdfTextInRect(
+                    pg, st->pdfSelRectLocal, pg.EffectiveWidthPt(), pg.EffectiveHeightPt(), &quads);
+                if (!extracted.empty()) {
+                    st->lastSelectedPdfTextUtf8 = extracted;
+                    CanvasManip::CopyTextToClipboardWin32(st->hwndMain, extracted);
+                    // Also record semantic QuadPoints highlight when selection covers >= 12pt
+                    if (st->pdfSelRectLocal.w >= 12.0 && !quads.empty()) {
+                        AnnotationObject hl{};
+                        hl.kind = ObjectKind::Shape;
+                        hl.shapeKind = ShapeKind::Rectangle;
+                        hl.layerId = st->doc.ActiveLayerId();
+                        hl.bounds = st->pdfSelRectLocal;
+                        hl.fillColor = DocColor::RGBA(253, 224, 71, 95);
+                        hl.strokeColor = DocColor::RGBA(234, 179, 8, 120);
+                        hl.strokeWidth = 0.8;
+                        hl.isHighlighter = true;
+                        hl.textUtf8 = extracted;
+                        hl.pdfQuadPointsNorm = quads;
+                        st->cmdStack.Execute(st->doc, std::make_unique<AddObjectCommand>(ObjectTarget{ false, st->pdfSelPage }, std::move(hl)));
+                    }
+                    st->statusBannerUtf8 = "Texto PDF copiado y resaltado (QuadPoints): \"" + extracted.substr(0, 48) + "\"";
+                }
+            }
+            st->pdfSelRectLocal = {};
+            InvalidateViews(st);
+            restoreStylusTempTool();
             return 0;
         }
         if (st->panning) {
             st->panning = false;
             ReleaseCapture();
             if (!st->panMoved && st->activeTool == ToolKind::Hand) {
-                const POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-                const DocPoint wpWorld = st->camera.ScreenToWorld(pt.x, pt.y);
-                bool isCanvas = (st->doc.Mode() == DocumentMode::InfiniteCanvas);
-                std::size_t pgIdx = st->activePageIndex;
-                double lx = wpWorld.x, ly = wpWorld.y;
-                if (isCanvas || st->doc.Layout().HitTestWorldPoint(wpWorld.x, wpWorld.y, pgIdx, lx, ly)) {
-                    const double tol = std::clamp(8.0 / (std::max)(0.25, st->camera.zoom), 3.0, 18.0);
-                    const auto hits = CollectHits(st, isCanvas, pgIdx, lx, ly, tol);
-                    if (!hits.empty()) {
-                        st->selectedObjectId = hits.back();
-                        st->selectedIsCanvas = isCanvas;
-                        st->selectedPageIndex = pgIdx;
-                        AppActions::ToggleStudyTapeIfHit(
-                            st->doc, st->cmdStack, ObjectTarget{ isCanvas, pgIdx },
-                            st->selectedObjectId, st->statusBannerUtf8);
-                    } else {
-                        st->selectedObjectId = 0;
-                        st->lassoSelectedIds.clear();
-                    }
-                    UpdateWindowTitle(st);
-                    InvalidateViews(st);
-                }
+                st->selectedObjectId = 0;
+                st->lassoSelectedIds.clear();
+                UpdateWindowTitle(st);
+                InvalidateViews(st);
             }
+            restoreStylusTempTool();
             return 0;
         }
-        if (!st->drawing) return 0;
+        if (!st->drawing) { restoreStylusTempTool(); return 0; }
         st->drawing = false;
         ReleaseCapture();
+
+        if (st->activeTool == ToolKind::Eraser) {
+            UpdateWindowTitle(st);
+            InvalidateViews(st);
+            restoreStylusTempTool();
+            return 0;
+        }
 
         if (st->activeTool == ToolKind::Laser) {
             st->laserPointer.active = false;
             InvalidateViews(st);
+            restoreStylusTempTool();
             return 0;
         }
 
@@ -2971,6 +4464,7 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 st->statusBannerUtf8);
             st->selectedIsCanvas = st->draftIsCanvas;
             st->selectedPageIndex = st->draftPageIdx;
+            AppendWalMutation(st, "add_ink");
         } else {
             st->draftObj.RecomputeBounds();
             if (!st->draftObj.bounds.Empty()) {
@@ -2979,8 +4473,10 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 st->selectedIsCanvas = st->draftIsCanvas;
                 st->selectedPageIndex = st->draftPageIdx;
                 st->selectedObjectId = AppActions::LastInsertedId(st->doc, ObjectTarget{ st->draftIsCanvas, st->draftPageIdx });
+                AppendWalMutation(st, "add_shape");
             }
         }
+        restoreStylusTempTool();
         UpdateWindowTitle(st);
         InvalidateViews(st);
         return 0;
@@ -3175,7 +4671,22 @@ LRESULT CALLBACK SidebarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (pt.y < kNavAreaH) return 0;
         if (st->doc.Mode() == DocumentMode::PaginatedPdf) {
-            const int y = (pt.y - kNavAreaH) + st->sidebarScrollPos;
+            const std::size_t bmShow = (std::min<std::size_t>)(st->doc.Bookmarks().size(), 4u);
+            const int bmAreaH = (bmShow > 0) ? static_cast<int>(20 + bmShow * 22 + 8) : 0;
+            if (bmShow > 0 && pt.y >= kNavAreaH + 20 && pt.y < kNavAreaH + bmAreaH) {
+                const std::size_t bIdx = static_cast<std::size_t>((pt.y - (kNavAreaH + 20)) / 22);
+                if (bIdx < bmShow) {
+                    const std::size_t pg = st->doc.Bookmarks()[bIdx].pageIndex;
+                    if (pg < st->doc.Pages().size()) {
+                        st->activePageIndex = pg;
+                        CenterCameraOnPage(st, pg);
+                        st->statusBannerUtf8 = "Secci\xC3\xB3n: " + st->doc.Bookmarks()[bIdx].titleUtf8;
+                        InvalidateViews(st);
+                    }
+                }
+                return 0;
+            }
+            const int y = (pt.y - (kNavAreaH + bmAreaH)) + st->sidebarScrollPos;
             const std::size_t idx = static_cast<std::size_t>((std::max)(0, y) / kItemH);
             if (idx < st->doc.Pages().size()) {
                 const int localY = y - static_cast<int>(idx) * kItemH;
@@ -3269,22 +4780,39 @@ LRESULT CALLBACK SidebarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.DrawLine(&sepPen, 14.0f, static_cast<float>(kNavAreaH - 4), static_cast<float>(w - 14), static_cast<float>(kNavAreaH - 4));
 
             if (st->doc.Mode() == DocumentMode::PaginatedPdf) {
+                const std::size_t bmShow = (std::min<std::size_t>)(st->doc.Bookmarks().size(), 4u);
+                int pagesTopY = kNavAreaH;
+                if (bmShow > 0) {
+                    SelectObject(mem, st->hUiSmallFont ? st->hUiSmallFont : st->hUiFont);
+                    SetTextColor(mem, pal.labelTertiary.ToColorRef());
+                    RECT bhRc{ 16, kNavAreaH + 2, w - 12, kNavAreaH + 18 };
+                    DrawTextW(mem, L"\u00CDNDICE", -1, &bhRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                    for (std::size_t b = 0; b < bmShow; ++b) {
+                        const auto& bm = st->doc.Bookmarks()[b];
+                        RECT br{ 14, kNavAreaH + 20 + static_cast<int>(b) * 22, w - 12, kNavAreaH + 40 + static_cast<int>(b) * 22 };
+                        SetTextColor(mem, pal.accentBlue.ToColorRef());
+                        const std::wstring bTxt = L"\u203A " + Utf8ToWide(bm.titleUtf8);
+                        DrawTextW(mem, bTxt.c_str(), -1, &br, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    }
+                    pagesTopY = kNavAreaH + static_cast<int>(20 + bmShow * 22 + 8);
+                }
+
                 SelectObject(mem, st->hUiSmallFont ? st->hUiSmallFont : st->hUiFont);
                 SetTextColor(mem, pal.labelTertiary.ToColorRef());
                 std::wstring pgHead = L"P\u00C1GINAS (" + std::to_wstring(st->doc.Pages().size()) + L")";
-                RECT phRc{ 16, kNavAreaH + 2, w - 12, kNavAreaH + 20 };
+                RECT phRc{ 16, pagesTopY + 2, w - 12, pagesTopY + 20 };
                 DrawTextW(mem, pgHead.c_str(), -1, &phRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
                 // Clip page list below header
-                HRGN clipRgn = CreateRectRgn(0, kNavAreaH + 22, w - 1, h);
+                HRGN clipRgn = CreateRectRgn(0, pagesTopY + 22, w - 1, h);
                 SelectClipRgn(mem, clipRgn);
-                g.SetClip(Gdiplus::Rect(0, kNavAreaH + 22, w - 1, (std::max)(1, h - kNavAreaH - 22)));
+                g.SetClip(Gdiplus::Rect(0, pagesTopY + 22, w - 1, (std::max)(1, h - pagesTopY - 22)));
 
                 const std::size_t count = st->doc.Pages().size();
                 const std::size_t first = static_cast<std::size_t>((std::max)(0, st->sidebarScrollPos / kItemH));
-                const std::size_t last = (std::min)(count, first + static_cast<std::size_t>((h - kNavAreaH) / kItemH + 3));
+                const std::size_t last = (std::min)(count, first + static_cast<std::size_t>((h - pagesTopY) / kItemH + 3));
                 for (std::size_t i = first; i < last; ++i) {
-                    const int top = kNavAreaH + 24 + static_cast<int>(i) * kItemH - st->sidebarScrollPos;
+                    const int top = pagesTopY + 24 + static_cast<int>(i) * kItemH - st->sidebarScrollPos;
                     RECT card{ 12, top, w - 12, top + kItemH - 10 };
                     const bool active = (i == st->activePageIndex);
                     Gdiplus::GraphicsPath cp;
@@ -3356,8 +4884,8 @@ LRESULT CALLBACK SidebarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     { L"Patr\u00F3n de papel",     UiGlass::IconId::LayersStack,  pal.accentBlue,   false },
                     { L"Regla graduada",           UiGlass::IconId::CropTool,     pal.accentTeal,   st->rulerState.visible },
                     { L"Minimapa espacial",        UiGlass::IconId::CompareGrid,  pal.accentIndigo, st->minimapVisible },
-                    { st->audioSession.IsRecording() ? L"Detener audio (Mic)" : L"Grabar nota de audio",
-                                                   UiGlass::IconId::MicAudio,     pal.accentRed,    st->audioSession.IsRecording() },
+                    { st->audioSession.IsContinuousRecording() ? L"Detener audio (Mic)" : L"Grabar nota de audio",
+                                                   UiGlass::IconId::MicAudio,     pal.accentRed,    st->audioSession.IsContinuousRecording() },
                     { L"Modo Concentraci\u00F3n",  UiGlass::IconId::ContrastCircle, pal.accentPurple, st->focusMode }
                 };
                 SelectObject(mem, st->hUiFont);
@@ -3609,9 +5137,9 @@ LRESULT CALLBACK InspectorWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 SelectObject(mem, st->hUiSmallFont ? st->hUiSmallFont : st->hUiFont);
                 SetTextColor(mem, pal.labelSecondary.ToColorRef());
                 RECT ar{ c2.left + 14, c2.top + 40, c2.right - 14, c2.top + 82 };
-                DrawTextW(mem, st->audioSession.IsRecording() ? L"Grabando desde micr\u00F3fono (Win32 waveIn)..." : L"Listo para grabar trazos + voz offline.", -1, &ar, DT_LEFT | DT_WORDBREAK);
+                DrawTextW(mem, st->audioSession.IsContinuousRecording() ? L"Grabando desde micr\u00F3fono (Win32 waveIn)..." : L"Listo para grabar trazos + voz offline.", -1, &ar, DT_LEFT | DT_WORDBREAK);
                 drawActionBtn({ c2.left + 12, c2.top + 88, c2.right - 12, c2.top + 118 },
-                    st->audioSession.IsRecording() ? L"Detener Grabaci\u00F3n" : L"Iniciar Grabaci\u00F3n (Mic)", CMD_AUDIO_REC, true);
+                    st->audioSession.IsContinuousRecording() ? L"Detener Grabaci\u00F3n" : L"Iniciar Grabaci\u00F3n (Mic)", CMD_AUDIO_REC, true);
                 drawActionBtn({ c2.left + 12, c2.top + 124, c2.right - 12, c2.top + 154 }, L"Reproducir Ink Replay", CMD_REPLAY_TOGGLE, false);
             }
 
@@ -3862,6 +5390,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         st->renderer.AttachHwnd(st->hwndViewport, 800, 500);
         DragAcceptFiles(hwnd, TRUE);
+        SetTimer(hwnd, 702, 450, nullptr); // Live zero-network Casio IPC inbox poller (F-246)
         LayoutMainChildren(st);
         CenterCameraOnPage(st, 0);
         UpdateWindowTitle(st);
@@ -3992,7 +5521,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYDOWN: {
         if (!st) break;
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         const bool inSearchEdit = (st->hwndSearchEdit && GetFocus() == st->hwndSearchEdit);
+        const bool inInlineEdit = (st->hwndInlineEdit && GetFocus() == st->hwndInlineEdit);
+        if (wp == VK_ESCAPE && inInlineEdit) { CommitInlineTextEdit(st, false); return 0; }
         if (wp == VK_ESCAPE && st->appearancePopoverOpen) {
             st->appearancePopoverOpen = false;
             InvalidateViews(st);
@@ -4000,8 +5532,33 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (ctrl && wp == 'S') { ExecuteToolbarCommand(st, CMD_SAVE_CUDOC); return 0; }
         if (ctrl && wp == 'O') { ExecuteToolbarCommand(st, CMD_OPEN); return 0; }
-        if (ctrl && !inSearchEdit && wp == 'Z') { ExecuteToolbarCommand(st, CMD_UNDO); return 0; }
-        if (ctrl && !inSearchEdit && wp == 'Y') { ExecuteToolbarCommand(st, CMD_REDO); return 0; }
+        if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'Z') { ExecuteToolbarCommand(st, CMD_UNDO); return 0; }
+        if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'Y') { ExecuteToolbarCommand(st, CMD_REDO); return 0; }
+        if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'V') { ExecuteToolbarCommand(st, CMD_CLIPBOARD_PASTE); return 0; }
+        if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'C') {
+            const ObjectTarget tgt = CurrentTarget(st);
+            if (const auto* o = CanvasManip::FindObjectConst(st->doc, tgt, st->selectedObjectId)) {
+                const std::string txt = !o->textUtf8.empty() ? o->textUtf8 : (!o->formulaExprUtf8.empty() ? o->formulaExprUtf8 : o->evaluatedResultUtf8);
+                if (!txt.empty()) {
+                    CanvasManip::CopyTextToClipboardWin32(st->hwndMain, txt);
+                    st->statusBannerUtf8 = "Texto copiado al portapapeles";
+                    InvalidateViews(st);
+                }
+            } else if (!st->lastSelectedPdfTextUtf8.empty()) {
+                CanvasManip::CopyTextToClipboardWin32(st->hwndMain, st->lastSelectedPdfTextUtf8);
+                st->statusBannerUtf8 = "Texto PDF copiado";
+                InvalidateViews(st);
+            }
+            return 0;
+        }
+        if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'G') { ExecuteToolbarCommand(st, shift ? CMD_UNGROUP_OBJECTS : CMD_GROUP_OBJECTS); return 0; }
+        if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'D') { ExecuteToolbarCommand(st, CMD_DUPLICATE_OBJECTS); return 0; }
+        if (ctrl && wp == 'T') { ExecuteToolbarCommand(st, CMD_NEW_TAB); return 0; }
+        if (ctrl && wp == VK_TAB) { ExecuteToolbarCommand(st, CMD_NEXT_TAB); return 0; }
+        if (ctrl && shift && wp == 'N') { ExecuteToolbarCommand(st, CMD_QUICK_NOTE); return 0; }
+        if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'B') { ExecuteToolbarCommand(st, CMD_TEXT_BOLD); return 0; }
+        if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'I') { ExecuteToolbarCommand(st, CMD_TEXT_ITALIC); return 0; }
+        if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'U') { ExecuteToolbarCommand(st, CMD_TEXT_UNDERLINE); return 0; }
         if (ctrl && wp == 'F') {
             if (!st->searchVisible) ExecuteToolbarCommand(st, CMD_TOGGLE_SEARCH);
             else if (st->hwndSearchEdit) SetFocus(st->hwndSearchEdit);
@@ -4009,7 +5566,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (ctrl && wp == 'P') { ExecuteToolbarCommand(st, CMD_PRINT); return 0; }
         if (wp == VK_F3) { ExecuteToolbarCommand(st, CMD_SEARCH_NEXT); return 0; }
-        if (!inSearchEdit && (wp == VK_DELETE || wp == VK_BACK)) {
+        if (!inSearchEdit && !inInlineEdit && (wp == VK_DELETE || wp == VK_BACK)) {
             if (!st->lassoSelectedIds.empty()) {
                 st->cmdStack.Execute(st->doc, std::make_unique<BatchEraseObjectsCommand>(
                     ObjectTarget{ st->selectedIsCanvas, st->selectedPageIndex }, st->lassoSelectedIds));
@@ -4033,13 +5590,21 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_TIMER: {
+        if (st && wp == 702) {
+            PollCasioIpcInbox(st);
+            return 0;
+        }
         if (st && wp == 701 && st->replayActive) {
-            st->replayCursorMs += 45;
-            st->audioSession.AdvancePlaybackMs(45);
+            if (st->audioSession.IsPlaying() && st->audioSession.DurationMs() > 0) {
+                st->replayCursorMs = st->audioSession.GetHardwarePlaybackCursorMs();
+            } else {
+                st->replayCursorMs += 45;
+                st->audioSession.AdvancePlaybackMs(45);
+            }
             if (st->replayCursorMs >= st->replayMaxMs) {
                 st->replayActive = false;
                 KillTimer(hwnd, 701);
-                st->audioSession.SetPlaying(false);
+                st->audioSession.StopAudioPlayback();
                 st->statusBannerUtf8 = "Ink Replay completado";
             } else {
                 st->statusBannerUtf8 = "Ink Replay: " + std::to_string(st->replayCursorMs) + " / " + std::to_string(st->replayMaxMs) + " ms";
@@ -4118,7 +5683,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_DESTROY:
         KillTimer(hwnd, 701);
+        KillTimer(hwnd, 702);
         if (st) {
+            CommitInlineTextEdit(st, true);
+            if (st->audioSession.IsContinuousRecording()) st->audioSession.StopContinuousMicRecording();
+            st->audioSession.StopAudioPlayback();
+            st->projectorWnd.Close();
             st->pageCache.Shutdown();
             WinRtPdfRenderer::ClearOpenDocumentCache();
             st->renderer.DiscardDeviceResources();
@@ -4215,18 +5785,23 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_WIN95_CLASSES };
     InitCommonControlsEx(&icc);
 
-    auto registerCls = [&](const wchar_t* name, WNDPROC proc, HCURSOR cur) {
+    auto registerCls = [&](const wchar_t* name, WNDPROC proc, HCURSOR cur, bool withDblClk = false, bool withIcon = false) {
         WNDCLASSEXW wc{};
         wc.cbSize = sizeof(wc);
+        wc.style = withDblClk ? CS_DBLCLKS : 0;
         wc.lpfnWndProc = proc;
         wc.hInstance = hInst;
         wc.hCursor = cur;
+        if (withIcon) {
+            wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(101));
+            wc.hIconSm = static_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(101), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
+        }
         wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         wc.lpszClassName = name;
         RegisterClassExW(&wc);
     };
-    registerCls(kMainClassName, MainWndProc, LoadCursorW(nullptr, IDC_ARROW));
-    registerCls(kViewportClassName, ViewportWndProc, LoadCursorW(nullptr, IDC_CROSS));
+    registerCls(kMainClassName, MainWndProc, LoadCursorW(nullptr, IDC_ARROW), false, true);
+    registerCls(kViewportClassName, ViewportWndProc, LoadCursorW(nullptr, IDC_CROSS), true, false);
     registerCls(kSidebarClassName, SidebarWndProc, LoadCursorW(nullptr, IDC_ARROW));
     registerCls(kInspectorClassName, InspectorWndProc, LoadCursorW(nullptr, IDC_ARROW));
     registerCls(kPromptClassName, PromptWndProc, LoadCursorW(nullptr, IDC_ARROW));
@@ -4277,7 +5852,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
 
         const int winW = cliOpts.windowW > 0 ? cliOpts.windowW : 1320;
         const int winH = cliOpts.windowH > 0 ? cliOpts.windowH : 840;
-        HWND hwnd = CreateWindowExW(0, kMainClassName, L"Document Studio \u2014 Calculadora Unificada",
+        HWND hwnd = CreateWindowExW(0, kMainClassName, L"CuadernU \u2014 Calculadora Unificada",
             WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, winW, winH,
             nullptr, nullptr, hInst, st.get());
         if (!hwnd) {

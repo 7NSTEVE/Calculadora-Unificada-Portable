@@ -23,6 +23,11 @@ public:
     const std::string& Title() const noexcept { return titleUtf8_; }
     void SetTitle(std::string t) { titleUtf8_ = std::move(t); ++revision_; }
 
+    // Durable UUID bound to WAL, version history, and sidecar undo (fixes ephemeral ID collision)
+    const std::string& DocumentUuid() const noexcept { return documentUuidUtf8_; }
+    void SetDocumentUuid(std::string uuid) { if (!uuid.empty()) documentUuidUtf8_ = std::move(uuid); }
+    static std::string GenerateDurableUuid();
+
     std::uint64_t Revision() const noexcept { return revision_; }
     void BumpRevision() noexcept { ++revision_; }
     bool IsDirty() const noexcept { return dirty_; }
@@ -109,11 +114,23 @@ public:
     std::uint64_t AddBookmark(std::string titleUtf8, std::size_t pageIndex, double worldY = 0.0, int level = 0);
     bool RemoveBookmark(std::uint64_t bookmarkId);
 
+    // Embedded file attachments (PDF /EmbeddedFiles, OneNote, Goodnotes, Notability audio/files)
+    const std::vector<EmbeddedAttachment>& Attachments() const noexcept { return attachments_; }
+    void SetAttachments(std::vector<EmbeddedAttachment> atts) { attachments_ = std::move(atts); ++revision_; }
+    std::string AddAttachment(const std::string& filenameUtf8, const std::string& mimeTypeUtf8, std::vector<std::uint8_t> bytes);
+    bool RemoveAttachment(const std::string& assetKey);
+
+    // Single vs Double-Page Spread View (F-070)
+    bool DoublePageSpread() const noexcept { return doublePageSpread_; }
+    void SetDoublePageSpread(bool enabled);
+
 private:
     DocumentMode mode_ = DocumentMode::PaginatedPdf;
     std::string titleUtf8_ = "Sin t\xC3\xADtulo";
+    std::string documentUuidUtf8_;
     std::uint64_t revision_ = 1;
     bool dirty_ = false;
+    bool doublePageSpread_ = false;
 
     std::uint64_t nextObjectId_ = 0;
     std::uint64_t nextPageId_ = 0;
@@ -130,6 +147,7 @@ private:
     std::vector<InkLink> inkLinks_;
     std::vector<CollapsedPageRange> collapsedRanges_;
     std::vector<DocumentBookmark> bookmarks_;
+    std::vector<EmbeddedAttachment> attachments_;
 
     PaperPattern canvasBg_ = PaperPattern::Grid;
     std::vector<AnnotationObject> canvasObjects_;

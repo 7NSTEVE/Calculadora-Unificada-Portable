@@ -2,8 +2,11 @@
 
 #include "document_model.hpp"
 
+#include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace DocStudio {
@@ -35,6 +38,11 @@ struct MicCaptureReport {
 // and synced HTML5 tutorial export.
 class AudioTimelineSession {
 public:
+    AudioTimelineSession() = default;
+    ~AudioTimelineSession();
+    AudioTimelineSession(const AudioTimelineSession&) = delete;
+    AudioTimelineSession& operator=(const AudioTimelineSession&) = delete;
+
     static bool EncodeWavPcm16(
         const std::vector<std::int16_t>& samples,
         std::uint32_t sampleRateHz,
@@ -58,6 +66,17 @@ public:
         std::uint64_t durationMs = 400,
         std::uint32_t sampleRateHz = 16000,
         bool simulateUnplug = false);
+
+    // Non-blocking continuous asynchronous microphone streaming (F-153, WinMM waveIn 4-buffer ring)
+    bool StartContinuousMicRecording(std::uint32_t sampleRateHz = 16000, std::string* outStatusUtf8 = nullptr);
+    MicCaptureReport StopContinuousMicRecording();
+    bool IsContinuousRecording() const noexcept { return asyncRecording_.load(std::memory_order_acquire); }
+
+    // Real speaker hardware PCM playback synchronized with Ink Replay (F-155, WinMM waveOut)
+    bool StartAudioPlayback(std::uint64_t startCursorMs = 0, std::string* outErr = nullptr);
+    void StopAudioPlayback();
+    bool IsAudioPlayingHardware() const noexcept { return asyncPlaying_.load(std::memory_order_acquire); }
+    std::uint64_t GetHardwarePlaybackCursorMs() const noexcept;
 
     bool LoadFromWavBytes(const std::uint8_t* wavBytes, std::size_t size);
     bool LoadFromWavFile(const std::string& pathUtf8, std::string* outErr = nullptr);
@@ -102,6 +121,18 @@ private:
     std::int64_t offsetMs_ = 0;
     std::vector<std::int16_t> samples_;
     std::vector<AudioBookmark> bookmarks_;
+
+    mutable std::mutex audioMutex_;
+    std::atomic<bool> asyncRecording_{ false };
+    std::atomic<bool> stopRecRequested_{ false };
+    std::atomic<bool> recHardwareUsed_{ false };
+    std::string recDeviceNameUtf8_;
+    std::thread recThread_;
+
+    std::atomic<bool> asyncPlaying_{ false };
+    std::atomic<bool> stopPlayRequested_{ false };
+    std::atomic<std::uint64_t> hwPlaybackCursorMs_{ 0 };
+    std::thread playThread_;
 };
 
 } // namespace DocStudio

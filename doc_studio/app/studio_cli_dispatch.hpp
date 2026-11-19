@@ -35,6 +35,7 @@
 #include "../pdf/pdf_parser.hpp"
 #include "../pdf/pdf_writer.hpp"
 #include "../pdf/table_interop.hpp"
+#include "../interop/notebook_migration_engine.hpp"
 
 #ifdef DOC_STUDIO_HAS_ACADEMIC
 #include "academic/horarios_tec/exporter.hpp"
@@ -100,6 +101,8 @@ struct StudioCliOptions {
     std::string dumpLayoutBoundsUtf8;
 
     // Input / import flags
+    std::string migratePathUtf8;
+    std::string outReportUtf8;
     std::string importCsvUtf8;
     std::string importMdUtf8;
     std::string importAudioUtf8;
@@ -192,6 +195,7 @@ struct StudioCliOptions {
                !outVaultUtf8.empty() || !exportEffectiveKeymapUtf8.empty() ||
                !dumpA11yTreeUtf8.empty() || !dumpLayoutBoundsUtf8.empty() ||
                !importCsvUtf8.empty() || !importMdUtf8.empty() || !importAudioUtf8.empty() ||
+               !migratePathUtf8.empty() || !outReportUtf8.empty() ||
                !warpScanOcrUtf8.empty() || calcBridgeSync || checkMyWork || !casExprUtf8.empty() ||
                !localQaQueryUtf8.empty() || aiOffVerifyCore || examMode || hasGenerateVariants ||
                quizMe || studySessionE2e || examWeekSession || presenterConsole || replayMacro ||
@@ -497,6 +501,8 @@ inline StudioCliOptions ParseArgsUtf8(const std::vector<std::string>& args) {
         else if (a == "--dump-layout-bounds" && hasNext(i)) o.dumpLayoutBoundsUtf8 = args[++i];
 
         else if (a == "--import-csv" && hasNext(i)) o.importCsvUtf8 = args[++i];
+        else if (a == "--migrate" && hasNext(i)) o.migratePathUtf8 = args[++i];
+        else if (a == "--out-report" && hasNext(i)) o.outReportUtf8 = args[++i];
         else if (a == "--import-md" && hasNext(i)) o.importMdUtf8 = args[++i];
         else if (a == "--import-audio" && hasNext(i)) o.importAudioUtf8 = args[++i];
         else if (a == "--warp-scan-ocr" && hasNext(i)) o.warpScanOcrUtf8 = args[++i];
@@ -612,6 +618,40 @@ inline DispatchResult ExecuteWorkflow(
         std::cerr << msg << "\n";
         return res;
     };
+
+    // 0. Multi-Format Interoperability & Notebook Migration Engine (--migrate)
+    if (!opts.migratePathUtf8.empty()) {
+        Interop::MigrationResult migRes{};
+        if (!Interop::NotebookMigrationEngine::ImportAndMigrateFile(Utf8ToWide(opts.migratePathUtf8), doc, migRes)) {
+            return fail(2, "Migration failed: " + migRes.errorUtf8);
+        }
+        if (!migRes.primaryAudioWavBytes.empty()) {
+            audioSession.LoadFromWavBytes(migRes.primaryAudioWavBytes.data(), migRes.primaryAudioWavBytes.size());
+        }
+        if (!opts.outReportUtf8.empty()) {
+            detail::WriteTextFile(opts.outReportUtf8, migRes.report.ToJsonUtf8());
+        }
+        if (!opts.outCudocUtf8.empty()) {
+            std::string sErr;
+            if (!detail::SaveDocumentUnified(opts.outCudocUtf8, doc, &sErr)) {
+                return fail(3, "Failed saving migrated .cudoc: " + sErr);
+            }
+        }
+        if (!opts.outPdfUtf8.empty()) {
+            std::string pErr;
+            if (!detail::ExportPdfUnified(opts.outPdfUtf8, doc, &pErr)) {
+                return fail(4, "Failed exporting migrated PDF: " + pErr);
+            }
+        }
+        res.statusBannerUtf8 = "Migrado (" + migRes.report.formatLabelUtf8 + "): " +
+            std::to_string(migRes.report.pageCount) + " p\xC3\xA1g., " +
+            std::to_string(migRes.report.editableStrokeCount) + " trazos editables.";
+        if (!opts.outCudocUtf8.empty() || !opts.outReportUtf8.empty() || !opts.outPdfUtf8.empty()) {
+            res.exitImmediately = true;
+            res.exitCode = 0;
+        }
+        return res;
+    }
 
     // 1. Handle opening encrypted .cudoc or image scans when --open is provided alongside extended flags
     if (!opts.openPathUtf8.empty()) {

@@ -508,6 +508,166 @@ struct D2DRenderer::Impl {
         } else if (pattern == PaperPattern::Millimeter) {
             drawGridLines(8.0, darkPaper ? DocColor::RGBA(36, 44, 44, 255) : DocColor::RGBA(228, 240, 232, 255), 0.7f);
             drawGridLines(40.0, darkPaper ? DocColor::RGBA(52, 68, 62, 255) : DocColor::RGBA(178, 214, 190, 255), 1.1f);
+        } else if (pattern == PaperPattern::Isometric) {
+            const double step = 24.0;
+            if (step * cam.zoom >= 5.0) {
+                const double dy = step * 0.8660254037844386;
+                brush->SetColor(ToD2DColor(darkPaper ? DocColor::RGBA(44, 52, 66, 255) : DocColor::RGBA(206, 219, 236, 255)));
+                // Vertical lines
+                const double startX = std::floor(worldRegion.x / (step * 0.5)) * (step * 0.5);
+                for (double x = startX; x <= worldRegion.Right(); x += step * 0.5) {
+                    const DocPoint p0 = cam.WorldToScreen(x, worldRegion.y);
+                    const DocPoint p1 = cam.WorldToScreen(x, worldRegion.Bottom());
+                    rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(p0.x), static_cast<FLOAT>(p0.y)),
+                                 D2D1::Point2F(static_cast<FLOAT>(p1.x), static_cast<FLOAT>(p1.y)), brush, 0.8f);
+                }
+                // +30 deg and -30 deg diagonals (slope = +/- 1/sqrt(3))
+                const double slope = 0.5773502691896257;
+                const double spanX = worldRegion.w;
+                const double extraY = spanX * slope;
+                const double startY = std::floor((worldRegion.y - extraY) / dy) * dy;
+                for (double y = startY; y <= worldRegion.Bottom() + extraY; y += dy) {
+                    const DocPoint a0 = cam.WorldToScreen(worldRegion.x, y);
+                    const DocPoint a1 = cam.WorldToScreen(worldRegion.Right(), y + spanX * slope);
+                    rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(a0.x), static_cast<FLOAT>(a0.y)),
+                                 D2D1::Point2F(static_cast<FLOAT>(a1.x), static_cast<FLOAT>(a1.y)), brush, 0.8f);
+                    const DocPoint b0 = cam.WorldToScreen(worldRegion.x, y);
+                    const DocPoint b1 = cam.WorldToScreen(worldRegion.Right(), y - spanX * slope);
+                    rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(b0.x), static_cast<FLOAT>(b0.y)),
+                                 D2D1::Point2F(static_cast<FLOAT>(b1.x), static_cast<FLOAT>(b1.y)), brush, 0.8f);
+                }
+            }
+        } else if (pattern == PaperPattern::LogLog) {
+            const double decade = 140.0;
+            if (decade * cam.zoom >= 18.0) {
+                const double startX = std::floor(worldRegion.x / decade) * decade;
+                const double startY = std::floor(worldRegion.y / decade) * decade;
+                for (double dx0 = startX; dx0 <= worldRegion.Right(); dx0 += decade) {
+                    for (int m = 1; m <= 9; ++m) {
+                        const double x = dx0 + std::log10(static_cast<double>(m)) * decade;
+                        brush->SetColor(ToD2DColor(m == 1
+                            ? (darkPaper ? DocColor::RGBA(68, 92, 118, 255) : DocColor::RGBA(156, 188, 224, 255))
+                            : (darkPaper ? DocColor::RGBA(40, 50, 66, 255) : DocColor::RGBA(218, 230, 244, 255))));
+                        const DocPoint p0 = cam.WorldToScreen(x, worldRegion.y);
+                        const DocPoint p1 = cam.WorldToScreen(x, worldRegion.Bottom());
+                        rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(p0.x), static_cast<FLOAT>(p0.y)),
+                                     D2D1::Point2F(static_cast<FLOAT>(p1.x), static_cast<FLOAT>(p1.y)), brush, m == 1 ? 1.2f : 0.7f);
+                    }
+                }
+                for (double dy0 = startY; dy0 <= worldRegion.Bottom(); dy0 += decade) {
+                    for (int m = 1; m <= 9; ++m) {
+                        const double y = dy0 + (1.0 - std::log10(static_cast<double>(m))) * decade;
+                        brush->SetColor(ToD2DColor(m == 1
+                            ? (darkPaper ? DocColor::RGBA(68, 92, 118, 255) : DocColor::RGBA(156, 188, 224, 255))
+                            : (darkPaper ? DocColor::RGBA(40, 50, 66, 255) : DocColor::RGBA(218, 230, 244, 255))));
+                        const DocPoint p0 = cam.WorldToScreen(worldRegion.x, y);
+                        const DocPoint p1 = cam.WorldToScreen(worldRegion.Right(), y);
+                        rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(p0.x), static_cast<FLOAT>(p0.y)),
+                                     D2D1::Point2F(static_cast<FLOAT>(p1.x), static_cast<FLOAT>(p1.y)), brush, m == 1 ? 1.2f : 0.7f);
+                    }
+                }
+            }
+        } else if (pattern == PaperPattern::Polar) {
+            const double cx = worldRegion.x + worldRegion.w * 0.5;
+            const double cy = worldRegion.y + worldRegion.h * 0.5;
+            const double maxR = (std::min)(worldRegion.w, worldRegion.h) * 0.44;
+            const DocPoint cScr = cam.WorldToScreen(cx, cy);
+            brush->SetColor(ToD2DColor(darkPaper ? DocColor::RGBA(56, 72, 96, 255) : DocColor::RGBA(190, 210, 232, 255)));
+            for (int ring = 1; ring <= 8; ++ring) {
+                const float rPx = static_cast<float>((maxR * ring / 8.0) * cam.zoom);
+                rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(static_cast<FLOAT>(cScr.x), static_cast<FLOAT>(cScr.y)), rPx, rPx),
+                    brush, (ring % 2 == 0) ? 1.1f : 0.7f);
+            }
+            for (int deg = 0; deg < 360; deg += 30) {
+                const double rad = deg * (3.14159265358979323846 / 180.0);
+                const DocPoint ep = cam.WorldToScreen(cx + maxR * std::cos(rad), cy + maxR * std::sin(rad));
+                rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(cScr.x), static_cast<FLOAT>(cScr.y)),
+                             D2D1::Point2F(static_cast<FLOAT>(ep.x), static_cast<FLOAT>(ep.y)), brush, (deg % 90 == 0) ? 1.2f : 0.7f);
+            }
+        } else if (pattern == PaperPattern::SmithChart) {
+            const double cx = worldRegion.x + worldRegion.w * 0.5;
+            const double cy = worldRegion.y + worldRegion.h * 0.5;
+            const double R = (std::min)(worldRegion.w, worldRegion.h) * 0.42;
+            const DocPoint cScr = cam.WorldToScreen(cx, cy);
+            const float rPx = static_cast<float>(R * cam.zoom);
+            brush->SetColor(ToD2DColor(darkPaper ? DocColor::RGBA(72, 118, 128, 240) : DocColor::RGBA(146, 186, 198, 255)));
+            rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(static_cast<FLOAT>(cScr.x), static_cast<FLOAT>(cScr.y)), rPx, rPx), brush, 1.4f);
+            // Horizontal real axis
+            rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(cScr.x) - rPx, static_cast<FLOAT>(cScr.y)),
+                         D2D1::Point2F(static_cast<FLOAT>(cScr.x) + rPx, static_cast<FLOAT>(cScr.y)), brush, 1.1f);
+            // Constant-resistance circles: center (r/(1+r), 0), radius 1/(1+r)
+            for (double rv : { 0.2, 0.5, 1.0, 2.0, 5.0 }) {
+                const double rcX = cx + (rv / (1.0 + rv)) * R;
+                const float radPx = static_cast<float>((1.0 / (1.0 + rv)) * R * cam.zoom);
+                const DocPoint sc = cam.WorldToScreen(rcX, cy);
+                rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(static_cast<FLOAT>(sc.x), static_cast<FLOAT>(sc.y)), radPx, radPx),
+                    brush, (std::abs(rv - 1.0) < 0.01) ? 1.2f : 0.8f);
+            }
+            // Constant-reactance arcs clipped inside unit circle: center (1, +/-1/x), radius 1/|x|
+            for (double xv : { -2.0, -1.0, -0.5, 0.5, 1.0, 2.0 }) {
+                const double xc = 1.0;
+                const double yc = 1.0 / xv;
+                const double radN = std::abs(1.0 / xv);
+                DocPoint prev{};
+                bool havePrev = false;
+                for (int s = 0; s <= 48; ++s) {
+                    const double ang = static_cast<double>(s) * (6.28318530717958647692 / 48.0);
+                    const double gx = xc + radN * std::cos(ang);
+                    const double gy = yc + radN * std::sin(ang);
+                    if (gx * gx + gy * gy <= 1.005) {
+                        const DocPoint cur = cam.WorldToScreen(cx + gx * R, cy - gy * R);
+                        if (havePrev) {
+                            rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(prev.x), static_cast<FLOAT>(prev.y)),
+                                         D2D1::Point2F(static_cast<FLOAT>(cur.x), static_cast<FLOAT>(cur.y)), brush, 0.75f);
+                        }
+                        prev = cur;
+                        havePrev = true;
+                    } else {
+                        havePrev = false;
+                    }
+                }
+            }
+        } else if (pattern == PaperPattern::Cornell) {
+            const double headerY = worldRegion.y + 72.0;
+            const double summaryY = worldRegion.Bottom() - 108.0;
+            const double cueX = worldRegion.x + worldRegion.w * 0.28;
+            // Ruled main body
+            brush->SetColor(ToD2DColor(darkPaper ? DocColor::RGBA(44, 52, 66, 255) : DocColor::RGBA(214, 226, 244, 255)));
+            for (double y = headerY + 24.0; y < summaryY; y += 24.0) {
+                const DocPoint p0 = cam.WorldToScreen(cueX, y);
+                const DocPoint p1 = cam.WorldToScreen(worldRegion.Right() - 24.0, y);
+                rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(p0.x), static_cast<FLOAT>(p0.y)),
+                             D2D1::Point2F(static_cast<FLOAT>(p1.x), static_cast<FLOAT>(p1.y)), brush, 0.9f);
+            }
+            // Cornell dividers
+            brush->SetColor(ToD2DColor(darkPaper ? DocColor::RGBA(156, 76, 86, 220) : DocColor::RGBA(218, 124, 134, 255)));
+            const DocPoint h0 = cam.WorldToScreen(worldRegion.x + 18.0, headerY);
+            const DocPoint h1 = cam.WorldToScreen(worldRegion.Right() - 18.0, headerY);
+            rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(h0.x), static_cast<FLOAT>(h0.y)),
+                         D2D1::Point2F(static_cast<FLOAT>(h1.x), static_cast<FLOAT>(h1.y)), brush, 1.4f);
+            const DocPoint s0 = cam.WorldToScreen(worldRegion.x + 18.0, summaryY);
+            const DocPoint s1 = cam.WorldToScreen(worldRegion.Right() - 18.0, summaryY);
+            rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(s0.x), static_cast<FLOAT>(s0.y)),
+                         D2D1::Point2F(static_cast<FLOAT>(s1.x), static_cast<FLOAT>(s1.y)), brush, 1.4f);
+            const DocPoint c0 = cam.WorldToScreen(cueX, headerY);
+            const DocPoint c1 = cam.WorldToScreen(cueX, summaryY);
+            rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(c0.x), static_cast<FLOAT>(c0.y)),
+                         D2D1::Point2F(static_cast<FLOAT>(c1.x), static_cast<FLOAT>(c1.y)), brush, 1.4f);
+        } else if (pattern == PaperPattern::MusicStaff) {
+            const double staffGap = 72.0;
+            const double lineStep = 7.5;
+            if (lineStep * cam.zoom >= 2.5) {
+                brush->SetColor(ToD2DColor(darkPaper ? DocColor::RGBA(72, 82, 100, 255) : DocColor::RGBA(168, 180, 198, 255)));
+                for (double base = worldRegion.y + 52.0; base + 4.0 * lineStep < worldRegion.Bottom() - 28.0; base += staffGap) {
+                    for (int ln = 0; ln < 5; ++ln) {
+                        const double y = base + ln * lineStep;
+                        const DocPoint p0 = cam.WorldToScreen(worldRegion.x + 36.0, y);
+                        const DocPoint p1 = cam.WorldToScreen(worldRegion.Right() - 36.0, y);
+                        rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(p0.x), static_cast<FLOAT>(p0.y)),
+                                     D2D1::Point2F(static_cast<FLOAT>(p1.x), static_cast<FLOAT>(p1.y)), brush, 0.9f);
+                    }
+                }
+            }
         }
     }
 
@@ -525,6 +685,7 @@ struct D2DRenderer::Impl {
     {
         double layerOpacity = 1.0;
         if (!RenderCommon::ShouldDrawObjectOnLayer(doc, obj, layerOpacity, overlay)) return;
+        layerOpacity *= std::clamp(obj.opacity, 0.05, 1.0);
 
         auto toScreen = [&](double lx, double ly) -> D2D1_POINT_2F {
             const DocPoint sp = cam.WorldToScreen(originWorldX + lx, originWorldY + ly);
@@ -534,6 +695,16 @@ struct D2DRenderer::Impl {
             const DocRect wr{ originWorldX + lr.x, originWorldY + lr.y, lr.w, lr.h };
             return ToD2DRect(cam.WorldRectToScreen(wr));
         };
+
+        // Optional object rotation transform (F-107, F-131)
+        D2D1::Matrix3x2F savedTransform = D2D1::Matrix3x2F::Identity();
+        const bool applyRotation = (std::abs(obj.rotationDeg) > 0.15);
+        if (applyRotation) {
+            rt->GetTransform(&savedTransform);
+            const D2D1_RECT_F rotBox = rectToScreen(obj.bounds);
+            const D2D1_POINT_2F center = D2D1::Point2F((rotBox.left + rotBox.right) * 0.5f, (rotBox.top + rotBox.bottom) * 0.5f);
+            rt->SetTransform(D2D1::Matrix3x2F::Rotation(static_cast<FLOAT>(obj.rotationDeg), center) * savedTransform);
+        }
 
         if (obj.kind == ObjectKind::InkStroke) {
             const std::vector<InkPoint> filteredPts = (overlay && overlay->replayActive)
@@ -578,12 +749,17 @@ struct D2DRenderer::Impl {
             const float wPx = (std::max)(1.0f, static_cast<float>(obj.strokeWidth * cam.zoom));
             const D2D1_RECT_F sr = rectToScreen(obj.bounds);
             if (obj.shapeKind == ShapeKind::Rectangle || obj.shapeKind == ShapeKind::SignatureStamp) {
-                if (obj.fillColor.a > 0) {
-                    brush->SetColor(ToD2DColor(obj.fillColor));
+                if (obj.isRedaction) {
+                    brush->SetColor(ToD2DColor(DocColor::RGBA(10, 12, 16, 255)));
                     rt->FillRectangle(sr, brush);
+                } else {
+                    if (obj.fillColor.a > 0) {
+                        brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(obj.fillColor, layerOpacity)));
+                        rt->FillRectangle(sr, brush);
+                    }
+                    brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(obj.strokeColor, layerOpacity)));
+                    rt->DrawRectangle(sr, brush, wPx);
                 }
-                brush->SetColor(ToD2DColor(obj.strokeColor));
-                rt->DrawRectangle(sr, brush, wPx);
                 if (obj.shapeKind == ShapeKind::SignatureStamp && !obj.textUtf8.empty() && dwFactory) {
                     const D2D1_RECT_F inner = D2D1::RectF(sr.left + 3.0f, sr.top + 3.0f, sr.right - 3.0f, sr.bottom - 3.0f);
                     rt->DrawRectangle(inner, brush, 0.8f);
@@ -612,7 +788,7 @@ struct D2DRenderer::Impl {
                 const D2D1_POINT_2F p1 = toScreen(obj.shapeEnd.x, obj.shapeEnd.y);
                 brush->SetColor(ToD2DColor(obj.strokeColor));
                 rt->DrawLine(p0, p1, brush, wPx, roundStroke.Get());
-                if (obj.shapeKind == ShapeKind::Arrow) {
+                if (obj.shapeKind == ShapeKind::Arrow || obj.shapeKind == ShapeKind::Connector) {
                     const double dx = p1.x - p0.x;
                     const double dy = p1.y - p0.y;
                     const double len = std::hypot(dx, dy);
@@ -624,6 +800,10 @@ struct D2DRenderer::Impl {
                         const D2D1_POINT_2F b = D2D1::Point2F(static_cast<FLOAT>(p1.x - ux * hs - px), static_cast<FLOAT>(p1.y - uy * hs - py));
                         rt->DrawLine(a, p1, brush, wPx, roundStroke.Get());
                         rt->DrawLine(b, p1, brush, wPx, roundStroke.Get());
+                    }
+                    if (obj.shapeKind == ShapeKind::Connector) {
+                        rt->FillEllipse(D2D1::Ellipse(p0, 3.5f, 3.5f), brush);
+                        rt->FillEllipse(D2D1::Ellipse(p1, 3.5f, 3.5f), brush);
                     }
                 }
             }
@@ -657,7 +837,19 @@ struct D2DRenderer::Impl {
                             obj.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
                             DWRITE_FONT_STRETCH_NORMAL, fontPx, L"es-ES", &fmt)) && fmt) {
                         const std::wstring wtxt = Utf8ToWide(obj.textUtf8);
-                        rt->DrawTextW(wtxt.c_str(), static_cast<UINT32>(wtxt.size()), fmt.Get(), sr, brush);
+                        if (obj.underline) {
+                            ComPtr<IDWriteTextLayout> layout;
+                            if (SUCCEEDED(dwFactory->CreateTextLayout(
+                                    wtxt.c_str(), static_cast<UINT32>(wtxt.size()), fmt.Get(),
+                                    (std::max)(4.0f, sr.right - sr.left), (std::max)(4.0f, sr.bottom - sr.top), &layout)) && layout) {
+                                layout->SetUnderline(TRUE, DWRITE_TEXT_RANGE{ 0, static_cast<UINT32>(wtxt.size()) });
+                                rt->DrawTextLayout(D2D1::Point2F(sr.left, sr.top), layout.Get(), brush);
+                            } else {
+                                rt->DrawTextW(wtxt.c_str(), static_cast<UINT32>(wtxt.size()), fmt.Get(), sr, brush);
+                            }
+                        } else {
+                            rt->DrawTextW(wtxt.c_str(), static_cast<UINT32>(wtxt.size()), fmt.Get(), sr, brush);
+                        }
                     }
                 }
             }
@@ -668,7 +860,15 @@ struct D2DRenderer::Impl {
                 const std::string tag = !obj.assetKey.empty() ? obj.assetKey : ("inline_" + std::to_string(obj.id));
                 ComPtr<ID2D1Bitmap> bmp = AcquireGpuBitmapForEncodedAsset(rt, tag, *bytesPtr, cacheGpuAssets);
                 if (bmp) {
-                    rt->DrawBitmap(bmp.Get(), sr);
+                    const D2D1_SIZE_F bsz = bmp->GetSize();
+                    NormalizedCropRect ic = obj.imageCrop;
+                    ic.Clamp();
+                    const D2D1_RECT_F srcR = D2D1::RectF(
+                        static_cast<FLOAT>(ic.left * bsz.width),
+                        static_cast<FLOAT>(ic.top * bsz.height),
+                        static_cast<FLOAT>(ic.right * bsz.width),
+                        static_cast<FLOAT>(ic.bottom * bsz.height));
+                    rt->DrawBitmap(bmp.Get(), sr, static_cast<FLOAT>(layerOpacity), D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &srcR);
                 }
             } else {
                 brush->SetColor(ToD2DColor(DocColor::RGBA(200, 210, 224, 255)));
@@ -789,13 +989,165 @@ struct D2DRenderer::Impl {
                     }
                 }
             }
+        } else if (obj.kind == ObjectKind::TableBlock) {
+            const bool isDarkCard = (overlay && overlay->darkTheme);
+            const D2D1_RECT_F sr = rectToScreen(obj.bounds);
+            const float rad = (std::max)(4.0f, static_cast<float>(8.0 * cam.zoom));
+            brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(
+                isDarkCard ? DocColor::RGBA(28, 34, 46, 246) : DocColor::RGBA(255, 255, 255, 250), layerOpacity)));
+            rt->FillRoundedRectangle(D2D1::RoundedRect(sr, rad, rad), brush);
+            brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(
+                isDarkCard ? DocColor::RGBA(72, 86, 108, 235) : DocColor::RGBA(198, 208, 224, 255), layerOpacity)));
+            rt->DrawRoundedRectangle(D2D1::RoundedRect(sr, rad, rad), brush, 1.1f);
+
+            std::vector<std::vector<std::string>> rows;
+            if (!obj.tableJsonUtf8.empty()) {
+                try {
+                    const auto tj = nlohmann::json::parse(obj.tableJsonUtf8);
+                    if (tj.contains("rows") && tj["rows"].is_array()) {
+                        for (const auto& rj : tj["rows"]) {
+                            if (!rj.is_array()) continue;
+                            std::vector<std::string> rv;
+                            for (const auto& cj : rj) rv.push_back(cj.is_string() ? cj.get<std::string>() : cj.dump());
+                            rows.push_back(std::move(rv));
+                        }
+                    }
+                } catch (...) {}
+            }
+            if (rows.empty() && !obj.textUtf8.empty()) {
+                std::istringstream iss(obj.textUtf8);
+                std::string ln;
+                while (std::getline(iss, ln)) {
+                    std::vector<std::string> rv;
+                    std::istringstream ls(ln);
+                    std::string cell;
+                    while (std::getline(ls, cell, '|')) rv.push_back(cell);
+                    if (!rv.empty()) rows.push_back(std::move(rv));
+                }
+            }
+            if (!rows.empty()) {
+                std::size_t maxCols = 1;
+                for (const auto& r : rows) maxCols = (std::max)(maxCols, r.size());
+                const float cellW = (sr.right - sr.left) / static_cast<float>(maxCols);
+                const float cellH = (sr.bottom - sr.top) / static_cast<float>(rows.size());
+                // Header band tint
+                brush->SetColor(ToD2DColor(isDarkCard ? DocColor::RGBA(40, 50, 68, 230) : DocColor::RGBA(241, 245, 250, 245)));
+                rt->FillRectangle(D2D1::RectF(sr.left + 1.0f, sr.top + 1.0f, sr.right - 1.0f, sr.top + cellH), brush);
+                brush->SetColor(ToD2DColor(isDarkCard ? DocColor::RGBA(64, 76, 96, 200) : DocColor::RGBA(214, 222, 234, 255)));
+                for (std::size_t r = 1; r < rows.size(); ++r) {
+                    const float y = sr.top + static_cast<float>(r) * cellH;
+                    rt->DrawLine(D2D1::Point2F(sr.left, y), D2D1::Point2F(sr.right, y), brush, 0.8f);
+                }
+                for (std::size_t c = 1; c < maxCols; ++c) {
+                    const float x = sr.left + static_cast<float>(c) * cellW;
+                    rt->DrawLine(D2D1::Point2F(x, sr.top), D2D1::Point2F(x, sr.bottom), brush, 0.8f);
+                }
+                if (dwFactory) {
+                    const float fpx = std::clamp(static_cast<float>(10.5 * cam.zoom), 7.5f, 18.0f);
+                    ComPtr<IDWriteTextFormat> fmtN, fmtB;
+                    dwFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, fpx, L"es-ES", &fmtN);
+                    dwFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, fpx, L"es-ES", &fmtB);
+                    brush->SetColor(ToD2DColor(isDarkCard ? DocColor::RGBA(238, 242, 250, 255) : DocColor::RGBA(24, 30, 42, 255)));
+                    rt->PushAxisAlignedClip(sr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    for (std::size_t r = 0; r < rows.size(); ++r) {
+                        for (std::size_t c = 0; c < rows[r].size(); ++c) {
+                            const D2D1_RECT_F cr = D2D1::RectF(
+                                sr.left + static_cast<float>(c) * cellW + 4.0f,
+                                sr.top + static_cast<float>(r) * cellH + 2.0f,
+                                sr.left + static_cast<float>(c + 1) * cellW - 4.0f,
+                                sr.top + static_cast<float>(r + 1) * cellH - 2.0f);
+                            const std::wstring wcell = Utf8ToWide(rows[r][c]);
+                            IDWriteTextFormat* f = (r == 0 && fmtB) ? fmtB.Get() : fmtN.Get();
+                            if (f) rt->DrawTextW(wcell.c_str(), static_cast<UINT32>(wcell.size()), f, cr, brush);
+                        }
+                    }
+                    rt->PopAxisAlignedClip();
+                }
+            }
+        } else if (obj.kind == ObjectKind::CodeBlock) {
+            const bool isDarkCard = (overlay && overlay->darkTheme);
+            const D2D1_RECT_F sr = rectToScreen(obj.bounds);
+            const float rad = (std::max)(4.0f, static_cast<float>(8.0 * cam.zoom));
+            brush->SetColor(ToD2DColor(isDarkCard ? DocColor::RGBA(22, 26, 36, 248) : DocColor::RGBA(246, 248, 252, 250)));
+            rt->FillRoundedRectangle(D2D1::RoundedRect(sr, rad, rad), brush);
+            brush->SetColor(ToD2DColor(isDarkCard ? DocColor::RGBA(72, 84, 108, 235) : DocColor::RGBA(190, 202, 220, 255)));
+            rt->DrawRoundedRectangle(D2D1::RoundedRect(sr, rad, rad), brush, 1.1f);
+            if (dwFactory) {
+                const float fpx = std::clamp(static_cast<float>(10.0 * cam.zoom), 7.5f, 16.0f);
+                ComPtr<IDWriteTextFormat> fmt;
+                if (SUCCEEDED(dwFactory->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, fpx, L"es-ES", &fmt)) && fmt) {
+                    brush->SetColor(ToD2DColor(isDarkCard ? DocColor::RGBA(220, 234, 252, 255) : DocColor::RGBA(28, 36, 52, 255)));
+                    std::string body = (obj.captionUtf8.empty() ? ("[" + obj.codeLanguageUtf8 + "]") : obj.captionUtf8) + "\n" + obj.textUtf8;
+                    if (!obj.evaluatedResultUtf8.empty()) body += "\n// => " + obj.evaluatedResultUtf8;
+                    const std::wstring wtxt = Utf8ToWide(body);
+                    rt->PushAxisAlignedClip(sr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    rt->DrawTextW(wtxt.c_str(), static_cast<UINT32>(wtxt.size()), fmt.Get(),
+                        D2D1::RectF(sr.left + 8.0f, sr.top + 6.0f, sr.right - 8.0f, sr.bottom - 6.0f), brush);
+                    rt->PopAxisAlignedClip();
+                }
+            }
+        } else if (obj.kind == ObjectKind::AudioClip) {
+            const bool isDarkCard = (overlay && overlay->darkTheme);
+            const D2D1_RECT_F sr = rectToScreen(obj.bounds);
+            const float rad = (std::min)(14.0f, (sr.bottom - sr.top) * 0.45f);
+            brush->SetColor(ToD2DColor(isDarkCard ? DocColor::RGBA(32, 46, 68, 240) : DocColor::RGBA(239, 246, 255, 248)));
+            rt->FillRoundedRectangle(D2D1::RoundedRect(sr, rad, rad), brush);
+            brush->SetColor(ToD2DColor(DocColor::RGBA(37, 99, 235, 220)));
+            rt->DrawRoundedRectangle(D2D1::RoundedRect(sr, rad, rad), brush, 1.2f);
+            // Vector play triangle + waveform bars
+            const float cy = (sr.top + sr.bottom) * 0.5f;
+            const float px = sr.left + 14.0f;
+            brush->SetColor(ToD2DColor(DocColor::RGBA(37, 99, 235, 255)));
+            rt->DrawLine(D2D1::Point2F(px - 3.0f, cy - 5.0f), D2D1::Point2F(px + 5.0f, cy), brush, 2.0f, roundStroke.Get());
+            rt->DrawLine(D2D1::Point2F(px + 5.0f, cy), D2D1::Point2F(px - 3.0f, cy + 5.0f), brush, 2.0f, roundStroke.Get());
+            rt->DrawLine(D2D1::Point2F(px - 3.0f, cy - 5.0f), D2D1::Point2F(px - 3.0f, cy + 5.0f), brush, 2.0f, roundStroke.Get());
+            if (dwFactory) {
+                ComPtr<IDWriteTextFormat> fmt;
+                if (SUCCEEDED(dwFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, std::clamp(static_cast<float>(10.5 * cam.zoom), 8.0f, 15.0f), L"es-ES", &fmt)) && fmt) {
+                    fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    brush->SetColor(ToD2DColor(isDarkCard ? DocColor::RGBA(219, 234, 254, 255) : DocColor::RGBA(30, 58, 138, 255)));
+                    const std::wstring wcap = Utf8ToWide(obj.captionUtf8.empty() ? "Nota de voz" : obj.captionUtf8);
+                    rt->DrawTextW(wcap.c_str(), static_cast<UINT32>(wcap.size()), fmt.Get(),
+                        D2D1::RectF(sr.left + 26.0f, sr.top, sr.right - 8.0f, sr.bottom), brush);
+                }
+            }
+        }
+
+        if (applyRotation) {
+            rt->SetTransform(savedTransform);
         }
 
         if (isSelected) {
             const D2D1_RECT_F sr = rectToScreen(obj.bounds);
-            brush->SetColor(ToD2DColor(DocColor::RGBA(37, 99, 235, 255)));
+            brush->SetColor(ToD2DColor(DocColor::RGBA(0, 122, 255, 255)));
             rt->DrawRectangle(D2D1::RectF(sr.left - 3.0f, sr.top - 3.0f, sr.right + 3.0f, sr.bottom + 3.0f),
-                brush, 1.6f, dashStroke.Get());
+                brush, 1.5f, dashStroke.Get());
+            // 8 resize handles + top rotation stalk handle (F-103, F-107, F-131)
+            if (!overlay || overlay->showSelectionHandles) {
+                const float mx = (sr.left + sr.right) * 0.5f;
+                const float my = (sr.top + sr.bottom) * 0.5f;
+                const D2D1_POINT_2F handles[8] = {
+                    { sr.left - 3.0f, sr.top - 3.0f }, { mx, sr.top - 3.0f }, { sr.right + 3.0f, sr.top - 3.0f },
+                    { sr.right + 3.0f, my }, { sr.right + 3.0f, sr.bottom + 3.0f }, { mx, sr.bottom + 3.0f },
+                    { sr.left - 3.0f, sr.bottom + 3.0f }, { sr.left - 3.0f, my }
+                };
+                // Rotation stalk
+                const D2D1_POINT_2F rotTop = D2D1::Point2F(mx, sr.top - 22.0f);
+                rt->DrawLine(D2D1::Point2F(mx, sr.top - 3.0f), rotTop, brush, 1.4f);
+                brush->SetColor(ToD2DColor(DocColor::RGBA(255, 255, 255, 255)));
+                rt->FillEllipse(D2D1::Ellipse(rotTop, 4.5f, 4.5f), brush);
+                brush->SetColor(ToD2DColor(DocColor::RGBA(0, 122, 255, 255)));
+                rt->DrawEllipse(D2D1::Ellipse(rotTop, 4.5f, 4.5f), brush, 1.5f);
+                for (const auto& h : handles) {
+                    const D2D1_RECT_F hr = D2D1::RectF(h.x - 4.0f, h.y - 4.0f, h.x + 4.0f, h.y + 4.0f);
+                    brush->SetColor(ToD2DColor(DocColor::RGBA(255, 255, 255, 255)));
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(hr, 2.0f, 2.0f), brush);
+                    brush->SetColor(ToD2DColor(DocColor::RGBA(0, 122, 255, 255)));
+                    rt->DrawRoundedRectangle(D2D1::RoundedRect(hr, 2.0f, 2.0f), brush, 1.4f);
+                }
+            }
         }
     }
 
@@ -890,8 +1242,32 @@ struct D2DRenderer::Impl {
         for (std::size_t p = firstPg; p <= lastPg && p < pages.size(); ++p) {
             const auto* place = doc.Layout().PlacementAt(p);
             if (!place) continue;
+            if (place->collapsed && !place->collapsedHeader) continue;
+
             const DocRect pageWorld = place->WorldRect();
             const D2D1_RECT_F pageScreen = ToD2DRect(cam.WorldRectToScreen(pageWorld));
+
+            // Collapsed page range pill banner (F-055: clickable to expand)
+            if (place->collapsedHeader) {
+                const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(pageScreen, 10.0f, 10.0f);
+                brush->SetColor(ToD2DColor(isDark ? DocColor::RGBA(36, 44, 60, 235) : DocColor::RGBA(241, 245, 252, 248)));
+                rt->FillRoundedRectangle(rr, brush.Get());
+                brush->SetColor(ToD2DColor(DocColor::RGBA(0, 122, 255, 200)));
+                rt->DrawRoundedRectangle(rr, brush.Get(), 1.2f);
+                if (dwFactory) {
+                    ComPtr<IDWriteTextFormat> fmt;
+                    if (SUCCEEDED(dwFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"es-ES", &fmt)) && fmt) {
+                        fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                        fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                        brush->SetColor(ToD2DColor(isDark ? DocColor::RGBA(191, 219, 254, 255) : DocColor::RGBA(29, 78, 216, 255)));
+                        const std::wstring lbl = L"P\u00E1ginas " + std::to_wstring(p + 1) + L"\u2013" +
+                            std::to_wstring(place->collapsedEndPage0 + 1) + L" contra\u00EDdas \u2014 Clic para expandir";
+                        rt->DrawTextW(lbl.c_str(), static_cast<UINT32>(lbl.size()), fmt.Get(), pageScreen, brush.Get());
+                    }
+                }
+                continue;
+            }
 
             // Multi-layered soft Apple HIG page shadow + crisp white sheet (content layer: NEVER glass)
             for (int sh = 3; sh >= 1; --sh) {
@@ -997,6 +1373,85 @@ struct D2DRenderer::Impl {
                 }
             }
 
+            // Clickable InkLink badges on this page (F-132)
+            for (const auto& lk : doc.InkLinks()) {
+                if (lk.sourcePageIndex0 != static_cast<int>(p)) continue;
+                const DocRect lr{
+                    pageWorld.x + lk.sourceRectNorm.left * pageWorld.w,
+                    pageWorld.y + lk.sourceRectNorm.top * pageWorld.h,
+                    (std::max)(80.0, (lk.sourceRectNorm.right - lk.sourceRectNorm.left) * pageWorld.w),
+                    (std::max)(20.0, (lk.sourceRectNorm.bottom - lk.sourceRectNorm.top) * pageWorld.h)
+                };
+                const D2D1_RECT_F sLr = ToD2DRect(cam.WorldRectToScreen(lr));
+                const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(sLr, 6.0f, 6.0f);
+                brush->SetColor(ToD2DColor(DocColor::RGBA(0, 122, 255, 36)));
+                rt->FillRoundedRectangle(rr, brush.Get());
+                brush->SetColor(ToD2DColor(DocColor::RGBA(0, 122, 255, 220)));
+                rt->DrawRoundedRectangle(rr, brush.Get(), 1.2f);
+                if (dwFactory && !lk.labelUtf8.empty()) {
+                    ComPtr<IDWriteTextFormat> fmt;
+                    if (SUCCEEDED(dwFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, std::clamp(static_cast<float>(9.5 * cam.zoom), 7.5f, 13.0f), L"es-ES", &fmt)) && fmt) {
+                        fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                        const std::wstring wl = Utf8ToWide(lk.labelUtf8);
+                        rt->DrawTextW(wl.c_str(), static_cast<UINT32>(wl.size()), fmt.Get(),
+                            D2D1::RectF(sLr.left + 6.0f, sLr.top, sLr.right - 4.0f, sLr.bottom), brush.Get());
+                    }
+                }
+            }
+
+            // PDF Hyperlink subtle indicator (F-082) & AcroForm field overlay (F-084)
+            for (const auto& pl : pg.pdfLinks) {
+                const DocRect lr{
+                    pageWorld.x + pl.rectNorm.x * pageWorld.w,
+                    pageWorld.y + pl.rectNorm.y * pageWorld.h,
+                    pl.rectNorm.w * pageWorld.w,
+                    pl.rectNorm.h * pageWorld.h
+                };
+                const D2D1_RECT_F sLr = ToD2DRect(cam.WorldRectToScreen(lr));
+                brush->SetColor(ToD2DColor(DocColor::RGBA(37, 99, 235, 110)));
+                rt->DrawLine(D2D1::Point2F(sLr.left, sLr.bottom), D2D1::Point2F(sLr.right, sLr.bottom), brush.Get(), 1.0f, dashStroke.Get());
+            }
+            for (const auto& ff : pg.formFields) {
+                const DocRect fr{
+                    pageWorld.x + ff.rectNorm.x * pageWorld.w,
+                    pageWorld.y + ff.rectNorm.y * pageWorld.h,
+                    ff.rectNorm.w * pageWorld.w,
+                    ff.rectNorm.h * pageWorld.h
+                };
+                const D2D1_RECT_F sFr = ToD2DRect(cam.WorldRectToScreen(fr));
+                brush->SetColor(ToD2DColor(DocColor::RGBA(219, 234, 254, 96)));
+                rt->FillRectangle(sFr, brush.Get());
+                brush->SetColor(ToD2DColor(DocColor::RGBA(59, 130, 246, 180)));
+                rt->DrawRectangle(sFr, brush.Get(), 0.9f);
+                if (dwFactory) {
+                    const std::string disp = (ff.fieldTypeUtf8 == "Btn") ? (ff.checked ? "X" : "") : ff.valueUtf8;
+                    if (!disp.empty()) {
+                        ComPtr<IDWriteTextFormat> fmt;
+                        if (SUCCEEDED(dwFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, std::clamp(static_cast<float>(10.0 * cam.zoom), 7.5f, 15.0f), L"es-ES", &fmt)) && fmt) {
+                            brush->SetColor(ToD2DColor(DocColor::RGBA(15, 23, 42, 255)));
+                            const std::wstring wd = Utf8ToWide(disp);
+                            rt->DrawTextW(wd.c_str(), static_cast<UINT32>(wd.size()), fmt.Get(), sFr, brush.Get());
+                        }
+                    }
+                }
+            }
+
+            // PDF drag-to-select live selection highlight (F-075, F-076)
+            if (overlay && overlay->hasPdfTextSel && overlay->pdfTextSelPage == p) {
+                const DocRect selW{
+                    pageWorld.x + overlay->pdfTextSelRectLocal.x,
+                    pageWorld.y + overlay->pdfTextSelRectLocal.y,
+                    overlay->pdfTextSelRectLocal.w,
+                    overlay->pdfTextSelRectLocal.h
+                };
+                brush->SetColor(ToD2DColor(DocColor::RGBA(0, 122, 255, 68)));
+                rt->FillRectangle(ToD2DRect(cam.WorldRectToScreen(selW)), brush.Get());
+                brush->SetColor(ToD2DColor(DocColor::RGBA(0, 122, 255, 210)));
+                rt->DrawRectangle(ToD2DRect(cam.WorldRectToScreen(selW)), brush.Get(), 1.1f);
+            }
+
             // Crop preview box
             if (overlay && overlay->hasCropPreview && overlay->cropPageIndex == p) {
                 const DocRect cr{
@@ -1029,6 +1484,45 @@ struct D2DRenderer::Impl {
         const bool isHc = overlay->highContrast;
 
         if (overlay->rulerState.visible && d2dFactory) {
+            if (overlay->rulerState.mode == RulerMode::Protractor) {
+                const DocPoint cScr = cam.WorldToScreen(overlay->rulerState.centerX, overlay->rulerState.centerY);
+                const float rPx = static_cast<float>((std::max)(40.0, overlay->rulerState.lengthPt * 0.42) * cam.zoom);
+                const double baseRad = overlay->rulerState.angleDeg * (3.14159265358979323846 / 180.0);
+                // Semicircle translucent arc + radial degree ticks (F-039)
+                brush->SetColor(ToD2DColor(isDark ? DocColor::RGBA(56, 189, 248, 220) : DocColor::RGBA(2, 132, 199, 235)));
+                DocPoint prev{};
+                for (int deg = 0; deg <= 180; deg += 3) {
+                    const double a = baseRad - deg * (3.14159265358979323846 / 180.0);
+                    const DocPoint cur{ cScr.x + rPx * std::cos(a), cScr.y + rPx * std::sin(a) };
+                    if (deg > 0) {
+                        rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(prev.x), static_cast<FLOAT>(prev.y)),
+                                     D2D1::Point2F(static_cast<FLOAT>(cur.x), static_cast<FLOAT>(cur.y)), brush, 2.0f);
+                    }
+                    if (deg % 15 == 0) {
+                        const float inner = (deg % 45 == 0) ? (rPx * 0.82f) : (rPx * 0.90f);
+                        rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(cScr.x + inner * std::cos(a)), static_cast<FLOAT>(cScr.y + inner * std::sin(a))),
+                                     D2D1::Point2F(static_cast<FLOAT>(cur.x), static_cast<FLOAT>(cur.y)), brush, (deg % 45 == 0) ? 1.5f : 0.9f);
+                    }
+                    prev = cur;
+                }
+                rt->DrawLine(
+                    D2D1::Point2F(static_cast<FLOAT>(cScr.x - rPx * std::cos(baseRad)), static_cast<FLOAT>(cScr.y - rPx * std::sin(baseRad))),
+                    D2D1::Point2F(static_cast<FLOAT>(cScr.x + rPx * std::cos(baseRad)), static_cast<FLOAT>(cScr.y + rPx * std::sin(baseRad))),
+                    brush, 2.0f);
+                rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(static_cast<FLOAT>(cScr.x), static_cast<FLOAT>(cScr.y)), 4.0f, 4.0f), brush);
+            } else if (overlay->rulerState.mode == RulerMode::Compass) {
+                const DocPoint cScr = cam.WorldToScreen(overlay->rulerState.centerX, overlay->rulerState.centerY);
+                const float rPx = static_cast<float>((std::max)(18.0, overlay->rulerState.compassRadiusPt) * cam.zoom);
+                brush->SetColor(ToD2DColor(isDark ? DocColor::RGBA(56, 189, 248, 220) : DocColor::RGBA(2, 132, 199, 235)));
+                rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(static_cast<FLOAT>(cScr.x), static_cast<FLOAT>(cScr.y)), rPx, rPx),
+                    brush, 1.8f, dashStroke.Get());
+                rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(cScr.x) - 8.0f, static_cast<FLOAT>(cScr.y)),
+                             D2D1::Point2F(static_cast<FLOAT>(cScr.x) + 8.0f, static_cast<FLOAT>(cScr.y)), brush, 1.5f);
+                rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(cScr.x), static_cast<FLOAT>(cScr.y) - 8.0f),
+                             D2D1::Point2F(static_cast<FLOAT>(cScr.x), static_cast<FLOAT>(cScr.y) + 8.0f), brush, 1.5f);
+                rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(cScr.x), static_cast<FLOAT>(cScr.y)),
+                             D2D1::Point2F(static_cast<FLOAT>(cScr.x) + rPx, static_cast<FLOAT>(cScr.y)), brush, 1.2f);
+            } else {
             const auto rg = RenderCommon::BuildRulerOverlay(overlay->rulerState, cam);
             ComPtr<ID2D1PathGeometry> poly;
             if (SUCCEEDED(d2dFactory->CreatePathGeometry(&poly)) && poly) {
@@ -1087,6 +1581,7 @@ struct D2DRenderer::Impl {
                                                       : DocColor::RGBA(12, 74, 110, 255)));
                     rt->DrawTextW(wb.c_str(), static_cast<UINT32>(wb.size()), fmt.Get(), pillR, brush);
                 }
+            }
             }
         }
 

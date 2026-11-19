@@ -82,7 +82,13 @@ enum class PaperPattern : std::uint8_t {
     Ruled = 1,
     Grid = 2,
     Dots = 3,
-    Millimeter = 4
+    Millimeter = 4,
+    Isometric = 5,
+    LogLog = 6,
+    Polar = 7,
+    SmithChart = 8,
+    Cornell = 9,
+    MusicStaff = 10
 };
 
 enum class ObjectKind : std::uint8_t {
@@ -95,7 +101,10 @@ enum class ObjectKind : std::uint8_t {
     MathBlock = 6,
     CircuitBlock = 7,
     CalcSessionCard = 8,
-    PlotBlock = 9
+    PlotBlock = 9,
+    TableBlock = 10,
+    CodeBlock = 11,
+    AudioClip = 12
 };
 
 enum class InkPenStyle : std::uint8_t {
@@ -119,12 +128,36 @@ enum class EraserFilterMode : std::uint8_t {
     ShapesOnly = 3
 };
 
+enum class EraserActionMode : std::uint8_t {
+    WholeStroke = 0,
+    PartialPixel = 1
+};
+
 enum class ShapeKind : std::uint8_t {
     Line = 0,
     Arrow = 1,
     Rectangle = 2,
     Ellipse = 3,
-    SignatureStamp = 4
+    SignatureStamp = 4,
+    Connector = 5
+};
+
+struct NormalizedCropRect {
+    double left = 0.0;
+    double top = 0.0;
+    double right = 1.0;
+    double bottom = 1.0;
+
+    bool IsFull() const noexcept {
+        return left <= 0.0001 && top <= 0.0001 && right >= 0.9999 && bottom >= 0.9999;
+    }
+
+    void Clamp() noexcept {
+        left = std::clamp(left, 0.0, 0.95);
+        top = std::clamp(top, 0.0, 0.95);
+        right = std::clamp(right, left + 0.05, 1.0);
+        bottom = std::clamp(bottom, top + 0.05, 1.0);
+    }
 };
 
 struct AnnotationObject {
@@ -196,6 +229,21 @@ struct AnnotationObject {
     double sliderValue = 0.0;
     std::vector<std::string> tags; // e.g. "#examen", "#duda", "#definicion", "#pendiente"
 
+    // Direct manipulation, grouping, rich text, image crop/opacity, HTR, tables, connectors, code & PDF semantics
+    double rotationDeg = 0.0;
+    double opacity = 1.0;
+    std::uint64_t groupId = 0;
+    bool underline = false;
+    std::string listStyleUtf8; // "", "bullet", "number", "checkbox"
+    NormalizedCropRect imageCrop{};
+    std::string htrRecognizedTextUtf8;
+    std::string tableJsonUtf8;
+    std::uint64_t connectorFromId = 0;
+    std::uint64_t connectorToId = 0;
+    std::vector<DocRect> pdfQuadPointsNorm;
+    bool isRedaction = false;
+    std::string codeLanguageUtf8; // "cpp", "c", "python", "ino"
+
     void RecomputeBounds() noexcept {
         if (kind == ObjectKind::InkStroke) {
             if (inkPoints.empty()) {
@@ -212,7 +260,8 @@ struct AnnotationObject {
             }
             const double pad = (std::max)(2.0, strokeWidth);
             bounds = { minX - pad, minY - pad, (maxX - minX) + pad * 2.0, (maxY - minY) + pad * 2.0 };
-        } else if (kind == ObjectKind::Shape && (shapeKind == ShapeKind::Line || shapeKind == ShapeKind::Arrow)) {
+        } else if (kind == ObjectKind::Shape &&
+                   (shapeKind == ShapeKind::Line || shapeKind == ShapeKind::Arrow || shapeKind == ShapeKind::Connector)) {
             const double minX = (std::min)(shapeStart.x, shapeEnd.x);
             const double minY = (std::min)(shapeStart.y, shapeEnd.y);
             const double maxX = (std::max)(shapeStart.x, shapeEnd.x);
@@ -223,22 +272,32 @@ struct AnnotationObject {
     }
 };
 
-struct NormalizedCropRect {
-    double left = 0.0;
-    double top = 0.0;
-    double right = 1.0;
-    double bottom = 1.0;
+struct PdfLinkRect {
+    DocRect rectNorm{};     // [0..1] top-left normalized on page
+    int targetPage0 = -1;   // >= 0 for internal page jump
+    std::string uriUtf8;    // non-empty for external URI
+    std::string titleUtf8;
+};
 
-    bool IsFull() const noexcept {
-        return left <= 0.0001 && top <= 0.0001 && right >= 0.9999 && bottom >= 0.9999;
-    }
+struct PdfFormField {
+    std::string nameUtf8;
+    std::string fieldTypeUtf8; // "Tx", "Btn", "Ch"
+    std::string valueUtf8;
+    DocRect rectNorm{};
+    bool checked = false;
+    bool readOnly = false;
+};
 
-    void Clamp() noexcept {
-        left = std::clamp(left, 0.0, 0.95);
-        top = std::clamp(top, 0.0, 0.95);
-        right = std::clamp(right, left + 0.05, 1.0);
-        bottom = std::clamp(bottom, top + 0.05, 1.0);
-    }
+struct PdfTextRunBox {
+    std::string textUtf8;
+    DocRect rectNorm{}; // [0..1] top-left normalized on page
+};
+
+struct EmbeddedAttachment {
+    std::string filenameUtf8;
+    std::string mimeTypeUtf8;
+    std::string assetKey;
+    std::size_t sizeBytes = 0;
 };
 
 struct PageModel {
@@ -258,6 +317,11 @@ struct PageModel {
     // Optional cached OCR or extracted plain text
     std::string extractedTextUtf8;
     std::string ocrTextUtf8;
+
+    // Semantic PDF metadata (clickable links, AcroForm fields, selectable text runs)
+    std::vector<PdfLinkRect> pdfLinks;
+    std::vector<PdfFormField> formFields;
+    std::vector<PdfTextRunBox> textBoxes;
 
     std::vector<AnnotationObject> objects;
     std::uint64_t activeLayerId = 1;
@@ -308,12 +372,20 @@ struct LaserPointerState {
     std::vector<DocPoint> trail;
 };
 
+enum class RulerMode : std::uint8_t {
+    Straightedge = 0,
+    Protractor = 1,
+    Compass = 2
+};
+
 struct RulerState {
     bool visible = false;
+    RulerMode mode = RulerMode::Straightedge;
     double centerX = 320.0;
     double centerY = 260.0;
     double angleDeg = 0.0; // 0..360 graduated protractor/ruler
     double lengthPt = 360.0;
+    double compassRadiusPt = 110.0;
 };
 
 struct DocumentBookmark {

@@ -86,6 +86,9 @@ struct PdfPageInfo {
     bool hasCropBox = false;
     int rotationDeg = 0;
     std::string extractedTextUtf8;
+    std::vector<PdfLinkRect> pdfLinks;
+    std::vector<PdfFormField> formFields;
+    std::vector<PdfTextRunBox> textBoxes;
 };
 
 struct TextEditCapability {

@@ -950,4 +950,107 @@ OcrOutput WinRtOcrAdapter::RecognizeBgra32(
     return result;
 }
 
+HtrOutput WinRtInkHtrAdapter::RecognizeStrokes(
+    const std::vector<AnnotationObject>& strokes,
+    const std::string& preferredLangTag)
+{
+    HtrOutput out{};
+    // Collect bounding box of all valid InkStroke points
+    double minX = 1e18, minY = 1e18, maxX = -1e18, maxY = -1e18;
+    std::size_t strokeCount = 0;
+    for (const auto& s : strokes) {
+        if (s.kind != ObjectKind::InkStroke || s.inkPoints.empty()) continue;
+        ++strokeCount;
+        for (const auto& pt : s.inkPoints) {
+            minX = (std::min)(minX, pt.x);
+            minY = (std::min)(minY, pt.y);
+            maxX = (std::max)(maxX, pt.x);
+            maxY = (std::max)(maxY, pt.y);
+        }
+    }
+    if (strokeCount == 0 || minX > maxX || minY > maxY) {
+        out.errorUtf8 = "No hay trazos de tinta seleccionados para reconocimiento.";
+        return out;
+    }
+
+    // Rasterize strokes onto high-contrast white BGRA32 canvas for reliable offline WinRT OCR recognition
+    // (works across all Windows 10/11 installations without requiring optional Ink Handwriting Packs).
+    const double spanW = (std::max)(24.0, maxX - minX);
+    const double spanH = (std::max)(24.0, maxY - minY);
+    const double scale = std::clamp(220.0 / (std::max)(spanH, 32.0), 1.5, 4.5);
+    const int pad = 32;
+    const int imgW = std::clamp(static_cast<int>(std::ceil(spanW * scale)) + pad * 2, 128, 2200);
+    const int imgH = std::clamp(static_cast<int>(std::ceil(spanH * scale)) + pad * 2, 96, 1200);
+    const double effScale = (std::min)(
+        static_cast<double>(imgW - pad * 2) / spanW,
+        static_cast<double>(imgH - pad * 2) / spanH);
+
+    std::vector<std::uint8_t> bgra(static_cast<std::size_t>(imgW) * imgH * 4u, 255u);
+    auto drawDisk = [&](int cx, int cy, int r) {
+        for (int dy = -r; dy <= r; ++dy) {
+            const int py = cy + dy;
+            if (py < 0 || py >= imgH) continue;
+            for (int dx = -r; dx <= r; ++dx) {
+                if (dx * dx + dy * dy > r * r) continue;
+                const int px = cx + dx;
+                if (px < 0 || px >= imgW) continue;
+                const std::size_t idx = (static_cast<std::size_t>(py) * imgW + px) * 4u;
+                bgra[idx + 0] = 16u;
+                bgra[idx + 1] = 16u;
+                bgra[idx + 2] = 16u;
+                bgra[idx + 3] = 255u;
+            }
+        }
+    };
+
+    for (const auto& s : strokes) {
+        if (s.kind != ObjectKind::InkStroke || s.inkPoints.empty()) continue;
+        const int radius = std::clamp(static_cast<int>(std::lround((std::max)(1.8, s.strokeWidth * 0.55) * effScale)), 2, 9);
+        for (std::size_t i = 0; i < s.inkPoints.size(); ++i) {
+            const double x0 = pad + (s.inkPoints[i].x - minX) * effScale;
+            const double y0 = pad + (s.inkPoints[i].y - minY) * effScale;
+            if (i == 0) {
+                drawDisk(static_cast<int>(std::lround(x0)), static_cast<int>(std::lround(y0)), radius);
+            } else {
+                const double px0 = pad + (s.inkPoints[i - 1].x - minX) * effScale;
+                const double py0 = pad + (s.inkPoints[i - 1].y - minY) * effScale;
+                const double dist = std::hypot(x0 - px0, y0 - py0);
+                const int steps = (std::max)(1, static_cast<int>(std::ceil(dist)));
+                for (int k = 1; k <= steps; ++k) {
+                    const double t = static_cast<double>(k) / static_cast<double>(steps);
+                    drawDisk(
+                        static_cast<int>(std::lround(px0 + (x0 - px0) * t)),
+                        static_cast<int>(std::lround(py0 + (y0 - py0) * t)),
+                        radius);
+                }
+            }
+        }
+    }
+
+    const OcrOutput ocr = WinRtOcrAdapter::RecognizeBgra32(imgW, imgH, bgra.data(), preferredLangTag);
+    if (!ocr.fullTextUtf8.empty()) {
+        out.recognized = true;
+        out.textUtf8 = ocr.fullTextUtf8;
+        out.candidatesUtf8.push_back(ocr.fullTextUtf8);
+        // Normalize common handwritten math glyph shortcuts for Formula conversion (F-045)
+        std::string mathNorm = ocr.fullTextUtf8;
+        auto replaceAll = [](std::string& s, const std::string& from, const std::string& to) {
+            std::size_t p = 0;
+            while ((p = s.find(from, p)) != std::string::npos) {
+                s.replace(p, from.size(), to);
+                p += to.size();
+            }
+        };
+        replaceAll(mathNorm, "\xC3\x97", "*");
+        replaceAll(mathNorm, "\xC3\xB7", "/");
+        replaceAll(mathNorm, "\xE2\x88\x92", "-");
+        out.mathLatexUtf8 = std::move(mathNorm);
+    } else {
+        out.errorUtf8 = ocr.errorUtf8.empty()
+            ? "No se detect\xC3\xB3 texto legible en los trazos seleccionados."
+            : ocr.errorUtf8;
+    }
+    return out;
+}
+
 } // namespace DocStudio

@@ -1,8 +1,13 @@
 #include "interop_openxml.hpp"
 #include "../core/zip_container.hpp"
+#include "../math/engineering_cas.hpp"
 
+#include <nlohmann/json.hpp>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <map>
+#include <set>
 #include <sstream>
 #include <utility>
 
@@ -211,6 +216,171 @@ std::string MakeDocxDrawingXml(const std::string& relId, std::uint64_t picId, do
     return s.str();
 }
 
+std::string ExtractXmlAttribute(const std::string& tag, const std::string& attrName) {
+    const std::string key = attrName + "=\"";
+    const std::size_t p = tag.find(key);
+    if (p == std::string::npos) return {};
+    const std::size_t s = p + key.size();
+    const std::size_t e = tag.find('"', s);
+    return (e == std::string::npos) ? std::string{} : XmlUnescape(tag.substr(s, e - s));
+}
+
+std::vector<std::string> ExtractTagBlocks(const std::string& xml, const std::string& tagName) {
+    std::vector<std::string> out;
+    const std::string open = "<" + tagName;
+    const std::string close = "</" + tagName + ">";
+    std::size_t pos = 0;
+    while (pos < xml.size()) {
+        const std::size_t start = xml.find(open, pos);
+        if (start == std::string::npos) break;
+        const std::size_t after = start + open.size();
+        if (after >= xml.size() || (xml[after] != '>' && xml[after] != ' ' && xml[after] != '/')) {
+            pos = after;
+            continue;
+        }
+        const std::size_t gt = xml.find('>', after);
+        if (gt == std::string::npos) break;
+        if (xml[gt - 1] == '/') {
+            pos = gt + 1;
+            continue;
+        }
+        // Handle nested tags of same name
+        int depth = 1;
+        std::size_t scan = gt + 1;
+        while (scan < xml.size() && depth > 0) {
+            const std::size_t nextOpen = xml.find(open, scan);
+            const std::size_t nextClose = xml.find(close, scan);
+            if (nextClose == std::string::npos) break;
+            if (nextOpen != std::string::npos && nextOpen < nextClose) {
+                const std::size_t na = nextOpen + open.size();
+                if (na < xml.size() && (xml[na] == '>' || xml[na] == ' ')) {
+                    const std::size_t ngt = xml.find('>', na);
+                    if (ngt != std::string::npos && xml[ngt - 1] != '/') ++depth;
+                    scan = (ngt == std::string::npos) ? nextOpen + 1 : ngt + 1;
+                } else {
+                    scan = na;
+                }
+            } else {
+                --depth;
+                if (depth == 0) {
+                    out.push_back(xml.substr(start, (nextClose + close.size()) - start));
+                    pos = nextClose + close.size();
+                    break;
+                }
+                scan = nextClose + close.size();
+            }
+        }
+        if (depth > 0) break;
+    }
+    return out;
+}
+
+// Converts Office Math Markup Language (<m:oMath>) XML to natural/LaTeX math expression
+std::string OmmlToFormulaExpr(const std::string& ommlXml) {
+    auto parseInner = [&](auto&& self, const std::string& frag) -> std::string {
+        // Fractions <m:f><m:num>...</m:num><m:den>...</m:den></m:f>
+        if (frag.find("<m:f>") != std::string::npos || frag.find("<m:f ") != std::string::npos) {
+            std::string work = frag;
+            const auto fracs = ExtractTagBlocks(work, "m:f");
+            for (const auto& fBlk : fracs) {
+                const auto nums = ExtractTagBlocks(fBlk, "m:num");
+                const auto dens = ExtractTagBlocks(fBlk, "m:den");
+                const std::string nStr = nums.empty() ? "" : self(self, nums[0]);
+                const std::string dStr = dens.empty() ? "" : self(self, dens[0]);
+                const std::string repl = "(" + nStr + ")/(" + dStr + ")";
+                const std::size_t p = work.find(fBlk);
+                if (p != std::string::npos) work.replace(p, fBlk.size(), "<m:t>" + repl + "</m:t>");
+            }
+            return self(self, work);
+        }
+        // Radicals <m:rad><m:e>...</m:e></m:rad>
+        if (frag.find("<m:rad") != std::string::npos) {
+            std::string work = frag;
+            for (const auto& rBlk : ExtractTagBlocks(work, "m:rad")) {
+                const auto es = ExtractTagBlocks(rBlk, "m:e");
+                const std::string inner = es.empty() ? "" : self(self, es[0]);
+                const std::size_t p = work.find(rBlk);
+                if (p != std::string::npos) work.replace(p, rBlk.size(), "<m:t>sqrt(" + inner + ")</m:t>");
+            }
+            return self(self, work);
+        }
+        // Superscripts <m:sSup><m:e>base</m:e><m:sup>exp</m:sup></m:sSup>
+        if (frag.find("<m:sSup") != std::string::npos) {
+            std::string work = frag;
+            for (const auto& sBlk : ExtractTagBlocks(work, "m:sSup")) {
+                const auto es = ExtractTagBlocks(sBlk, "m:e");
+                const auto sups = ExtractTagBlocks(sBlk, "m:sup");
+                const std::string b = es.empty() ? "" : self(self, es[0]);
+                const std::string e = sups.empty() ? "" : self(self, sups[0]);
+                const std::size_t p = work.find(sBlk);
+                if (p != std::string::npos) work.replace(p, sBlk.size(), "<m:t>" + b + "^(" + e + ")</m:t>");
+            }
+            return self(self, work);
+        }
+        // Subscripts <m:sSub><m:e>base</m:e><m:sub>sub</m:sub></m:sSub>
+        if (frag.find("<m:sSub") != std::string::npos) {
+            std::string work = frag;
+            for (const auto& sBlk : ExtractTagBlocks(work, "m:sSub")) {
+                const auto es = ExtractTagBlocks(sBlk, "m:e");
+                const auto subs = ExtractTagBlocks(sBlk, "m:sub");
+                const std::string b = es.empty() ? "" : self(self, es[0]);
+                const std::string sub = subs.empty() ? "" : self(self, subs[0]);
+                const std::size_t p = work.find(sBlk);
+                if (p != std::string::npos) work.replace(p, sBlk.size(), "<m:t>" + b + "_" + sub + "</m:t>");
+            }
+            return self(self, work);
+        }
+        return ExtractXmlTagTextParagraphs(frag, "", "m:t");
+    };
+    return parseInner(parseInner, ommlXml);
+}
+
+std::string FormulaExprToOmmlXml(const std::string& expr) {
+    return "<m:oMathPara xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:oMath><m:r><m:t>" +
+           XmlEscape(expr) + "</m:t></m:r></m:oMath></m:oMathPara>\n";
+}
+
+std::map<std::string, std::string> ParseRelationshipsXml(const std::string& relsXml) {
+    std::map<std::string, std::string> rels;
+    std::size_t pos = 0;
+    while (pos < relsXml.size()) {
+        const std::size_t p = relsXml.find("<Relationship ", pos);
+        if (p == std::string::npos) break;
+        const std::size_t gt = relsXml.find('>', p);
+        if (gt == std::string::npos) break;
+        const std::string tag = relsXml.substr(p, gt - p + 1);
+        const std::string id = ExtractXmlAttribute(tag, "Id");
+        const std::string target = ExtractXmlAttribute(tag, "Target");
+        if (!id.empty() && !target.empty()) rels[id] = target;
+        pos = gt + 1;
+    }
+    return rels;
+}
+
+std::string ParseTableXmlToJson(const std::string& tblXml, const std::string& rowTag, const std::string& cellTag, const std::string& textTag, std::string& outPlainPreview) {
+    nlohmann::json rows = nlohmann::json::array();
+    std::ostringstream preview;
+    for (const auto& rBlk : ExtractTagBlocks(tblXml, rowTag)) {
+        nlohmann::json row = nlohmann::json::array();
+        bool first = true;
+        for (const auto& cBlk : ExtractTagBlocks(rBlk, cellTag)) {
+            const std::string cellTxt = ExtractXmlTagTextParagraphs(cBlk, "", textTag);
+            row.push_back(cellTxt);
+            if (!first) preview << " | ";
+            preview << cellTxt;
+            first = false;
+        }
+        if (!row.empty()) {
+            rows.push_back(std::move(row));
+            preview << "\n";
+        }
+    }
+    outPlainPreview = preview.str();
+    nlohmann::json root;
+    root["rows"] = std::move(rows);
+    return root.dump();
+}
+
 } // namespace
 
 bool OpenXmlInterop::ExportToDocxBytes(
@@ -293,6 +463,24 @@ bool OpenXmlInterop::ExportToDocxBytes(
                     for (const auto& para : SplitParagraphs(obj.textUtf8)) {
                         body << "<w:p><w:r><w:t xml:space=\"preserve\">" << XmlEscape(para) << "</w:t></w:r></w:p>\n";
                     }
+                } else if (obj.kind == ObjectKind::MathBlock && !obj.formulaExprUtf8.empty()) {
+                    body << "<w:p>" << FormulaExprToOmmlXml(obj.formulaExprUtf8) << "</w:p>\n";
+                } else if (obj.kind == ObjectKind::TableBlock && !obj.tableJsonUtf8.empty()) {
+                    try {
+                        const auto tj = nlohmann::json::parse(obj.tableJsonUtf8);
+                        if (tj.contains("rows") && tj["rows"].is_array()) {
+                            body << "<w:tbl>\n";
+                            for (const auto& row : tj["rows"]) {
+                                if (!row.is_array()) continue;
+                                body << "<w:tr>";
+                                for (const auto& cell : row) {
+                                    body << "<w:tc><w:p><w:r><w:t>" << XmlEscape(cell.is_string() ? cell.get<std::string>() : cell.dump()) << "</w:t></w:r></w:p></w:tc>";
+                                }
+                                body << "</w:tr>\n";
+                            }
+                            body << "</w:tbl>\n";
+                        }
+                    } catch (...) {}
                 } else if (obj.kind == ObjectKind::Image) {
                     const auto* b = !obj.pngBytes.empty() ? &obj.pngBytes : doc.FindAsset(obj.assetKey);
                     if (b) addImage(*b, obj.bounds.w, obj.bounds.h);
@@ -335,37 +523,181 @@ bool OpenXmlInterop::ImportFromDocxBytes(
     }
 
     const std::string xml(reinterpret_cast<const char*>(docEntry->data()), docEntry->size());
-    const std::string text = ExtractXmlTagTextParagraphs(xml, "</w:p>", "w:t");
+    std::map<std::string, std::string> rels;
+    if (const auto* rEntry = zip.FindEntry("word/_rels/document.xml.rels")) {
+        rels = ParseRelationshipsXml(std::string(reinterpret_cast<const char*>(rEntry->data()), rEntry->size()));
+    }
 
     DocumentModel temp;
     temp.ResetToBlank(DocumentMode::PaginatedPdf);
     temp.SetTitle("Importado de Word");
-    if (!temp.MutablePages().empty()) {
-        temp.MutablePages()[0].extractedTextUtf8 = text;
-        if (!text.empty()) {
-            AnnotationObject tb;
-            tb.kind = ObjectKind::TextBox;
-            tb.bounds = { 48.0, 48.0, 499.0, 520.0 };
-            tb.textUtf8 = text;
-            tb.strokeColor = DocColor::RGBA(24, 28, 36, 255);
-            tb.fontSizePt = 11.5;
-            temp.AddPageObject(0, std::move(tb));
+    temp.MutablePages().clear();
+
+    auto startNewPage = [&]() -> std::size_t {
+        PageModel pm{};
+        pm.pageId = temp.AllocatePageId();
+        pm.widthPt = 595.0;
+        pm.heightPt = 842.0;
+        pm.background = PaperPattern::Plain;
+        temp.MutablePages().push_back(std::move(pm));
+        return temp.Pages().size() - 1;
+    };
+
+    std::size_t curPage = startNewPage();
+    double curY = 48.0;
+    auto ensureSpace = [&](double neededH) {
+        if (curY + neededH > 792.0) {
+            curPage = startNewPage();
+            curY = 48.0;
+        }
+    };
+
+    // Walk top-level <w:p> and <w:tbl> blocks in document order
+    const std::size_t bodyStart = xml.find("<w:body");
+    std::size_t scan = (bodyStart == std::string::npos) ? 0 : xml.find('>', bodyStart);
+    if (scan != std::string::npos) ++scan;
+    std::set<std::string> importedMedia;
+
+    while (scan < xml.size()) {
+        const std::size_t nextP = xml.find("<w:p", scan);
+        const std::size_t nextTbl = xml.find("<w:tbl", scan);
+        const bool pickTbl = (nextTbl != std::string::npos && (nextP == std::string::npos || nextTbl < nextP));
+        const std::size_t nextPos = pickTbl ? nextTbl : nextP;
+        if (nextPos == std::string::npos) break;
+
+        const std::string tagName = pickTbl ? "w:tbl" : "w:p";
+        const std::size_t after = nextPos + 1 + tagName.size();
+        if (after >= xml.size() || (xml[after] != '>' && xml[after] != ' ' && xml[after] != '/')) {
+            scan = after;
+            continue;
+        }
+        const auto blocks = ExtractTagBlocks(xml.substr(nextPos, (std::min<std::size_t>)(xml.size() - nextPos, 131072u)), tagName);
+        if (blocks.empty()) {
+            scan = after;
+            continue;
+        }
+        const std::string& blk = blocks[0];
+        scan = nextPos + blk.size();
+
+        if (pickTbl) {
+            std::string preview;
+            const std::string tblJson = ParseTableXmlToJson(blk, "w:tr", "w:tc", "w:t", preview);
+            if (!preview.empty()) {
+                ensureSpace(120.0);
+                AnnotationObject tblObj{};
+                tblObj.kind = ObjectKind::TableBlock;
+                tblObj.bounds = { 48.0, curY, 499.0, 110.0 };
+                tblObj.tableJsonUtf8 = tblJson;
+                tblObj.textUtf8 = preview;
+                tblObj.captionUtf8 = "Tabla Word";
+                temp.AddPageObject(curPage, std::move(tblObj));
+                if (!temp.MutablePages()[curPage].extractedTextUtf8.empty()) temp.MutablePages()[curPage].extractedTextUtf8 += '\n';
+                temp.MutablePages()[curPage].extractedTextUtf8 += preview;
+                curY += 124.0;
+            }
+            continue;
         }
 
-        double yOff = 60.0;
-        for (const std::string& ePath : zip.ListEntries()) {
-            if (ePath.rfind("word/media/", 0) == 0) {
-                if (const auto* media = zip.FindEntry(ePath)) {
-                    AnnotationObject img;
-                    img.kind = ObjectKind::Image;
-                    img.bounds = { 72.0, yOff, 300.0, 180.0 };
-                    img.pngBytes = *media;
-                    temp.AddPageObject(0, std::move(img));
-                    yOff += 200.0;
+        // Page break check
+        if (blk.find("w:type=\"page\"") != std::string::npos) {
+            curPage = startNewPage();
+            curY = 48.0;
+        }
+
+        // Check embedded OMML math (<m:oMath>)
+        const auto maths = ExtractTagBlocks(blk, "m:oMath");
+        for (const auto& mBlk : maths) {
+            const std::string expr = OmmlToFormulaExpr(mBlk);
+            if (!expr.empty()) {
+                ensureSpace(64.0);
+                AnnotationObject mb{};
+                mb.kind = ObjectKind::MathBlock;
+                mb.bounds = { 48.0, curY, 460.0, 56.0 };
+                mb.formulaExprUtf8 = expr;
+                mb.captionUtf8 = "Ecuaci\xC3\xB3n Word";
+                const auto eval = Cas::EvaluateExpression(expr);
+                if (eval.ok) mb.evaluatedResultUtf8 = eval.formattedResultUtf8;
+                temp.AddPageObject(curPage, std::move(mb));
+                curY += 68.0;
+            }
+        }
+
+        // Check embedded inline drawing (<a:blip r:embed="rId..."/>)
+        const std::size_t blipPos = blk.find("r:embed=\"");
+        if (blipPos != std::string::npos) {
+            const std::size_t s = blipPos + 9;
+            const std::size_t e = blk.find('"', s);
+            if (e != std::string::npos) {
+                const std::string rid = blk.substr(s, e - s);
+                auto rit = rels.find(rid);
+                if (rit != rels.end()) {
+                    const std::string fullPath = (rit->second.rfind("word/", 0) == 0) ? rit->second : ("word/" + rit->second);
+                    if (const auto* media = zip.FindEntry(fullPath)) {
+                        ensureSpace(190.0);
+                        AnnotationObject img{};
+                        img.kind = ObjectKind::Image;
+                        img.bounds = { 64.0, curY, 320.0, 180.0 };
+                        img.pngBytes = *media;
+                        temp.AddPageObject(curPage, std::move(img));
+                        importedMedia.insert(fullPath);
+                        curY += 196.0;
+                    }
                 }
             }
         }
+
+        // Paragraph text + Heading style / Bold / Italic / List detection
+        const std::string pText = ExtractXmlTagTextParagraphs(blk, "", "w:t");
+        if (!pText.empty()) {
+            const bool isHeading1 = (blk.find("Heading1") != std::string::npos || blk.find("Ttulo1") != std::string::npos || blk.find("Title") != std::string::npos);
+            const bool isHeading2 = (blk.find("Heading2") != std::string::npos || blk.find("Heading3") != std::string::npos);
+            const bool isBold = isHeading1 || isHeading2 || (blk.find("<w:b/>") != std::string::npos || blk.find("<w:b ") != std::string::npos);
+            const bool isItalic = (blk.find("<w:i/>") != std::string::npos || blk.find("<w:i ") != std::string::npos);
+            const bool isUnderline = (blk.find("<w:u ") != std::string::npos);
+            const bool isList = (blk.find("<w:numPr>") != std::string::npos);
+
+            const double fs = isHeading1 ? 18.0 : (isHeading2 ? 14.5 : 11.5);
+            const double estLines = (std::max)(1.0, std::ceil(static_cast<double>(pText.size()) / 76.0));
+            const double boxH = (std::max)(26.0, estLines * (fs * 1.45) + 10.0);
+            ensureSpace(boxH);
+
+            AnnotationObject tb{};
+            tb.kind = ObjectKind::TextBox;
+            tb.bounds = { isList ? 64.0 : 48.0, curY, 499.0, boxH };
+            tb.textUtf8 = isList ? ("\xE2\x80\xA2 " + pText) : pText;
+            tb.strokeColor = DocColor::RGBA(24, 28, 36, 255);
+            tb.fontSizePt = fs;
+            tb.bold = isBold;
+            tb.italic = isItalic;
+            tb.underline = isUnderline;
+            if (isList) tb.listStyleUtf8 = "bullet";
+            temp.AddPageObject(curPage, std::move(tb));
+
+            if (isHeading1 || isHeading2) {
+                temp.AddBookmark(pText, curPage, curY, isHeading1 ? 0 : 1);
+                if (isHeading1 && temp.Title() == "Importado de Word") temp.SetTitle(pText);
+            }
+            if (!temp.MutablePages()[curPage].extractedTextUtf8.empty()) temp.MutablePages()[curPage].extractedTextUtf8 += '\n';
+            temp.MutablePages()[curPage].extractedTextUtf8 += pText;
+            curY += boxH + 8.0;
+        }
     }
+
+    // Also attach any remaining unreferenced word/media/* images
+    for (const std::string& ePath : zip.ListEntries()) {
+        if (ePath.rfind("word/media/", 0) == 0 && importedMedia.find(ePath) == importedMedia.end()) {
+            if (const auto* media = zip.FindEntry(ePath)) {
+                ensureSpace(190.0);
+                AnnotationObject img{};
+                img.kind = ObjectKind::Image;
+                img.bounds = { 72.0, curY, 300.0, 180.0 };
+                img.pngBytes = *media;
+                temp.AddPageObject(curPage, std::move(img));
+                curY += 196.0;
+            }
+        }
+    }
+
     temp.RebuildLayout();
     temp.SetDirty(false);
     outDoc = std::move(temp);
@@ -546,6 +878,52 @@ bool OpenXmlInterop::ExportToPptxBytes(
                                  << XmlEscape(obj.textUtf8) << "</a:t></a:r></a:p></p:txBody>";
                     }
                     slideXml << "</p:sp>\n";
+                } else if (obj.kind == ObjectKind::InkStroke && obj.inkPoints.size() >= 2) {
+                    const double bw = (std::max)(1.0, obj.bounds.w);
+                    const double bh = (std::max)(1.0, obj.bounds.h);
+                    slideXml << "<p:sp><p:nvSpPr><p:cNvPr id=\"" << (++shapeId) << "\" name=\"Tinta\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>"
+                             << "<p:spPr><a:xfrm><a:off x=\"" << ox << "\" y=\"" << oy << "\"/><a:ext cx=\"" << ow << "\" cy=\"" << oh << "\"/></a:xfrm>"
+                             << "<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>"
+                             << "<a:pathLst><a:path w=\"1000\" h=\"1000\">";
+                    for (std::size_t k = 0; k < obj.inkPoints.size(); ++k) {
+                        const int px = static_cast<int>(std::clamp((obj.inkPoints[k].x - obj.bounds.x) / bw, 0.0, 1.0) * 1000.0);
+                        const int py = static_cast<int>(std::clamp((obj.inkPoints[k].y - obj.bounds.y) / bh, 0.0, 1.0) * 1000.0);
+                        slideXml << (k == 0 ? "<a:moveTo><a:pt x=\"" : "<a:lnTo><a:pt x=\"")
+                                 << px << "\" y=\"" << py << "\"/>" << (k == 0 ? "</a:moveTo>" : "</a:lnTo>");
+                    }
+                    slideXml << "</a:path></a:pathLst></a:custGeom><a:noFill/>"
+                             << "<a:ln w=\"" << static_cast<std::int64_t>((std::max)(1.0, obj.strokeWidth) * 12700.0)
+                             << "\"><a:solidFill><a:srgbClr val=\"" << hexRgb(obj.strokeColor) << "\"/></a:solidFill></a:ln>"
+                             << "</p:spPr></p:sp>\n";
+                } else if (obj.kind == ObjectKind::MathBlock && !obj.formulaExprUtf8.empty()) {
+                    slideXml << "<p:sp><p:nvSpPr><p:cNvPr id=\"" << (++shapeId) << "\" name=\"Ecuacion\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>"
+                             << "<p:spPr><a:xfrm><a:off x=\"" << ox << "\" y=\"" << oy << "\"/><a:ext cx=\"" << ow << "\" cy=\"" << oh << "\"/></a:xfrm>"
+                             << "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>"
+                             << "<p:txBody><a:bodyPr wrap=\"square\"/><a:lstStyle/><a:p>"
+                             << "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\">"
+                             << "<m:r><m:t>" << XmlEscape(obj.formulaExprUtf8) << "</m:t></m:r></m:oMath>"
+                             << "</a:p></p:txBody></p:sp>\n";
+                } else if (obj.kind == ObjectKind::TableBlock && !obj.tableJsonUtf8.empty()) {
+                    try {
+                        const auto j = nlohmann::json::parse(obj.tableJsonUtf8);
+                        if (j.is_object() && j.contains("rows") && j["rows"].is_array() && !j["rows"].empty()) {
+                            slideXml << "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"" << (++shapeId) << "\" name=\"Tabla\"/>"
+                                     << "<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>"
+                                     << "<p:xfrm><a:off x=\"" << ox << "\" y=\"" << oy << "\"/><a:ext cx=\"" << ow << "\" cy=\"" << oh << "\"/></p:xfrm>"
+                                     << "<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\"><a:tbl><a:tblPr/><a:tblGrid/>";
+                            for (const auto& rj : j["rows"]) {
+                                if (!rj.is_array()) continue;
+                                slideXml << "<a:tr h=\"370840\">";
+                                for (const auto& cj : rj) {
+                                    const std::string cellTxt = cj.is_string() ? cj.get<std::string>() : cj.dump();
+                                    slideXml << "<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>"
+                                             << XmlEscape(cellTxt) << "</a:t></a:r></a:p></a:txBody></a:tc>";
+                                }
+                                slideXml << "</a:tr>";
+                            }
+                            slideXml << "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>\n";
+                        }
+                    } catch (...) {}
                 } else if (obj.kind == ObjectKind::Image) {
                     const std::vector<std::uint8_t>* imgPtr = !obj.pngBytes.empty() ? &obj.pngBytes : doc.FindAsset(obj.assetKey);
                     if (imgPtr && !imgPtr->empty()) {
@@ -608,8 +986,12 @@ bool OpenXmlInterop::ExportToPptxBytes(
             } else if (!hasSnap) {
                 appendTextShape(doc.Title() + " - P\xC3\xA1gina " + std::to_string(i + 1), tx, 457200, tw, 5800000);
             }
-            if (!pg.objects.empty() && !hasSnap) {
-                appendObjectsToSlide(pg.objects, pg.EffectiveWidthPt(), pg.EffectiveHeightPt(), 457200, 457200, 11200000, 5800000);
+            if (!pg.objects.empty()) {
+                if (hasSnap) {
+                    appendObjectsToSlide(pg.objects, pg.EffectiveWidthPt(), pg.EffectiveHeightPt(), 5200000, 457200, 6500000, 5800000);
+                } else {
+                    appendObjectsToSlide(pg.objects, pg.EffectiveWidthPt(), pg.EffectiveHeightPt(), 457200, 457200, 11200000, 5800000);
+                }
             }
         }
 
@@ -660,56 +1042,215 @@ bool OpenXmlInterop::ImportFromPptxBytes(
     }
     std::sort(slidePaths.begin(), slidePaths.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
 
+    // Read presentation slide size in EMUs (default 16:9 = 12192000 x 6858000 -> 960 x 540 pt)
+    double sldCxEmu = 12192000.0;
+    double sldCyEmu = 6858000.0;
+    if (const auto* pres = zip.FindEntry("ppt/presentation.xml")) {
+        const std::string pXml(reinterpret_cast<const char*>(pres->data()), pres->size());
+        const std::size_t szPos = pXml.find("<p:sldSz ");
+        if (szPos != std::string::npos) {
+            const std::size_t gt = pXml.find('>', szPos);
+            if (gt != std::string::npos) {
+                const std::string tag = pXml.substr(szPos, gt - szPos + 1);
+                const std::string cxStr = ExtractXmlAttribute(tag, "cx");
+                const std::string cyStr = ExtractXmlAttribute(tag, "cy");
+                if (!cxStr.empty()) sldCxEmu = (std::max)(1000000.0, std::atof(cxStr.c_str()));
+                if (!cyStr.empty()) sldCyEmu = (std::max)(1000000.0, std::atof(cyStr.c_str()));
+            }
+        }
+    }
+
+    constexpr double kSlidePtW = 960.0;
+    const double kSlidePtH = std::clamp(kSlidePtW * (sldCyEmu / sldCxEmu), 360.0, 960.0);
+    const double emuToPtX = kSlidePtW / sldCxEmu;
+    const double emuToPtY = kSlidePtH / sldCyEmu;
+
+    auto extractXfrmBounds = [&](const std::string& blk, DocRect fallback) -> DocRect {
+        const std::size_t offPos = blk.find("<a:off ");
+        const std::size_t extPos = blk.find("<a:ext ");
+        if (offPos == std::string::npos || extPos == std::string::npos) return fallback;
+        const std::size_t offGt = blk.find('>', offPos);
+        const std::size_t extGt = blk.find('>', extPos);
+        if (offGt == std::string::npos || extGt == std::string::npos) return fallback;
+        const std::string offTag = blk.substr(offPos, offGt - offPos + 1);
+        const std::string extTag = blk.substr(extPos, extGt - extPos + 1);
+        const double x = std::atof(ExtractXmlAttribute(offTag, "x").c_str()) * emuToPtX;
+        const double y = std::atof(ExtractXmlAttribute(offTag, "y").c_str()) * emuToPtY;
+        const double w = std::atof(ExtractXmlAttribute(extTag, "cx").c_str()) * emuToPtX;
+        const double h = std::atof(ExtractXmlAttribute(extTag, "cy").c_str()) * emuToPtY;
+        if (w < 4.0 || h < 4.0) return fallback;
+        return { x, y, w, h };
+    };
+
     DocumentModel temp;
     temp.ResetToBlank(DocumentMode::PaginatedPdf);
     temp.SetTitle("Importado de PowerPoint");
     temp.MutablePages().clear();
 
-    for (const auto& sp : slidePaths) {
+    for (std::size_t si = 0; si < slidePaths.size(); ++si) {
+        const auto& sp = slidePaths[si];
         const auto* entry = zip.FindEntry(sp.second);
         if (!entry) continue;
         const std::string xml(reinterpret_cast<const char*>(entry->data()), entry->size());
-        const std::string txt = ExtractXmlTagTextParagraphs(xml, "</a:p>", "a:t");
+
+        std::map<std::string, std::string> slideRels;
+        const std::string relPath = "ppt/slides/_rels/slide" + std::to_string(sp.first) + ".xml.rels";
+        if (const auto* re = zip.FindEntry(relPath)) {
+            slideRels = ParseRelationshipsXml(std::string(reinterpret_cast<const char*>(re->data()), re->size()));
+        }
 
         PageModel pm;
         pm.pageId = temp.AllocatePageId();
-        pm.widthPt = 960.0;
-        pm.heightPt = 540.0;
-        pm.extractedTextUtf8 = txt;
-        if (!txt.empty()) {
-            AnnotationObject tb;
-            tb.id = temp.AllocateObjectId();
-            tb.zOrder = temp.AllocateZOrder();
+        pm.widthPt = kSlidePtW;
+        pm.heightPt = kSlidePtH;
+        const std::string fullSlideText = ExtractXmlTagTextParagraphs(xml, "</a:p>", "a:t");
+        pm.extractedTextUtf8 = fullSlideText;
+        const std::size_t pageIdx = temp.Pages().size();
+        temp.MutablePages().push_back(std::move(pm));
+        temp.AddBookmark("Diapositiva " + std::to_string(si + 1), pageIdx, 0.0, 0);
+
+        bool importedAnyObj = false;
+
+        // 1. Positioned shapes, textboxes, OMML equations, and custom vector ink paths (<p:sp>)
+        for (const auto& spBlk : ExtractTagBlocks(xml, "p:sp")) {
+            const DocRect r = extractXfrmBounds(spBlk, { 48.0, 48.0, 420.0, 120.0 });
+
+            // Check vector ink <a:custGeom>
+            if (spBlk.find("<a:custGeom") != std::string::npos) {
+                const auto paths = ExtractTagBlocks(spBlk, "a:path");
+                for (const auto& pBlk : paths) {
+                    const std::size_t pGt = pBlk.find('>');
+                    const std::string pTag = (pGt != std::string::npos) ? pBlk.substr(0, pGt + 1) : "";
+                    const double pathW = (std::max)(1.0, std::atof(ExtractXmlAttribute(pTag, "w").c_str()));
+                    const double pathH = (std::max)(1.0, std::atof(ExtractXmlAttribute(pTag, "h").c_str()));
+                    AnnotationObject ink{};
+                    ink.kind = ObjectKind::InkStroke;
+                    ink.strokeColor = DocColor::RGBA(24, 38, 66, 255);
+                    ink.strokeWidth = 2.4;
+                    std::size_t ptScan = 0;
+                    while ((ptScan = pBlk.find("<a:pt ", ptScan)) != std::string::npos) {
+                        const std::size_t gt = pBlk.find('>', ptScan);
+                        if (gt == std::string::npos) break;
+                        const std::string ptTag = pBlk.substr(ptScan, gt - ptScan + 1);
+                        const double px = std::atof(ExtractXmlAttribute(ptTag, "x").c_str());
+                        const double py = std::atof(ExtractXmlAttribute(ptTag, "y").c_str());
+                        InkPoint ipt{};
+                        ipt.x = r.x + (px / pathW) * r.w;
+                        ipt.y = r.y + (py / pathH) * r.h;
+                        ipt.pressure = 0.6f;
+                        ink.inkPoints.push_back(ipt);
+                        ptScan = gt + 1;
+                    }
+                    if (ink.inkPoints.size() >= 2) {
+                        ink.RecomputeBounds();
+                        temp.AddPageObject(pageIdx, std::move(ink));
+                        importedAnyObj = true;
+                    }
+                }
+                continue;
+            }
+
+            // Check OMML math inside slide shape
+            for (const auto& mBlk : ExtractTagBlocks(spBlk, "m:oMath")) {
+                const std::string expr = OmmlToFormulaExpr(mBlk);
+                if (!expr.empty()) {
+                    AnnotationObject mb{};
+                    mb.kind = ObjectKind::MathBlock;
+                    mb.bounds = r;
+                    mb.formulaExprUtf8 = expr;
+                    mb.captionUtf8 = "Ecuaci\xC3\xB3n PowerPoint";
+                    const auto ev = Cas::EvaluateExpression(expr);
+                    if (ev.ok) mb.evaluatedResultUtf8 = ev.formattedResultUtf8;
+                    temp.AddPageObject(pageIdx, std::move(mb));
+                    importedAnyObj = true;
+                }
+            }
+
+            const std::string shapeText = ExtractXmlTagTextParagraphs(spBlk, "</a:p>", "a:t");
+            const bool isTxBox = (spBlk.find("txBox=\"1\"") != std::string::npos) ||
+                                 (spBlk.find("<a:noFill/>") != std::string::npos && !shapeText.empty());
+            if (isTxBox && !shapeText.empty()) {
+                AnnotationObject tb{};
+                tb.kind = ObjectKind::TextBox;
+                tb.bounds = r;
+                tb.textUtf8 = shapeText;
+                tb.fontSizePt = (spBlk.find("b=\"1\"") != std::string::npos) ? 18.0 : 14.0;
+                tb.bold = (spBlk.find("b=\"1\"") != std::string::npos);
+                tb.strokeColor = DocColor::RGBA(20, 24, 34, 255);
+                temp.AddPageObject(pageIdx, std::move(tb));
+                importedAnyObj = true;
+            } else if (spBlk.find("<a:prstGeom") != std::string::npos) {
+                AnnotationObject sh{};
+                sh.kind = ObjectKind::Shape;
+                sh.bounds = r;
+                sh.shapeStart = { r.x, r.y + r.h * 0.5 };
+                sh.shapeEnd = { r.Right(), r.y + r.h * 0.5 };
+                if (spBlk.find("prst=\"ellipse\"") != std::string::npos) sh.shapeKind = ShapeKind::Ellipse;
+                else if (spBlk.find("Arrow") != std::string::npos) sh.shapeKind = ShapeKind::Arrow;
+                else if (spBlk.find("prst=\"line\"") != std::string::npos) sh.shapeKind = ShapeKind::Line;
+                else sh.shapeKind = ShapeKind::Rectangle;
+                sh.strokeColor = DocColor::RGBA(37, 99, 235, 255);
+                sh.strokeWidth = 2.0;
+                sh.textUtf8 = shapeText;
+                temp.AddPageObject(pageIdx, std::move(sh));
+                importedAnyObj = true;
+            }
+        }
+
+        // 2. Positioned Pictures (<p:pic>) via slide relationships
+        for (const auto& picBlk : ExtractTagBlocks(xml, "p:pic")) {
+            const std::size_t embPos = picBlk.find("r:embed=\"");
+            if (embPos == std::string::npos) continue;
+            const std::size_t s = embPos + 9;
+            const std::size_t e = picBlk.find('"', s);
+            if (e == std::string::npos) continue;
+            const std::string rid = picBlk.substr(s, e - s);
+            auto rit = slideRels.find(rid);
+            if (rit == slideRels.end()) continue;
+            std::string target = rit->second;
+            if (target.rfind("../", 0) == 0) target = "ppt/" + target.substr(3);
+            else if (target.rfind("ppt/", 0) != 0) target = "ppt/slides/" + target;
+            if (const auto* m = zip.FindEntry(target)) {
+                AnnotationObject img{};
+                img.kind = ObjectKind::Image;
+                img.bounds = extractXfrmBounds(picBlk, { 48.0, 120.0, 320.0, 220.0 });
+                img.pngBytes = *m;
+                temp.AddPageObject(pageIdx, std::move(img));
+                importedAnyObj = true;
+            }
+        }
+
+        // 3. Tables (<a:tbl>) inside slide graphic frames
+        for (const auto& tblBlk : ExtractTagBlocks(xml, "a:tbl")) {
+            std::string preview;
+            const std::string tblJson = ParseTableXmlToJson(tblBlk, "a:tr", "a:tc", "a:t", preview);
+            if (!preview.empty()) {
+                AnnotationObject tblObj{};
+                tblObj.kind = ObjectKind::TableBlock;
+                tblObj.bounds = { 60.0, 140.0, 820.0, 220.0 };
+                tblObj.tableJsonUtf8 = tblJson;
+                tblObj.textUtf8 = preview;
+                tblObj.captionUtf8 = "Tabla PowerPoint";
+                temp.AddPageObject(pageIdx, std::move(tblObj));
+                importedAnyObj = true;
+            }
+        }
+
+        if (!importedAnyObj && !fullSlideText.empty()) {
+            AnnotationObject tb{};
             tb.kind = ObjectKind::TextBox;
             tb.bounds = { 48.0, 48.0, 864.0, 420.0 };
-            tb.textUtf8 = txt;
+            tb.textUtf8 = fullSlideText;
             tb.fontSizePt = 16.0;
             tb.strokeColor = DocColor::RGBA(20, 24, 34, 255);
-            pm.objects.push_back(std::move(tb));
+            temp.AddPageObject(pageIdx, std::move(tb));
         }
-        temp.MutablePages().push_back(std::move(pm));
     }
 
     if (temp.Pages().empty()) {
         PageModel pm;
         pm.pageId = temp.AllocatePageId();
         temp.MutablePages().push_back(std::move(pm));
-    }
-
-    // Import first media assets onto slide 0 if present
-    double xOff = 48.0;
-    for (const std::string& p : zip.ListEntries()) {
-        if (p.rfind("ppt/media/", 0) == 0) {
-            if (const auto* m = zip.FindEntry(p)) {
-                AnnotationObject img;
-                img.kind = ObjectKind::Image;
-                img.bounds = { xOff, 180.0, 280.0, 200.0 };
-                img.pngBytes = *m;
-                temp.AddPageObject(0, std::move(img));
-                xOff += 300.0;
-                if (xOff > 700.0) break;
-            }
-        }
     }
 
     temp.RebuildLayout();

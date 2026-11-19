@@ -60,6 +60,18 @@ std::uint16_t GetU16(const std::uint8_t* p) noexcept {
 
 } // namespace
 
+AudioTimelineSession::~AudioTimelineSession() {
+    StopAudioPlayback();
+    if (asyncRecording_.load(std::memory_order_acquire)) {
+        StopContinuousMicRecording();
+    } else if (recThread_.joinable()) {
+        recThread_.join();
+    }
+    if (playThread_.joinable()) {
+        playThread_.join();
+    }
+}
+
 bool AudioTimelineSession::EncodeWavPcm16(
     const std::vector<std::int16_t>& samples,
     std::uint32_t sampleRateHz,
@@ -326,6 +338,279 @@ MicCaptureReport AudioTimelineSession::CaptureFromMicrophone(
     return rep;
 }
 
+bool AudioTimelineSession::StartContinuousMicRecording(std::uint32_t sampleRateHz, std::string* outStatusUtf8) {
+    StopAudioPlayback();
+    if (asyncRecording_.load(std::memory_order_acquire)) {
+        if (outStatusUtf8) *outStatusUtf8 = "Grabaci\xC3\xB3n ya en curso.";
+        return true;
+    }
+    if (recThread_.joinable()) recThread_.join();
+
+    {
+        std::lock_guard<std::mutex> lk(audioMutex_);
+        sampleRateHz_ = (sampleRateHz == 0) ? 16000u : sampleRateHz;
+        samples_.clear();
+        cursorMs_ = 0;
+        playing_ = false;
+        recording_ = true;
+        recDeviceNameUtf8_.clear();
+    }
+    stopRecRequested_.store(false, std::memory_order_release);
+    recHardwareUsed_.store(false, std::memory_order_release);
+    asyncRecording_.store(true, std::memory_order_release);
+
+    const std::uint32_t sr = sampleRateHz_;
+    recThread_ = std::thread([this, sr]() {
+#ifdef _WIN32
+        const UINT numDevs = waveInGetNumDevs();
+        if (numDevs > 0) {
+            WAVEINCAPSW caps{};
+            if (waveInGetDevCapsW(0, &caps, sizeof(caps)) == MMSYSERR_NOERROR) {
+                int n = WideCharToMultiByte(CP_UTF8, 0, caps.szPname, -1, nullptr, 0, nullptr, nullptr);
+                if (n > 1) {
+                    std::string devName(static_cast<std::size_t>(n - 1), '\0');
+                    WideCharToMultiByte(CP_UTF8, 0, caps.szPname, -1, devName.data(), n - 1, nullptr, nullptr);
+                    std::lock_guard<std::mutex> lk(audioMutex_);
+                    recDeviceNameUtf8_ = std::move(devName);
+                }
+            }
+            WAVEFORMATEX wfx{};
+            wfx.wFormatTag = WAVE_FORMAT_PCM;
+            wfx.nChannels = 1;
+            wfx.nSamplesPerSec = sr;
+            wfx.wBitsPerSample = 16;
+            wfx.nBlockAlign = 2;
+            wfx.nAvgBytesPerSec = sr * 2u;
+
+            HWAVEIN hWaveIn = nullptr;
+            HANDLE hEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (hEvent && waveInOpen(&hWaveIn, WAVE_MAPPER, &wfx, reinterpret_cast<DWORD_PTR>(hEvent), 0, CALLBACK_EVENT) == MMSYSERR_NOERROR) {
+                constexpr int kNumBufs = 4;
+                const std::size_t chunkSamples = (std::max<std::size_t>)(320u, static_cast<std::size_t>(sr / 10u)); // 100ms ring chunks
+                std::vector<std::vector<std::int16_t>> bufs(kNumBufs, std::vector<std::int16_t>(chunkSamples, 0));
+                WAVEHDR hdrs[kNumBufs]{};
+                bool preparedAll = true;
+                for (int i = 0; i < kNumBufs; ++i) {
+                    hdrs[i].lpData = reinterpret_cast<LPSTR>(bufs[i].data());
+                    hdrs[i].dwBufferLength = static_cast<DWORD>(chunkSamples * sizeof(std::int16_t));
+                    if (waveInPrepareHeader(hWaveIn, &hdrs[i], sizeof(WAVEHDR)) != MMSYSERR_NOERROR ||
+                        waveInAddBuffer(hWaveIn, &hdrs[i], sizeof(WAVEHDR)) != MMSYSERR_NOERROR) {
+                        preparedAll = false;
+                        break;
+                    }
+                }
+                if (preparedAll && waveInStart(hWaveIn) == MMSYSERR_NOERROR) {
+                    recHardwareUsed_.store(true, std::memory_order_release);
+                    while (!stopRecRequested_.load(std::memory_order_acquire)) {
+                        WaitForSingleObject(hEvent, 60);
+                        for (int i = 0; i < kNumBufs; ++i) {
+                            if (hdrs[i].dwFlags & WHDR_DONE) {
+                                const std::size_t got = (std::min)(chunkSamples, static_cast<std::size_t>(hdrs[i].dwBytesRecorded / sizeof(std::int16_t)));
+                                if (got > 0) {
+                                    std::lock_guard<std::mutex> lk(audioMutex_);
+                                    samples_.insert(samples_.end(), bufs[i].begin(), bufs[i].begin() + got);
+                                    cursorMs_ = (static_cast<std::uint64_t>(samples_.size()) * 1000ull) / sampleRateHz_;
+                                }
+                                hdrs[i].dwBytesRecorded = 0;
+                                if (!stopRecRequested_.load(std::memory_order_acquire)) {
+                                    waveInAddBuffer(hWaveIn, &hdrs[i], sizeof(WAVEHDR));
+                                }
+                            }
+                        }
+                    }
+                    waveInStop(hWaveIn);
+                    waveInReset(hWaveIn);
+                    for (int i = 0; i < kNumBufs; ++i) {
+                        if ((hdrs[i].dwFlags & WHDR_DONE) && hdrs[i].dwBytesRecorded > 0) {
+                            const std::size_t got = (std::min)(chunkSamples, static_cast<std::size_t>(hdrs[i].dwBytesRecorded / sizeof(std::int16_t)));
+                            if (got > 0) {
+                                std::lock_guard<std::mutex> lk(audioMutex_);
+                                samples_.insert(samples_.end(), bufs[i].begin(), bufs[i].begin() + got);
+                                cursorMs_ = (static_cast<std::uint64_t>(samples_.size()) * 1000ull) / sampleRateHz_;
+                            }
+                        }
+                    }
+                }
+                for (int i = 0; i < kNumBufs; ++i) {
+                    if (hdrs[i].dwFlags & WHDR_PREPARED) {
+                        waveInUnprepareHeader(hWaveIn, &hdrs[i], sizeof(WAVEHDR));
+                    }
+                }
+                waveInClose(hWaveIn);
+            }
+            if (hEvent) CloseHandle(hEvent);
+        }
+#endif
+        // Headless fallback: stream quiet low-amplitude PCM every 50ms until stopped so tests/UI remain non-blocking
+        if (!recHardwareUsed_.load(std::memory_order_acquire)) {
+            {
+                std::lock_guard<std::mutex> lk(audioMutex_);
+                if (recDeviceNameUtf8_.empty()) recDeviceNameUtf8_ = "virtual_mic_stream";
+            }
+            const std::size_t chunk = (std::max<std::size_t>)(160u, static_cast<std::size_t>(sr / 20u));
+            std::size_t sampleIndex = 0;
+            while (!stopRecRequested_.load(std::memory_order_acquire)) {
+                std::vector<std::int16_t> buf(chunk, 0);
+                for (std::size_t i = 0; i < chunk; ++i) {
+                    const double t = static_cast<double>(sampleIndex++) / static_cast<double>(sr);
+                    buf[i] = static_cast<std::int16_t>(std::sin(kTwoPi * 261.63 * t) * 320.0);
+                }
+                {
+                    std::lock_guard<std::mutex> lk(audioMutex_);
+                    samples_.insert(samples_.end(), buf.begin(), buf.end());
+                    cursorMs_ = (static_cast<std::uint64_t>(samples_.size()) * 1000ull) / sampleRateHz_;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+        asyncRecording_.store(false, std::memory_order_release);
+    });
+
+    if (outStatusUtf8) *outStatusUtf8 = "Grabaci\xC3\xB3n de audio continua activa.";
+    return true;
+}
+
+MicCaptureReport AudioTimelineSession::StopContinuousMicRecording() {
+    MicCaptureReport rep{};
+    stopRecRequested_.store(true, std::memory_order_release);
+    if (recThread_.joinable()) {
+        recThread_.join();
+    }
+    asyncRecording_.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lk(audioMutex_);
+        recording_ = false;
+        cursorMs_ = 0;
+        rep.hardwareUsed = recHardwareUsed_.load(std::memory_order_acquire);
+        rep.fallbackUsed = !rep.hardwareUsed;
+        rep.capturedMs = (sampleRateHz_ > 0) ? ((static_cast<std::uint64_t>(samples_.size()) * 1000ull) / sampleRateHz_) : 0ull;
+        rep.deviceNameUtf8 = recDeviceNameUtf8_;
+        rep.statusNoteUtf8 = rep.hardwareUsed
+            ? "Grabaci\xC3\xB3n continua WinMM finalizada."
+            : "Grabaci\xC3\xB3n continua (respaldo sin micr\xC3\xB3" "fono f\xC3\xADsico) finalizada.";
+    }
+    return rep;
+}
+
+bool AudioTimelineSession::StartAudioPlayback(std::uint64_t startCursorMs, std::string* outErr) {
+    StopAudioPlayback();
+    std::vector<std::int16_t> playbackSamples;
+    std::uint32_t sr = 16000u;
+    {
+        std::lock_guard<std::mutex> lk(audioMutex_);
+        if (samples_.empty() || sampleRateHz_ == 0) {
+            if (outErr) *outErr = "No hay audio grabado para reproducir.";
+            return false;
+        }
+        sr = sampleRateHz_;
+        const std::size_t startIdx = (std::min)(samples_.size(),
+            static_cast<std::size_t>((startCursorMs * sr) / 1000ull));
+        if (startIdx >= samples_.size()) {
+            playbackSamples = samples_;
+            startCursorMs = 0;
+        } else {
+            playbackSamples.assign(samples_.begin() + startIdx, samples_.end());
+        }
+        cursorMs_ = startCursorMs;
+        playing_ = true;
+    }
+
+    stopPlayRequested_.store(false, std::memory_order_release);
+    hwPlaybackCursorMs_.store(startCursorMs, std::memory_order_release);
+    asyncPlaying_.store(true, std::memory_order_release);
+
+    playThread_ = std::thread([this, buf = std::move(playbackSamples), sr, startCursorMs]() mutable {
+        bool hwPlayed = false;
+#ifdef _WIN32
+        if (waveOutGetNumDevs() > 0 && !buf.empty()) {
+            WAVEFORMATEX wfx{};
+            wfx.wFormatTag = WAVE_FORMAT_PCM;
+            wfx.nChannels = 1;
+            wfx.nSamplesPerSec = sr;
+            wfx.wBitsPerSample = 16;
+            wfx.nBlockAlign = 2;
+            wfx.nAvgBytesPerSec = sr * 2u;
+
+            HWAVEOUT hWaveOut = nullptr;
+            HANDLE hEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (hEvent && waveOutOpen(&hWaveOut, WAVE_MAPPER, &wfx, reinterpret_cast<DWORD_PTR>(hEvent), 0, CALLBACK_EVENT) == MMSYSERR_NOERROR) {
+                WAVEHDR hdr{};
+                hdr.lpData = reinterpret_cast<LPSTR>(buf.data());
+                hdr.dwBufferLength = static_cast<DWORD>(buf.size() * sizeof(std::int16_t));
+                if (waveOutPrepareHeader(hWaveOut, &hdr, sizeof(hdr)) == MMSYSERR_NOERROR) {
+                    if (waveOutWrite(hWaveOut, &hdr, sizeof(hdr)) == MMSYSERR_NOERROR) {
+                        hwPlayed = true;
+                        const auto t0 = std::chrono::steady_clock::now();
+                        while ((hdr.dwFlags & WHDR_DONE) == 0 && !stopPlayRequested_.load(std::memory_order_acquire)) {
+                            WaitForSingleObject(hEvent, 30);
+                            MMTIME mmt{};
+                            mmt.wType = TIME_SAMPLES;
+                            std::uint64_t curMs = startCursorMs;
+                            if (waveOutGetPosition(hWaveOut, &mmt, sizeof(mmt)) == MMSYSERR_NOERROR && mmt.wType == TIME_SAMPLES) {
+                                curMs = startCursorMs + (static_cast<std::uint64_t>(mmt.u.sample) * 1000ull) / sr;
+                            } else {
+                                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - t0).count();
+                                curMs = startCursorMs + static_cast<std::uint64_t>((std::max<long long>)(0, elapsed));
+                            }
+                            hwPlaybackCursorMs_.store(curMs, std::memory_order_release);
+                            {
+                                std::lock_guard<std::mutex> lk(audioMutex_);
+                                cursorMs_ = (std::min)(curMs, (static_cast<std::uint64_t>(samples_.size()) * 1000ull) / sr);
+                            }
+                        }
+                        if (stopPlayRequested_.load(std::memory_order_acquire)) {
+                            waveOutReset(hWaveOut);
+                        }
+                    }
+                    waveOutUnprepareHeader(hWaveOut, &hdr, sizeof(hdr));
+                }
+                waveOutClose(hWaveOut);
+            }
+            if (hEvent) CloseHandle(hEvent);
+        }
+#endif
+        if (!hwPlayed) {
+            const std::uint64_t playDurMs = (static_cast<std::uint64_t>(buf.size()) * 1000ull) / sr;
+            const auto t0 = std::chrono::steady_clock::now();
+            while (!stopPlayRequested_.load(std::memory_order_acquire)) {
+                const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - t0).count());
+                const std::uint64_t curMs = startCursorMs + (std::min)(elapsed, playDurMs);
+                hwPlaybackCursorMs_.store(curMs, std::memory_order_release);
+                {
+                    std::lock_guard<std::mutex> lk(audioMutex_);
+                    cursorMs_ = curMs;
+                }
+                if (elapsed >= playDurMs) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            }
+        }
+        asyncPlaying_.store(false, std::memory_order_release);
+        std::lock_guard<std::mutex> lk(audioMutex_);
+        playing_ = false;
+    });
+    return true;
+}
+
+void AudioTimelineSession::StopAudioPlayback() {
+    stopPlayRequested_.store(true, std::memory_order_release);
+    if (playThread_.joinable()) {
+        playThread_.join();
+    }
+    asyncPlaying_.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(audioMutex_);
+    playing_ = false;
+}
+
+std::uint64_t AudioTimelineSession::GetHardwarePlaybackCursorMs() const noexcept {
+    if (asyncPlaying_.load(std::memory_order_acquire)) {
+        return hwPlaybackCursorMs_.load(std::memory_order_acquire);
+    }
+    std::lock_guard<std::mutex> lk(audioMutex_);
+    return cursorMs_;
+}
+
 bool AudioTimelineSession::LoadFromWavBytes(const std::uint8_t* wavBytes, std::size_t size) {
     recording_ = false;
     playing_ = false;
@@ -483,7 +768,7 @@ bool AudioTimelineSession::ExportSyncedTutorialHtml5(
     std::ostringstream html;
     html << "<!DOCTYPE html>\n<html lang=\"es\">\n<head>\n<meta charset=\"utf-8\">\n"
          << "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
-         << "<title>Tutorial Sincronizado — " << EscapeHtmlAudio(doc.Title().empty() ? "Document Studio" : doc.Title()) << "</title>\n"
+         << "<title>Tutorial Sincronizado — " << EscapeHtmlAudio(doc.Title().empty() ? "CuadernU" : doc.Title()) << "</title>\n"
          << "<style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;padding:24px;background:#f8fafc;color:#0f172a;}"
          << ".wrap{max-width:960px;margin:0 auto;background:#fff;border-radius:16px;padding:24px;border:1px solid #e2e8f0;}"
          << ".keycap{display:inline-block;padding:3px 9px;margin:2px;border-radius:7px;background:#1e293b;color:#f8fafc;font-weight:600;font-size:12px;}"
@@ -550,17 +835,27 @@ bool AudioTimelineSession::ExportSyncedTutorialHtml5(
 }
 
 std::uint64_t AudioTimelineSession::DurationMs() const noexcept {
+    std::lock_guard<std::mutex> lk(audioMutex_);
     if (sampleRateHz_ == 0 || samples_.empty()) return 0;
     return (static_cast<std::uint64_t>(samples_.size()) * 1000ull) / sampleRateHz_;
 }
 
 void AudioTimelineSession::SeekMs(std::uint64_t ms) noexcept {
-    cursorMs_ = (std::min)(ms, DurationMs());
+    std::lock_guard<std::mutex> lk(audioMutex_);
+    const std::uint64_t dur = (sampleRateHz_ == 0 || samples_.empty()) ? 0ull
+        : (static_cast<std::uint64_t>(samples_.size()) * 1000ull) / sampleRateHz_;
+    cursorMs_ = (std::min)(ms, dur);
+    hwPlaybackCursorMs_.store(cursorMs_, std::memory_order_release);
 }
 
 std::uint64_t AudioTimelineSession::AdvancePlaybackMs(std::uint64_t deltaMs) noexcept {
+    if (asyncPlaying_.load(std::memory_order_acquire)) {
+        return hwPlaybackCursorMs_.load(std::memory_order_acquire);
+    }
+    std::lock_guard<std::mutex> lk(audioMutex_);
     if (!playing_) return cursorMs_;
-    const std::uint64_t dur = DurationMs();
+    const std::uint64_t dur = (sampleRateHz_ == 0 || samples_.empty()) ? 0ull
+        : (static_cast<std::uint64_t>(samples_.size()) * 1000ull) / sampleRateHz_;
     cursorMs_ += deltaMs;
     if (cursorMs_ >= dur) {
         cursorMs_ = dur;
@@ -570,6 +865,7 @@ std::uint64_t AudioTimelineSession::AdvancePlaybackMs(std::uint64_t deltaMs) noe
 }
 
 std::vector<float> AudioTimelineSession::ComputeEnvelopeBins(std::size_t numBins) const {
+    std::lock_guard<std::mutex> lk(audioMutex_);
     std::vector<float> bins(numBins, 0.0f);
     if (numBins == 0 || samples_.empty()) return bins;
     for (std::size_t b = 0; b < numBins; ++b) {

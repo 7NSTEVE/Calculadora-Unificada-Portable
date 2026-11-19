@@ -261,7 +261,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/manuales")
     )
 endif()
 
-foreach(_studio_bin IN ITEMS DocumentStudio.exe z.dll)
+foreach(_studio_bin IN ITEMS CuadernU.exe DocumentStudio.exe z.dll)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/build-studio-x64/Release/${_studio_bin}")
         add_custom_command(TARGET CalculadoraUnificada POST_BUILD
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different

@@ -1,6 +1,12 @@
 #include "command_stack.hpp"
+#include "cudoc_storage.hpp"
+#include "utf_conv.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <unordered_set>
 
 namespace DocStudio {
@@ -209,6 +215,240 @@ bool ModifyObjectCommand::Execute(DocumentModel& doc) {
 
 bool ModifyObjectCommand::Undo(DocumentModel& doc) {
     return ReplaceInTarget(doc, target_, before_);
+}
+
+// BatchModifyObjectsCommand
+BatchModifyObjectsCommand::BatchModifyObjectsCommand(
+    ObjectTarget target,
+    std::vector<AnnotationObject> beforeStates,
+    std::vector<AnnotationObject> afterStates,
+    std::string desc)
+    : target_(target), before_(std::move(beforeStates)), after_(std::move(afterStates)), desc_(std::move(desc)) {}
+
+std::string BatchModifyObjectsCommand::Description() const {
+    return desc_.empty() ? "Transformar objetos" : desc_;
+}
+
+bool BatchModifyObjectsCommand::Execute(DocumentModel& doc) {
+    if (after_.empty()) return false;
+    bool anyOk = false;
+    for (const auto& st : after_) {
+        anyOk = ReplaceInTarget(doc, target_, st) || anyOk;
+    }
+    return anyOk;
+}
+
+bool BatchModifyObjectsCommand::Undo(DocumentModel& doc) {
+    if (before_.empty()) return false;
+    bool anyOk = false;
+    for (const auto& st : before_) {
+        anyOk = ReplaceInTarget(doc, target_, st) || anyOk;
+    }
+    return anyOk;
+}
+
+// ReplaceStrokeWithSplitsCommand
+ReplaceStrokeWithSplitsCommand::ReplaceStrokeWithSplitsCommand(
+    ObjectTarget target,
+    AnnotationObject originalStroke,
+    std::vector<AnnotationObject> replacementStrokes)
+    : target_(target), original_(std::move(originalStroke)), replacements_(std::move(replacementStrokes)) {}
+
+std::string ReplaceStrokeWithSplitsCommand::Description() const {
+    return "Borrado parcial de trazo";
+}
+
+bool ReplaceStrokeWithSplitsCommand::Execute(DocumentModel& doc) {
+    if (!RemoveFromTarget(doc, target_, original_.id, nullptr)) return false;
+    for (auto& rep : replacements_) {
+        if (rep.id == 0 || rep.id == original_.id) rep.id = doc.AllocateObjectId();
+        if (rep.zOrder == 0) rep.zOrder = doc.AllocateZOrder();
+        rep.RecomputeBounds();
+        AddToTarget(doc, target_, rep);
+    }
+    return true;
+}
+
+bool ReplaceStrokeWithSplitsCommand::Undo(DocumentModel& doc) {
+    for (const auto& rep : replacements_) {
+        RemoveFromTarget(doc, target_, rep.id, nullptr);
+    }
+    return AddToTarget(doc, target_, original_);
+}
+
+// SnapshotDeltaCommand
+SnapshotDeltaCommand::SnapshotDeltaCommand(
+    std::vector<std::uint8_t> beforeCudocBytes,
+    std::vector<std::uint8_t> afterCudocBytes,
+    std::string desc)
+    : beforeBytes_(std::move(beforeCudocBytes)), afterBytes_(std::move(afterCudocBytes)), desc_(std::move(desc)) {}
+
+bool SnapshotDeltaCommand::Execute(DocumentModel& doc) {
+    if (afterBytes_.empty()) return false;
+    return CudocStorage::DeserializeFromBytes(afterBytes_.data(), afterBytes_.size(), doc, nullptr);
+}
+
+bool SnapshotDeltaCommand::Undo(DocumentModel& doc) {
+    if (beforeBytes_.empty()) return false;
+    return CudocStorage::DeserializeFromBytes(beforeBytes_.data(), beforeBytes_.size(), doc, nullptr);
+}
+
+namespace {
+std::string Base64EncodeHist(const std::vector<std::uint8_t>& in) {
+    static constexpr char kT[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((in.size() + 2) / 3) * 4);
+    for (std::size_t i = 0; i < in.size(); i += 3) {
+        const std::uint32_t b0 = in[i];
+        const std::uint32_t b1 = (i + 1 < in.size()) ? in[i + 1] : 0;
+        const std::uint32_t b2 = (i + 2 < in.size()) ? in[i + 2] : 0;
+        const std::uint32_t t = (b0 << 16) | (b1 << 8) | b2;
+        out.push_back(kT[(t >> 18) & 0x3Fu]);
+        out.push_back(kT[(t >> 12) & 0x3Fu]);
+        out.push_back((i + 1 < in.size()) ? kT[(t >> 6) & 0x3Fu] : '=');
+        out.push_back((i + 2 < in.size()) ? kT[t & 0x3Fu] : '=');
+    }
+    return out;
+}
+
+std::vector<std::uint8_t> Base64DecodeHist(const std::string& in) {
+    auto val = [](unsigned char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    std::vector<std::uint8_t> out;
+    out.reserve((in.size() * 3) / 4);
+    std::uint32_t acc = 0;
+    int bits = 0;
+    for (unsigned char c : in) {
+        if (c == '=') break;
+        const int v = val(c);
+        if (v < 0) continue;
+        acc = (acc << 6) | static_cast<std::uint32_t>(v);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<std::uint8_t>((acc >> bits) & 0xFFu));
+        }
+    }
+    return out;
+}
+} // namespace
+
+void CommandStack::RecordPersistentCheckpoint(
+    const std::vector<std::uint8_t>& beforeBytes,
+    const std::vector<std::uint8_t>& afterBytes,
+    std::string desc)
+{
+    if (beforeBytes.empty() || afterBytes.empty()) return;
+    if (cursor_ < history_.size()) {
+        history_.erase(history_.begin() + static_cast<std::ptrdiff_t>(cursor_), history_.end());
+    }
+    history_.push_back(std::make_unique<SnapshotDeltaCommand>(beforeBytes, afterBytes, std::move(desc)));
+    cursor_ = history_.size();
+}
+
+bool CommandStack::SaveSessionHistoryToFile(const std::wstring& historyPath, const DocumentModel& currentDoc) const {
+    try {
+        nlohmann::json root;
+        root["version"] = 1;
+        root["cursor"] = 0;
+        nlohmann::json entries = nlohmann::json::array();
+
+        // Save all SnapshotDeltaCommands already in stack, plus synthesize a bounded undo trail
+        // (up to last 16 steps) by replaying backward on a copy of currentDoc so ANY command type persists!
+        bool hadSnapCmds = false;
+        for (const auto& cmd : history_) {
+            if (const auto* sc = dynamic_cast<const SnapshotDeltaCommand*>(cmd.get())) {
+                hadSnapCmds = true;
+                entries.push_back({
+                    {"desc", sc->Description()},
+                    {"before", Base64EncodeHist(sc->BeforeBytes())},
+                    {"after", Base64EncodeHist(sc->AfterBytes())}
+                });
+            }
+        }
+        if (hadSnapCmds) {
+            root["cursor"] = (std::min)(cursor_, entries.size());
+        } else if (cursor_ > undoBoundary_) {
+            // Capture up to last 12 undoable commands as reversible serialized snapshots
+            const std::size_t maxPersist = 12;
+            const std::size_t avail = cursor_ - undoBoundary_;
+            const std::size_t take = (std::min)(avail, maxPersist);
+            std::vector<std::vector<std::uint8_t>> states(take + 1);
+            DocumentModel scratch;
+            if (CudocStorage::SerializeToBytes(currentDoc, states[take], nullptr) &&
+                CudocStorage::DeserializeFromBytes(states[take].data(), states[take].size(), scratch, nullptr)) {
+                bool okChain = true;
+                std::vector<std::string> descs(take);
+                for (std::size_t k = 0; k < take; ++k) {
+                    const std::size_t cmdIdx = cursor_ - 1 - k;
+                    descs[take - 1 - k] = history_[cmdIdx]->Description();
+                    if (!history_[cmdIdx]->Undo(scratch) ||
+                        !CudocStorage::SerializeToBytes(scratch, states[take - 1 - k], nullptr)) {
+                        okChain = false;
+                        break;
+                    }
+                }
+                if (okChain) {
+                    for (std::size_t i = 0; i < take; ++i) {
+                        entries.push_back({
+                            {"desc", descs[i]},
+                            {"before", Base64EncodeHist(states[i])},
+                            {"after", Base64EncodeHist(states[i + 1])}
+                        });
+                    }
+                    root["cursor"] = entries.size();
+                }
+            }
+        }
+        root["entries"] = std::move(entries);
+
+        const std::filesystem::path p(WideToUtf8(historyPath));
+        if (p.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(p.parent_path(), ec);
+        }
+        std::ofstream ofs(p, std::ios::binary | std::ios::trunc);
+        if (!ofs) return false;
+        const std::string dump = root.dump();
+        ofs.write(dump.data(), static_cast<std::streamsize>(dump.size()));
+        return ofs.good();
+    } catch (...) {
+        return false;
+    }
+}
+
+bool CommandStack::LoadSessionHistoryFromFile(const std::wstring& historyPath, DocumentModel& doc) {
+    try {
+        const std::filesystem::path p(WideToUtf8(historyPath));
+        std::ifstream ifs(p, std::ios::binary);
+        if (!ifs) return false;
+        const nlohmann::json root = nlohmann::json::parse(ifs);
+        if (!root.is_object() || !root.contains("entries") || !root["entries"].is_array()) return false;
+
+        Clear();
+        for (const auto& ej : root["entries"]) {
+            if (!ej.is_object()) continue;
+            auto b = Base64DecodeHist(ej.value("before", ""));
+            auto a = Base64DecodeHist(ej.value("after", ""));
+            if (b.empty() || a.empty()) continue;
+            history_.push_back(std::make_unique<SnapshotDeltaCommand>(
+                std::move(b), std::move(a), ej.value("desc", "Historial persistente")));
+        }
+        cursor_ = (std::min)(root.value("cursor", history_.size()), history_.size());
+        cleanCursor_ = cursor_;
+        undoBoundary_ = 0;
+        cleanInvalidated_ = false;
+        doc.SetDirty(false);
+        return !history_.empty();
+    } catch (...) {
+        return false;
+    }
 }
 
 // SetBackgroundCommand

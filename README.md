@@ -1,6 +1,6 @@
-# Calculadora Unificada — Edición Core Oficial (Producción Win32)
+# Calculadora Unificada & CuadernU (Windows)
 
-Aplicación de producción para Windows que integra en una distribución portable (`CalculadoraUnificada.exe` Win32 con CRT estático `/MT` + `DocumentStudio.exe` x64 Direct2D) las **cuatro calculadoras científicas y graficadoras CASIO** sobre sus motores y firmwares originales (`fx-991CW ClassWiz II`, `fx-570LA X / 991LA X`, `fx-570VN PLUS / ES PLUS` y `fx-CG50 PRIZM`) junto con **Document Studio** (Lienzo Infinito, Motor PDF, Laboratorio STEM y Módulos Académicos), con interfaz rediseñada bajo **Apple HIG + Liquid Glass 2.0** en modos **Claro**, **Oscuro** y **Alto Contraste (WCAG AAA)**, renderizado matemático natural en **2D** con teclas gráficas CASIO, modo compacto vertical con cajón lateral expandible de secuencia, capturas automáticas pre-entrada (`App · LCD`), anotador gráfico a mano alzada y **Visor Nativo de PDF sin dependencias externas** sobre **16 manuales oficiales** (Hardware y Software, Español e Inglés).
+Aplicación nativa para Windows que integra en una distribución portable (`CalculadoraUnificada.exe` Win32 + `CuadernU.exe` x64 Direct2D, con alias de compatibilidad `DocumentStudio.exe`) las **cuatro calculadoras científicas y graficadoras CASIO** sobre sus motores y firmwares originales (`fx-991CW ClassWiz II`, `fx-570LA X / 991LA X`, `fx-570VN PLUS / ES PLUS` y `fx-CG50 PRIZM`) junto con **CuadernU** (Cuaderno Digital, Lienzo Infinito, Editor PDF, Laboratorio STEM, Migración Multiformato y Módulos Académicos), con interfaz bajo **Apple HIG + Liquid Glass 2.0** en modos **Claro**, **Oscuro** y **Alto Contraste (WCAG AAA)**, tipografía matemática natural en **2D** con teclas gráficas CASIO, modo compacto vertical con cajón lateral expandible de secuencia, capturas automáticas pre-entrada (`App · LCD`), anotador gráfico a mano alzada y **Visor Nativo de PDF sin dependencias externas** sobre **16 manuales oficiales** (Hardware y Software, Español e Inglés).
 
 ---
 
@@ -10,13 +10,13 @@ Aplicación de producción para Windows que integra en una distribución portabl
 | :---: | :---: |
 | ![Comparar 4 calculadoras Liquid Glass Claro](docs/screenshots/lg_calc_compare_all4_light.png) | ![fx-991CW Modo Oscuro Liquid Glass](docs/screenshots/lg_calc_solo_cw_dark.png) |
 
-| Document Studio — Lienzo STEM 2D + MNA + 3D CVD (Claro) | Document Studio — Modo Oscuro + Popover Apariencia (Refracción en Vivo) |
+| CuadernU — Lienzo STEM 2D + MNA + 3D CVD (Claro) | CuadernU — Modo Oscuro + Inspector STEM |
 | :---: | :---: |
-| ![Document Studio STEM Liquid Glass Claro](docs/screenshots/lg_studio_stem_light.png) | ![Document Studio Oscuro con Popover Liquid Glass](docs/screenshots/lg_studio_stem_dark_popover.png) |
+| ![CuadernU STEM Liquid Glass Claro](docs/screenshots/lg_studio_stem_light.png) | ![CuadernU Oscuro con Inspector STEM](docs/screenshots/lg_studio_stem_dark_popover.png) |
 
-| Exportador de Fórmulas 2D (Oscuro) | Modo Compacto Vertical (Oscuro) | Visor Nativo PDF (`Windows.Data.Pdf`) | Document Studio — Módulos Académicos |
+| Exportador de Fórmulas 2D (Oscuro) | Modo Compacto Vertical (Oscuro) | Visor Nativo PDF (`Windows.Data.Pdf`) | CuadernU — Módulos Académicos |
 | :---: | :---: | :---: | :---: |
-| ![Exportador de Fórmulas 2D Modo Oscuro](docs/screenshots/lg_calc_exporter_dark.png) | ![Modo Compacto Liquid Glass Oscuro](docs/screenshots/lg_calc_compact_dark.png) | ![Visor Nativo PDF 16 manuales](docs/screenshots/lg_calc_pdf_light.png) | ![Document Studio Inspector Académico](docs/screenshots/lg_studio_academic_light.png) |
+| ![Exportador de Fórmulas 2D Modo Oscuro](docs/screenshots/lg_calc_exporter_dark.png) | ![Modo Compacto Liquid Glass Oscuro](docs/screenshots/lg_calc_compact_dark.png) | ![Visor Nativo PDF 16 manuales](docs/screenshots/lg_calc_pdf_light.png) | ![CuadernU Inspector Académico](docs/screenshots/lg_studio_academic_light.png) |
 
 ---
 
@@ -102,13 +102,14 @@ Suites automatizadas registradas en `CMakeLists.txt`:
 
 ---
 
-## Document Studio (Lienzo Infinito, Motor PDF, Laboratorio STEM y Módulos Académicos)
+## CuadernU (Cuaderno Digital, Lienzo Infinito, Editor PDF, Migración Multiformato y Laboratorio STEM)
 
-El subsistema **Document Studio** (`doc_studio/` en Windows `x64` Direct2D y `academic/` para herramientas universitarias) proporciona:
-- **Interfaz Apple HIG + Liquid Glass 2.0**: barra superior con cápsulas flotantes refractadas, barra lateral *edge-to-edge* con miniaturas e iconos vectoriales semánticos, popover interactivo de Apariencia (*Claro / Oscuro / Alto Contraste*, deslizador continuo de opacidad del vidrio y *Reducir Transparencia*).
-- **Tipografía Matemática Natural 2D y Teclas Gráficas CASIO**: renderizado tipográfico bidimensional de fracciones apiladas, raíces, integrales, sumatorias, letras griegas, unidades físicas y teclas físicas CASIO estilizadas en tarjetas STEM, circuitos y puente CASIO.
-- **Escritura digital de baja latencia**, *Hold-to-Snap*, regla graduada `0°–360°`, borrador selectivo, *Study Tape*, *Ink Replay* sincronizado con audio WAV (`16-bit PCM`), etiquetas `#tags`, capas y repetición espaciada `SM-2`.
-- **Motor matemático dimensional (`#varsub` / `#nosub` / `#novar`)**, fasores AC, álgebra matricial (`SEL`), superficies `3D` con paleta accesible `CVD`, simulador de circuitos **MNA** (`DC`, `AC`, diodos Shockley, osciloscopio transitorio, Laplace simbólico `H(s)` y mapas de Karnaugh), puente interactivo con las calculadoras CASIO (`Enviar -> Lienzo`) y exportación de **Memoria de Cálculo HTML5**.
-- **Módulos Académicos Universitarios (`academic/`)**: conector de solo lectura para TEC Digital (consulta de cursos, anuncios, evaluaciones y materiales sin envío ni modificación remota) y optimizador de horarios **HorariosTEC** sin choques.
-- Manual completo de funciones y sintaxis: [docs/MANUAL_DOCUMENT_STUDIO_INGENIERIA.md](docs/MANUAL_DOCUMENT_STUDIO_INGENIERIA.md).
+El subsistema unificado **CuadernU** (`doc_studio/` en Windows `x64` Direct2D, incorporando el núcleo vectorial `tinta_core/` y los módulos universitarios `academic/`) proporciona:
+- **Interfaz Apple HIG + Liquid Glass 2.0**: barra superior con cápsulas flotantes refractadas, barra lateral *edge-to-edge* con índice PDF (`/Outlines`), miniaturas e iconos vectoriales semánticos, popover interactivo de Apariencia (*Claro / Oscuro / Alto Contraste*, deslizador continuo de opacidad del vidrio y *Reducir Transparencia*), múltiples pestañas, vista dividida lado a lado y ventana de proyector dedicada.
+- **Manipulación Directa y Motor de Tinta Profesional**: arrastre, redimensionado con 8 manejadores y rotación en lienzo, selección múltiple con lazo, agrupación/desagrupación, edición in-situ con doble clic, borrador de precisión por píxel o trazo completo, 4 estilos de lápiz (*Bolígrafo*, *Pluma Fuente*, *Lápiz*, *Pincel*), rechazo estricto de palma, soporte de borrador invertido y botón lateral del lápiz digital, ajuste a cuadrícula, herramientas geométricas (*Regla*, *Transportador*, *Compás*), reconocimiento offline de escritura a texto/ecuación (HTR) y 11 plantillas técnicas de papel (*Isométrico 30°*, *Log-Log*, *Polar*, *Carta de Smith*, *Cornell*, *Pentagrama*, *Milimetrado*, etc.).
+- **Motor de Interoperabilidad y Migración Multiformato de Alta Fidelidad**: importación nativa con análisis previo de compatibilidad en 3 niveles (**Visual**, **Estructural** y **Editable**) para **Goodnotes 6 (`.goodnotes`)**, **Notability (`.note`)**, **Microsoft OneNote (`.one` / `.onepkg`)**, **CuadernU Clásico (`.tinta`)**, **Microsoft Word (`.docx`)**, **Microsoft PowerPoint (`.pptx`)** y **PDF (`.pdf`)**, preservando trazos manuscritos como objetos vectoriales editables, tablas, ecuaciones, imágenes, audio vinculado y jerarquía de secciones.
+- **Audio Sincronizado e Ink Replay**: grabación continua no bloqueante desde micrófono (`WinMM waveIn`), reproducción real por altavoces (`waveOut`) sincronizada con los trazos, marcadores, búsqueda por marca de tiempo, segmentación offline y exportación de tutorial interactivo HTML5.
+- **Laboratorio STEM, Seguridad y Puente CASIO en Vivo**: motor matemático dimensional (`#varsub` / `#nosub` / `#novar`), matrices complejas y valores propios, EDO RK4, tablas reactivas con fórmulas, superficies `3D` rotables con ratón, simulador de circuitos **MNA** (`DC`, `AC`, diodos, osciloscopio transitorio, Laplace simbólico `H(s)`, reconocedor de circuitos a mano alzada y mapas de Karnaugh), verificación de pasos (*Check My Work*), guía socrática (*Teach Me*), comparador de 4 modelos CASIO, envío en vivo sin red desde `CalculadoraUnificada.exe` a `CuadernU.exe`, cifrado `AES-256-GCM`, difusión LAN con QR y historial de versiones sin pérdida.
+- **Módulos Académicos Universitarios (`academic/`)**: conector de solo lectura para TEC Digital y optimizador de horarios **HorariosTEC** sin choques.
+- Guía completa de funciones y sintaxis: [docs/MANUAL_DOCUMENT_STUDIO_INGENIERIA.md](docs/MANUAL_DOCUMENT_STUDIO_INGENIERIA.md).
 

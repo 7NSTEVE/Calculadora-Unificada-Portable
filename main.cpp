@@ -781,8 +781,8 @@ static void ShowSpanishStudioMenuPopup(HWND hWndOwner, POINT screenPt)
     AppendMenuW(hStudy, chkFlag(g_keyExplorerEnabled),  ID_BTN_KEY_EXPLORER,       L"Inspector de tecla al pasar el cursor\tCtrl+Shift+K");
     AppendMenuW(hStudy, chkFlag(g_shiftAlphaLayerMode), ID_BTN_SHIFT_ALPHA_LAYERS, L"Ver 3 capas (SHIFT / ALPHA) en Inspector\tCtrl+Shift+L");
     AppendMenuW(hStudy, MF_STRING,                      ID_BTN_LEARNING_STUDIO,    L"Centro de estudio CASIO...\tCtrl+Shift+E");
-    AppendMenuW(hStudy, MF_STRING,                      ID_CMD_OPEN_DOC_STUDIO,    L"Document Studio (Editor PDF / Lienzo)...");
-    AppendMenuW(hStudy, MF_STRING,                      ID_CMD_SEND_TO_DOC_STUDIO, L"Enviar secuencia actual al Lienzo (Tarjeta CASIO)...");
+    AppendMenuW(hStudy, MF_STRING,                      ID_CMD_OPEN_DOC_STUDIO,    L"CuadernU (Cuaderno y Editor PDF)...");
+    AppendMenuW(hStudy, MF_STRING,                      ID_CMD_SEND_TO_DOC_STUDIO, L"Enviar secuencia actual a CuadernU (Tarjeta CASIO)...");
     AppendMenuW(hStudy, chkFlag(g_teacherHighlightMode), ID_CMD_TEACHER_MODE,      L"Resaltar \u00FAltima tecla pulsada");
     AppendMenuW(hStudy, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hStudy, MF_STRING, ID_CMD_COMPARE_MODELS,    L"Comparador de 3 modelos...");
@@ -861,8 +861,8 @@ static HMENU CreateEmulatorMenuBar()
     AppendMenuW(hTools, MF_STRING, ID_BTN_KEY_EXPLORER,       L"&Explorador Interactivo de Teclas\tCtrl+Shift+K");
     AppendMenuW(hTools, MF_STRING, ID_BTN_SHIFT_ALPHA_LAYERS, L"Superponer Capas &SHIFT / ALPHA\tCtrl+Shift+L");
     AppendMenuW(hTools, MF_STRING, ID_BTN_LEARNING_STUDIO,    L"&Centro de Estudio CASIO (6 Pesta\u00F1as)...\tCtrl+Shift+E");
-    AppendMenuW(hTools, MF_STRING, ID_CMD_OPEN_DOC_STUDIO,    L"Abrir &Document Studio (Editor PDF / Lienzo)...");
-    AppendMenuW(hTools, MF_STRING, ID_CMD_SEND_TO_DOC_STUDIO, L"Enviar secuencia actual al &Lienzo (Tarjeta CASIO)...");
+    AppendMenuW(hTools, MF_STRING, ID_CMD_OPEN_DOC_STUDIO,    L"Abrir &CuadernU (Cuaderno y Editor PDF)...");
+    AppendMenuW(hTools, MF_STRING, ID_CMD_SEND_TO_DOC_STUDIO, L"Enviar secuencia actual a &CuadernU (Tarjeta CASIO)...");
     AppendMenuW(hTools, MF_STRING, ID_CMD_COMPARE_MODELS,     L"Comparador ClassWiz / ES PLUS / fx-CG50...");
     AppendMenuW(hTools, MF_STRING, ID_CMD_TROUBLESHOOTER,     L"Diagnosticar Pantalla (\u00BFPor qu\u00E9 muestra esto?)...");
     AppendMenuW(hTools, MF_STRING, ID_CMD_CHECKLIST_PRESETS,  L"Checklist Previo, Perfiles y Favoritos...");
@@ -1820,6 +1820,52 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 if (ch == L'"' || ch == L'|' || ch == L'\r' || ch == L'\n') ch = L' ';
             }
             if (livePreview.empty()) livePreview = L"2 + 3";
+
+            // Live zero-network IPC push to an already-open CuadernU window (F-246)
+            auto wideToUtf8Local = [](const std::wstring& w) -> std::string {
+                if (w.empty()) return {};
+                int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+                if (n <= 0) return {};
+                std::string s(static_cast<std::size_t>(n), '\0');
+                WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
+                return s;
+            };
+            auto jsonEscLocal = [](const std::string& in) -> std::string {
+                std::string o;
+                for (char c : in) {
+                    if (c == '\\' || c == '"') o.push_back('\\');
+                    o.push_back(c);
+                }
+                return o;
+            };
+            HWND hLiveCuadernu = FindWindowW(L"CalculadoraUnificadaDocStudioWnd", nullptr);
+            if (hLiveCuadernu && IsWindow(hLiveCuadernu)) {
+                wchar_t localApp[MAX_PATH]{};
+                if (GetEnvironmentVariableW(L"LOCALAPPDATA", localApp, MAX_PATH) > 0) {
+                    std::wstring ipcDir = std::wstring(localApp) + L"\\CuadernU\\ipc_inbox";
+                    CreateDirectoryW((std::wstring(localApp) + L"\\CuadernU").c_str(), nullptr);
+                    CreateDirectoryW(ipcDir.c_str(), nullptr);
+                    const ULONGLONG ts = GetTickCount64();
+                    std::wstring msgFile = ipcDir + L"\\calc_" + std::to_wstring(ts) + L".json";
+                    const std::string modelU8 = wideToUtf8Local(modelW);
+                    const std::string exprU8 = wideToUtf8Local(livePreview);
+                    std::string payload = "{\"model\":\"" + jsonEscLocal(modelU8) +
+                        "\",\"keySeq\":\"" + jsonEscLocal(exprU8) +
+                        "\",\"expression\":\"" + jsonEscLocal(exprU8) +
+                        "\",\"ts\":" + std::to_string(ts) + "}";
+                    HANDLE hf = CreateFileW((msgFile + L".tmp").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                    if (hf != INVALID_HANDLE_VALUE) {
+                        DWORD wr = 0;
+                        WriteFile(hf, payload.data(), static_cast<DWORD>(payload.size()), &wr, nullptr);
+                        CloseHandle(hf);
+                        MoveFileExW((msgFile + L".tmp").c_str(), msgFile.c_str(), MOVEFILE_REPLACE_EXISTING);
+                        ShowToolbarToast(L"Secuencia enviada en vivo a CuadernU");
+                        SetForegroundWindow(hLiveCuadernu);
+                        return 0;
+                    }
+                }
+            }
+
             const std::wstring args = L"--mode canvas --calc-card \"" + std::wstring(modelW) + L"|" + livePreview + L"|" + livePreview + L"\"";
             LaunchDocumentStudio(g_hMainWnd, args);
             return 0;

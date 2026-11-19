@@ -1132,7 +1132,10 @@ void EmitAnnotationObjectOps(
         const DocRect r = { tx(obj.bounds.x), ty(obj.bounds.y), obj.bounds.w, obj.bounds.h };
 
         if (obj.shapeKind == ShapeKind::Rectangle || obj.shapeKind == ShapeKind::SignatureStamp) {
-            if (obj.fillColor.a > 0) {
+            if (obj.isRedaction) {
+                // Permanent opaque redaction burn-in (F-087)
+                ss << "0 0 0 rg " << FmtNum(r.x) << ' ' << FmtNum(r.y) << ' ' << FmtNum(r.w) << ' ' << FmtNum(r.h) << " re f\n";
+            } else if (obj.fillColor.a > 0) {
                 EmitRgbFillColor(ss, obj.fillColor);
                 ss << FmtNum(r.x) << ' ' << FmtNum(r.y) << ' ' << FmtNum(r.w) << ' ' << FmtNum(r.h) << " re B\n";
             } else {
@@ -1168,7 +1171,7 @@ void EmitAnnotationObjectOps(
             const double x0 = tx(obj.shapeStart.x), y0 = ty(obj.shapeStart.y);
             const double x1 = tx(obj.shapeEnd.x), y1 = ty(obj.shapeEnd.y);
             ss << "1 J " << FmtNum(x0) << ' ' << FmtNum(y0) << " m " << FmtNum(x1) << ' ' << FmtNum(y1) << " l S\n";
-            if (obj.shapeKind == ShapeKind::Arrow) {
+            if (obj.shapeKind == ShapeKind::Arrow || obj.shapeKind == ShapeKind::Connector) {
                 const double dx = x1 - x0;
                 const double dy = y1 - y0;
                 const double len = std::hypot(dx, dy);
@@ -1295,6 +1298,29 @@ void EmitAnnotationObjectOps(
                 ss << "S\n";
             }
             ss << "Q\n";
+        }
+    } else if (obj.kind == ObjectKind::TableBlock ||
+               obj.kind == ObjectKind::CodeBlock ||
+               obj.kind == ObjectKind::AudioClip) {
+        const DocRect r = { tx(obj.bounds.x), ty(obj.bounds.y), (std::max)(60.0, obj.bounds.w), (std::max)(28.0, obj.bounds.h) };
+        ss << "0.98 0.99 1 rg 0.78 0.83 0.90 RG 1 w ";
+        EmitRoundedRectPath(ss, r.x, r.y, r.w, r.h, 6.0);
+        ss << "B\n";
+        const std::string header = !obj.captionUtf8.empty() ? obj.captionUtf8
+            : (obj.kind == ObjectKind::TableBlock ? "Tabla" : (obj.kind == ObjectKind::CodeBlock ? "C\xC3\xB3" "digo" : "Audio"));
+        EmitRgbFillColor(ss, { 24, 34, 52, 255 });
+        const double baseY = flipTextYInCurrentCtm ? (r.y + 14.0) : (r.y + r.h - 14.0);
+        EmitUnicodeAwareTextLine(ss, header, r.x + 8.0, baseY, 10.5, true, flipTextYInCurrentCtm, builder, extraFonts);
+        const std::string body = !obj.textUtf8.empty() ? obj.textUtf8 : obj.evaluatedResultUtf8;
+        if (!body.empty()) {
+            std::istringstream iss(body);
+            std::string ln;
+            int li = 0;
+            while (std::getline(iss, ln) && li < 12) {
+                const double ly = flipTextYInCurrentCtm ? (r.y + 28.0 + li * 12.5) : (r.y + r.h - 28.0 - li * 12.5);
+                EmitUnicodeAwareTextLine(ss, ln.substr(0, 96), r.x + 8.0, ly, 9.0, false, flipTextYInCurrentCtm, builder, extraFonts);
+                ++li;
+            }
         }
     }
 

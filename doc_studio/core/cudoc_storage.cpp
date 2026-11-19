@@ -37,6 +37,12 @@ const char* PatternToString(PaperPattern p) noexcept {
     case PaperPattern::Grid:       return "grid";
     case PaperPattern::Dots:       return "dots";
     case PaperPattern::Millimeter: return "millimeter";
+    case PaperPattern::Isometric:  return "isometric";
+    case PaperPattern::LogLog:     return "loglog";
+    case PaperPattern::Polar:      return "polar";
+    case PaperPattern::SmithChart: return "smith_chart";
+    case PaperPattern::Cornell:    return "cornell";
+    case PaperPattern::MusicStaff: return "music_staff";
     default:                       return "plain";
     }
 }
@@ -46,6 +52,12 @@ PaperPattern StringToPattern(const std::string& s) noexcept {
     if (s == "grid") return PaperPattern::Grid;
     if (s == "dots") return PaperPattern::Dots;
     if (s == "millimeter") return PaperPattern::Millimeter;
+    if (s == "isometric") return PaperPattern::Isometric;
+    if (s == "loglog") return PaperPattern::LogLog;
+    if (s == "polar") return PaperPattern::Polar;
+    if (s == "smith_chart") return PaperPattern::SmithChart;
+    if (s == "cornell") return PaperPattern::Cornell;
+    if (s == "music_staff") return PaperPattern::MusicStaff;
     return PaperPattern::Plain;
 }
 
@@ -61,6 +73,9 @@ const char* ObjectKindToString(ObjectKind k) noexcept {
     case ObjectKind::CircuitBlock:    return "circuit_block";
     case ObjectKind::CalcSessionCard: return "calc_card";
     case ObjectKind::PlotBlock:       return "plot_block";
+    case ObjectKind::TableBlock:      return "table_block";
+    case ObjectKind::CodeBlock:       return "code_block";
+    case ObjectKind::AudioClip:       return "audio_clip";
     default:                          return "ink";
     }
 }
@@ -76,6 +91,9 @@ bool StringToObjectKind(const std::string& s, ObjectKind& out) noexcept {
     if (s == "circuit_block") { out = ObjectKind::CircuitBlock; return true; }
     if (s == "calc_card") { out = ObjectKind::CalcSessionCard; return true; }
     if (s == "plot_block") { out = ObjectKind::PlotBlock; return true; }
+    if (s == "table_block") { out = ObjectKind::TableBlock; return true; }
+    if (s == "code_block") { out = ObjectKind::CodeBlock; return true; }
+    if (s == "audio_clip") { out = ObjectKind::AudioClip; return true; }
     return false;
 }
 
@@ -86,6 +104,7 @@ const char* ShapeKindToString(ShapeKind s) noexcept {
     case ShapeKind::Rectangle:      return "rectangle";
     case ShapeKind::Ellipse:        return "ellipse";
     case ShapeKind::SignatureStamp: return "signature_stamp";
+    case ShapeKind::Connector:      return "connector";
     default:                        return "rectangle";
     }
 }
@@ -95,6 +114,7 @@ ShapeKind StringToShapeKind(const std::string& s) noexcept {
     if (s == "arrow") return ShapeKind::Arrow;
     if (s == "ellipse") return ShapeKind::Ellipse;
     if (s == "signature_stamp") return ShapeKind::SignatureStamp;
+    if (s == "connector") return ShapeKind::Connector;
     return ShapeKind::Rectangle;
 }
 
@@ -144,6 +164,25 @@ json ObjectToJson(
         j["sliderMax"] = obj.sliderMax;
         j["sliderValue"] = obj.sliderValue;
     }
+    if (std::abs(obj.rotationDeg) > 1e-6) j["rotationDeg"] = obj.rotationDeg;
+    if (obj.opacity < 0.999) j["opacity"] = obj.opacity;
+    if (obj.groupId != 0) j["groupId"] = obj.groupId;
+    if (obj.underline) j["underline"] = true;
+    if (!obj.listStyleUtf8.empty()) j["listStyle"] = obj.listStyleUtf8;
+    if (!obj.imageCrop.IsFull()) {
+        j["imageCrop"] = { obj.imageCrop.left, obj.imageCrop.top, obj.imageCrop.right, obj.imageCrop.bottom };
+    }
+    if (!obj.htrRecognizedTextUtf8.empty()) j["htrText"] = obj.htrRecognizedTextUtf8;
+    if (!obj.tableJsonUtf8.empty()) j["tableJson"] = obj.tableJsonUtf8;
+    if (obj.connectorFromId != 0) j["connectorFromId"] = obj.connectorFromId;
+    if (obj.connectorToId != 0) j["connectorToId"] = obj.connectorToId;
+    if (!obj.pdfQuadPointsNorm.empty()) {
+        json qp = json::array();
+        for (const auto& r : obj.pdfQuadPointsNorm) qp.push_back(RectToJson(r));
+        j["pdfQuads"] = std::move(qp);
+    }
+    if (obj.isRedaction) j["isRedaction"] = true;
+    if (!obj.codeLanguageUtf8.empty()) j["codeLanguage"] = obj.codeLanguageUtf8;
 
     if (obj.kind == ObjectKind::InkStroke) {
         j["penStyle"] = static_cast<int>(obj.penStyle);
@@ -219,6 +258,19 @@ json ObjectToJson(
         j["formulaExpr"] = obj.formulaExprUtf8;
         j["evaluatedResult"] = obj.evaluatedResultUtf8;
         j["caption"] = obj.captionUtf8;
+    } else if (obj.kind == ObjectKind::TableBlock) {
+        j["tableJson"] = obj.tableJsonUtf8;
+        j["caption"] = obj.captionUtf8;
+        j["text"] = obj.textUtf8;
+    } else if (obj.kind == ObjectKind::CodeBlock) {
+        j["text"] = obj.textUtf8;
+        j["codeLanguage"] = obj.codeLanguageUtf8;
+        j["evaluatedResult"] = obj.evaluatedResultUtf8;
+        j["caption"] = obj.captionUtf8;
+    } else if (obj.kind == ObjectKind::AudioClip) {
+        j["audioAssetKey"] = obj.audioAssetKey;
+        j["caption"] = obj.captionUtf8;
+        j["text"] = obj.textUtf8;
     }
     return j;
 }
@@ -306,6 +358,29 @@ bool JsonToObject(const json& j, const ZipArchive& zip, AnnotationObject& out, s
         out.sliderMax = j.value("sliderMax", 100.0);
         out.sliderValue = j.value("sliderValue", 0.0);
     }
+    out.rotationDeg = j.value("rotationDeg", 0.0);
+    out.opacity = std::clamp(j.value("opacity", 1.0), 0.05, 1.0);
+    out.groupId = j.value("groupId", std::uint64_t{ 0 });
+    out.underline = j.value("underline", false);
+    out.listStyleUtf8 = j.value("listStyle", "");
+    if (j.contains("imageCrop") && j["imageCrop"].is_array() && j["imageCrop"].size() >= 4) {
+        out.imageCrop.left = j["imageCrop"][0].get<double>();
+        out.imageCrop.top = j["imageCrop"][1].get<double>();
+        out.imageCrop.right = j["imageCrop"][2].get<double>();
+        out.imageCrop.bottom = j["imageCrop"][3].get<double>();
+        out.imageCrop.Clamp();
+    }
+    out.htrRecognizedTextUtf8 = j.value("htrText", "");
+    out.tableJsonUtf8 = j.value("tableJson", "");
+    out.connectorFromId = j.value("connectorFromId", std::uint64_t{ 0 });
+    out.connectorToId = j.value("connectorToId", std::uint64_t{ 0 });
+    if (j.contains("pdfQuads") && j["pdfQuads"].is_array()) {
+        for (const auto& qj : j["pdfQuads"]) {
+            out.pdfQuadPointsNorm.push_back(JsonToRect(qj));
+        }
+    }
+    out.isRedaction = j.value("isRedaction", false);
+    out.codeLanguageUtf8 = j.value("codeLanguage", "");
 
     if (out.kind == ObjectKind::PdfCard) {
         out.pdfSourcePathUtf8 = j.value("pdfSourcePath", "");
@@ -345,6 +420,19 @@ bool JsonToObject(const json& j, const ZipArchive& zip, AnnotationObject& out, s
         out.formulaExprUtf8 = j.value("formulaExpr", "");
         out.evaluatedResultUtf8 = j.value("evaluatedResult", "");
         out.captionUtf8 = j.value("caption", "");
+    } else if (out.kind == ObjectKind::TableBlock) {
+        out.tableJsonUtf8 = j.value("tableJson", "");
+        out.captionUtf8 = j.value("caption", "");
+        out.textUtf8 = j.value("text", "");
+    } else if (out.kind == ObjectKind::CodeBlock) {
+        out.textUtf8 = j.value("text", "");
+        out.codeLanguageUtf8 = j.value("codeLanguage", "cpp");
+        out.evaluatedResultUtf8 = j.value("evaluatedResult", "");
+        out.captionUtf8 = j.value("caption", "");
+    } else if (out.kind == ObjectKind::AudioClip) {
+        out.audioAssetKey = j.value("audioAssetKey", "");
+        out.captionUtf8 = j.value("caption", "");
+        out.textUtf8 = j.value("text", "");
     }
 
     out.RecomputeBounds();
@@ -546,6 +634,42 @@ bool CudocStorage::SerializeToBytes(
             pj["sourcePageIndex0"] = pg.sourcePageIndex0;
             pj["extractedText"] = pg.extractedTextUtf8;
             pj["ocrText"] = pg.ocrTextUtf8;
+            if (!pg.pdfLinks.empty()) {
+                json linksArr = json::array();
+                for (const auto& lnk : pg.pdfLinks) {
+                    linksArr.push_back({
+                        {"rect", {lnk.rectNorm.x, lnk.rectNorm.y, lnk.rectNorm.w, lnk.rectNorm.h}},
+                        {"uri", lnk.uriUtf8},
+                        {"targetPage0", lnk.targetPage0},
+                        {"title", lnk.titleUtf8}
+                    });
+                }
+                pj["pdfLinks"] = std::move(linksArr);
+            }
+            if (!pg.formFields.empty()) {
+                json ffArr = json::array();
+                for (const auto& ff : pg.formFields) {
+                    ffArr.push_back({
+                        {"name", ff.nameUtf8},
+                        {"value", ff.valueUtf8},
+                        {"fieldType", ff.fieldTypeUtf8},
+                        {"checked", ff.checked},
+                        {"readOnly", ff.readOnly},
+                        {"rect", {ff.rectNorm.x, ff.rectNorm.y, ff.rectNorm.w, ff.rectNorm.h}}
+                    });
+                }
+                pj["formFields"] = std::move(ffArr);
+            }
+            if (!pg.textBoxes.empty()) {
+                json tbArr = json::array();
+                for (const auto& tb : pg.textBoxes) {
+                    tbArr.push_back({
+                        {"rect", {tb.rectNorm.x, tb.rectNorm.y, tb.rectNorm.w, tb.rectNorm.h}},
+                        {"text", tb.textUtf8}
+                    });
+                }
+                pj["textBoxes"] = std::move(tbArr);
+            }
 
             json objs = json::array();
             for (std::size_t i = 0; i < pg.objects.size(); ++i) {
@@ -569,8 +693,10 @@ bool CudocStorage::SerializeToBytes(
         json manifest;
         manifest["format"] = kFormatMagic;
         manifest["formatVersion"] = kCurrentFormatVersion;
+        manifest["documentUuid"] = doc.DocumentUuid();
         manifest["title"] = doc.Title();
         manifest["mode"] = ModeToString(doc.Mode());
+        manifest["doublePageSpread"] = doc.DoublePageSpread();
         manifest["canvasBackground"] = PatternToString(doc.CanvasBackground());
         manifest["pageCount"] = doc.Pages().size();
         manifest["canvasObjectCount"] = doc.CanvasObjects().size();
@@ -630,6 +756,18 @@ bool CudocStorage::SerializeToBytes(
                 });
             }
             manifest["bookmarks"] = std::move(bmJson);
+        }
+        {
+            json attJson = json::array();
+            for (const auto& att : doc.Attachments()) {
+                attJson.push_back({
+                    {"filename", att.filenameUtf8},
+                    {"mimeType", att.mimeTypeUtf8},
+                    {"assetKey", att.assetKey},
+                    {"sizeBytes", att.sizeBytes}
+                });
+            }
+            manifest["attachments"] = std::move(attJson);
         }
 
         zip.SetTextEntry("manifest.json", manifest.dump(2));
@@ -693,7 +831,10 @@ bool CudocStorage::DeserializeFromBytes(
 
         DocumentModel tempDoc;
         tempDoc.ResetToBlank(mode);
+        const std::string savedUuid = manifest.value("documentUuid", "");
+        if (!savedUuid.empty()) tempDoc.SetDocumentUuid(savedUuid);
         tempDoc.SetTitle(manifest.value("title", "Sin t\xC3\xADtulo"));
+        tempDoc.SetDoublePageSpread(manifest.value("doublePageSpread", false));
         tempDoc.SetCanvasBackground(StringToPattern(manifest.value("canvasBackground", "grid")));
         tempDoc.MutablePages().clear();
 
@@ -740,6 +881,54 @@ bool CudocStorage::DeserializeFromBytes(
             pg.sourcePageIndex0 = pj.value("sourcePageIndex0", 0);
             pg.extractedTextUtf8 = pj.value("extractedText", "");
             pg.ocrTextUtf8 = pj.value("ocrText", "");
+            if (pj.contains("pdfLinks") && pj["pdfLinks"].is_array()) {
+                for (const auto& lj : pj["pdfLinks"]) {
+                    if (!lj.is_object()) continue;
+                    PdfLinkRect lr{};
+                    if (lj.contains("rect") && lj["rect"].is_array() && lj["rect"].size() >= 4) {
+                        lr.rectNorm = {
+                            lj["rect"][0].get<double>(), lj["rect"][1].get<double>(),
+                            lj["rect"][2].get<double>(), lj["rect"][3].get<double>()
+                        };
+                    }
+                    lr.uriUtf8 = lj.value("uri", "");
+                    lr.targetPage0 = lj.value("targetPage0", -1);
+                    lr.titleUtf8 = lj.value("title", "");
+                    pg.pdfLinks.push_back(std::move(lr));
+                }
+            }
+            if (pj.contains("formFields") && pj["formFields"].is_array()) {
+                for (const auto& fj : pj["formFields"]) {
+                    if (!fj.is_object()) continue;
+                    PdfFormField ff{};
+                    ff.nameUtf8 = fj.value("name", "");
+                    ff.valueUtf8 = fj.value("value", "");
+                    ff.fieldTypeUtf8 = fj.value("fieldType", "Tx");
+                    ff.checked = fj.value("checked", false);
+                    ff.readOnly = fj.value("readOnly", false);
+                    if (fj.contains("rect") && fj["rect"].is_array() && fj["rect"].size() >= 4) {
+                        ff.rectNorm = {
+                            fj["rect"][0].get<double>(), fj["rect"][1].get<double>(),
+                            fj["rect"][2].get<double>(), fj["rect"][3].get<double>()
+                        };
+                    }
+                    pg.formFields.push_back(std::move(ff));
+                }
+            }
+            if (pj.contains("textBoxes") && pj["textBoxes"].is_array()) {
+                for (const auto& tj : pj["textBoxes"]) {
+                    if (!tj.is_object()) continue;
+                    PdfTextRunBox tb{};
+                    if (tj.contains("rect") && tj["rect"].is_array() && tj["rect"].size() >= 4) {
+                        tb.rectNorm = {
+                            tj["rect"][0].get<double>(), tj["rect"][1].get<double>(),
+                            tj["rect"][2].get<double>(), tj["rect"][3].get<double>()
+                        };
+                    }
+                    tb.textUtf8 = tj.value("text", "");
+                    pg.textBoxes.push_back(std::move(tb));
+                }
+            }
             if (pg.pageId > maxPageId) maxPageId = pg.pageId;
 
             if (pj.contains("objects") && pj["objects"].is_array()) {
@@ -839,6 +1028,20 @@ bool CudocStorage::DeserializeFromBytes(
                 bms.push_back(std::move(bm));
             }
             tempDoc.SetBookmarks(std::move(bms));
+        }
+
+        if (manifest.contains("attachments") && manifest["attachments"].is_array()) {
+            std::vector<EmbeddedAttachment> atts;
+            for (const auto& aj : manifest["attachments"]) {
+                if (!aj.is_object()) continue;
+                EmbeddedAttachment att{};
+                att.filenameUtf8 = aj.value("filename", "adjunto.bin");
+                att.mimeTypeUtf8 = aj.value("mimeType", "application/octet-stream");
+                att.assetKey = aj.value("assetKey", "");
+                att.sizeBytes = aj.value("sizeBytes", std::size_t{ 0 });
+                if (!att.assetKey.empty()) atts.push_back(std::move(att));
+            }
+            tempDoc.SetAttachments(std::move(atts));
         }
 
         tempDoc.RestoreCounters(maxObjId, maxPageId, maxZ, maxAsset);

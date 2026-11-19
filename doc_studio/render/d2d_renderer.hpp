@@ -129,6 +129,10 @@ struct ViewportOverlayState {
     bool highContrast = false;
     const RasterImageBgra32* floatingOverlayBgra = nullptr;
     DocRect floatingOverlayScreenRect{};
+    bool hasPdfTextSel = false;
+    std::size_t pdfTextSelPage = 0;
+    DocRect pdfTextSelRectLocal{};
+    bool showSelectionHandles = true;
 };
 
 class D2DRenderer {

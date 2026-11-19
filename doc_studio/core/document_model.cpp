@@ -1,7 +1,11 @@
 #include "document_model.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
+#include <cstdio>
+#include <random>
 #include <sstream>
 
 namespace DocStudio {
@@ -212,6 +216,20 @@ bool ContainsNormalizedMatch(
 
 } // namespace
 
+std::string DocumentModel::GenerateDurableUuid() {
+    static std::atomic<std::uint64_t> sSeq{ 1 };
+    const auto nowNs = static_cast<std::uint64_t>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    std::random_device rd;
+    const std::uint64_t r1 = (static_cast<std::uint64_t>(rd()) << 32) ^ static_cast<std::uint64_t>(rd()) ^ nowNs;
+    const std::uint64_t r2 = (static_cast<std::uint64_t>(rd()) << 32) ^ sSeq.fetch_add(1, std::memory_order_relaxed);
+    char buf[48]{};
+    std::snprintf(buf, sizeof(buf), "cu-%016llx-%016llx",
+        static_cast<unsigned long long>(r1),
+        static_cast<unsigned long long>(r2));
+    return std::string(buf);
+}
+
 DocumentModel::DocumentModel()
     : canvasIndex_({ -1e6, -1e6, 2e6, 2e6 }, 10, 24)
 {
@@ -221,7 +239,9 @@ DocumentModel::DocumentModel()
 void DocumentModel::ResetToBlank(DocumentMode mode) {
     mode_ = mode;
     titleUtf8_ = "Documento nuevo";
+    documentUuidUtf8_ = GenerateDurableUuid();
     dirty_ = false;
+    doublePageSpread_ = false;
     nextObjectId_ = 0;
     nextPageId_ = 0;
     nextZOrder_ = 0;
@@ -231,6 +251,11 @@ void DocumentModel::ResetToBlank(DocumentMode mode) {
     canvasIdToPos_.clear();
     canvasIndex_.Clear();
     assets_.clear();
+    inkLinks_.clear();
+    collapsedRanges_.clear();
+    bookmarks_.clear();
+    attachments_.clear();
+    doublePageSpread_ = false;
 
     PageModel p;
     p.pageId = AllocatePageId();
@@ -243,8 +268,52 @@ void DocumentModel::ResetToBlank(DocumentMode mode) {
 }
 
 void DocumentModel::RebuildLayout() {
-    layout_.Rebuild(pages_);
+    std::vector<bool> collapsedMask(pages_.size(), false);
+    bool anyCollapsed = false;
+    for (std::size_t i = 0; i < pages_.size(); ++i) {
+        if (IsPageCollapsed(static_cast<int>(i))) {
+            collapsedMask[i] = true;
+            anyCollapsed = true;
+        }
+    }
+    layout_.Rebuild(pages_, 18.0, 16.0, anyCollapsed ? &collapsedMask : nullptr, doublePageSpread_);
     BumpRevision();
+}
+
+void DocumentModel::SetDoublePageSpread(bool enabled) {
+    if (doublePageSpread_ == enabled) return;
+    doublePageSpread_ = enabled;
+    RebuildLayout();
+}
+
+std::string DocumentModel::AddAttachment(
+    const std::string& filenameUtf8,
+    const std::string& mimeTypeUtf8,
+    std::vector<std::uint8_t> bytes)
+{
+    const std::size_t sz = bytes.size();
+    const std::string key = RegisterAsset(std::move(bytes));
+    EmbeddedAttachment att;
+    att.filenameUtf8 = filenameUtf8.empty() ? (key + ".bin") : filenameUtf8;
+    att.mimeTypeUtf8 = mimeTypeUtf8.empty() ? "application/octet-stream" : mimeTypeUtf8;
+    att.assetKey = key;
+    att.sizeBytes = sz;
+    attachments_.push_back(std::move(att));
+    dirty_ = true;
+    BumpRevision();
+    return key;
+}
+
+bool DocumentModel::RemoveAttachment(const std::string& assetKey) {
+    for (std::size_t i = 0; i < attachments_.size(); ++i) {
+        if (attachments_[i].assetKey == assetKey) {
+            attachments_.erase(attachments_.begin() + static_cast<std::ptrdiff_t>(i));
+            dirty_ = true;
+            BumpRevision();
+            return true;
+        }
+    }
+    return false;
 }
 
 void DocumentModel::RestoreCounters(
@@ -405,6 +474,14 @@ std::vector<SearchMatch> DocumentModel::SearchText(
                 if (!searchable.empty()) searchable += ' ';
                 searchable += obj.calcModelIdUtf8 + " " + obj.calcKeySeqUtf8;
             }
+            if (!obj.htrRecognizedTextUtf8.empty()) {
+                if (!searchable.empty()) searchable += ' ';
+                searchable += obj.htrRecognizedTextUtf8;
+            }
+            if (!obj.tableJsonUtf8.empty()) {
+                if (!searchable.empty()) searchable += ' ';
+                searchable += obj.tableJsonUtf8;
+            }
             if (!searchable.empty()) {
                 if (ContainsNormalizedMatch(searchable, needleNorm, caseSensitive, accentInsensitive)) {
                     SearchMatch m{};
@@ -555,13 +632,13 @@ void DocumentModel::ToggleCollapsedRange(int startPage0, int endPage0) {
                 collapsedRanges_.erase(collapsedRanges_.begin() + static_cast<std::ptrdiff_t>(i));
             }
             dirty_ = true;
-            BumpRevision();
+            RebuildLayout();
             return;
         }
     }
     collapsedRanges_.push_back(CollapsedPageRange{ a, b, true });
     dirty_ = true;
-    BumpRevision();
+    RebuildLayout();
 }
 
 bool DocumentModel::IsPageCollapsed(int pageIndex0) const noexcept {

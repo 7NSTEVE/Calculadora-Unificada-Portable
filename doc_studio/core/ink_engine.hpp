@@ -95,11 +95,37 @@ std::vector<std::uint64_t> CollectObjectsMatchingFilter(
     EraserFilterMode mode,
     bool skipLockedOrHiddenLayers = true);
 
-// Graduated Ruler / Protractor (0..360 deg) edge projection & magnetic snap
+// Graduated Ruler / Protractor / Compass (0..360 deg) edge & arc projection + magnetic snap
 DocPoint ProjectPointOntoRuler(
     DocPoint pt,
     const RulerState& ruler,
     double snapDistWorld = 24.0,
     bool* outSnapped = nullptr);
+
+// Goodnotes-style Partial/Pixel Eraser: geometrically splits an InkStroke around an eraser circle
+// (returns true if stroke was modified/split; outPieces holds 0, 1, or N remaining sub-strokes)
+bool EraseStrokePartial(
+    const AnnotationObject& stroke,
+    DocPoint eraserCenter,
+    double eraserRadiusWorld,
+    std::vector<AnnotationObject>& outPieces);
+
+// Handwriting Neatening / Restyle (F-044): normalizes baseline slant, vertical jitter, and smooths strokes
+bool NeatenAndRestyleStrokes(
+    DocumentModel& doc,
+    ObjectTarget target,
+    const std::vector<std::uint64_t>& ids);
+
+// Magnetic snap-to-grid (F-040) supporting Grid, DotGrid, Isometric, Lined, Polar
+DocPoint SnapPointToGrid(
+    DocPoint pt,
+    PaperPattern pattern,
+    double gridSpacingPt = 22.0);
+
+// Updates all ShapeKind::Connector arrows/lines anchored to movedObjectId (F-110)
+void UpdateMagneticConnectors(
+    DocumentModel& doc,
+    ObjectTarget target,
+    std::uint64_t movedObjectId);
 
 } // namespace DocStudio::InkEngine

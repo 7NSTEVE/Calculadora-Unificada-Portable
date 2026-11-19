@@ -53,6 +53,11 @@ public:
     void MarkClean(DocumentModel& doc) noexcept;
     void Clear() noexcept;
 
+    // Persistent cross-session Undo/Redo snapshot history (F-004)
+    bool SaveSessionHistoryToFile(const std::wstring& historyPath, const DocumentModel& currentDoc) const;
+    bool LoadSessionHistoryFromFile(const std::wstring& historyPath, DocumentModel& doc);
+    void RecordPersistentCheckpoint(const std::vector<std::uint8_t>& beforeBytes, const std::vector<std::uint8_t>& afterBytes, std::string desc);
+
 private:
     std::vector<std::unique_ptr<ICommand>> history_;
     std::size_t cursor_ = 0;
@@ -116,6 +121,58 @@ private:
     ObjectTarget target_;
     AnnotationObject before_;
     AnnotationObject after_;
+};
+
+class BatchModifyObjectsCommand final : public ICommand {
+public:
+    BatchModifyObjectsCommand(
+        ObjectTarget target,
+        std::vector<AnnotationObject> beforeStates,
+        std::vector<AnnotationObject> afterStates,
+        std::string desc = "Transformar objetos");
+    std::string Description() const override;
+    bool Execute(DocumentModel& doc) override;
+    bool Undo(DocumentModel& doc) override;
+
+private:
+    ObjectTarget target_;
+    std::vector<AnnotationObject> before_;
+    std::vector<AnnotationObject> after_;
+    std::string desc_;
+};
+
+class ReplaceStrokeWithSplitsCommand final : public ICommand {
+public:
+    ReplaceStrokeWithSplitsCommand(
+        ObjectTarget target,
+        AnnotationObject originalStroke,
+        std::vector<AnnotationObject> replacementStrokes);
+    std::string Description() const override;
+    bool Execute(DocumentModel& doc) override;
+    bool Undo(DocumentModel& doc) override;
+
+private:
+    ObjectTarget target_;
+    AnnotationObject original_;
+    std::vector<AnnotationObject> replacements_;
+};
+
+class SnapshotDeltaCommand final : public ICommand {
+public:
+    SnapshotDeltaCommand(
+        std::vector<std::uint8_t> beforeCudocBytes,
+        std::vector<std::uint8_t> afterCudocBytes,
+        std::string desc = "Cambio de sesi\xC3\xB3n");
+    std::string Description() const override { return desc_; }
+    bool Execute(DocumentModel& doc) override;
+    bool Undo(DocumentModel& doc) override;
+    const std::vector<std::uint8_t>& BeforeBytes() const noexcept { return beforeBytes_; }
+    const std::vector<std::uint8_t>& AfterBytes() const noexcept { return afterBytes_; }
+
+private:
+    std::vector<std::uint8_t> beforeBytes_;
+    std::vector<std::uint8_t> afterBytes_;
+    std::string desc_;
 };
 
 class SetBackgroundCommand final : public ICommand {
