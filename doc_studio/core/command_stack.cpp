@@ -63,6 +63,7 @@ bool CommandStack::Execute(DocumentModel& doc, std::unique_ptr<ICommand> cmd) {
         const std::size_t dropCount = history_.size() - maxDepth_;
         history_.erase(history_.begin(), history_.begin() + static_cast<std::ptrdiff_t>(dropCount));
         cursor_ -= dropCount;
+        undoBoundary_ = (undoBoundary_ > dropCount) ? (undoBoundary_ - dropCount) : 0;
         if (cleanCursor_ < dropCount) {
             cleanInvalidated_ = true;
             cleanCursor_ = 0;
@@ -113,6 +114,7 @@ void CommandStack::Clear() noexcept {
     history_.clear();
     cursor_ = 0;
     cleanCursor_ = 0;
+    undoBoundary_ = 0;
     cleanInvalidated_ = false;
 }
 

@@ -33,12 +33,14 @@ private:
         bool isLeaf = true;
     };
 
+    DocRect initialBounds_{};
     DocRect rootBounds_{};
     int maxDepth_ = 10;
     std::size_t splitThreshold_ = 24;
     std::unique_ptr<Node> root_;
     std::unordered_map<std::uint64_t, DocRect> entries_;
 
+    void EnsureBoundsContain(const DocRect& r);
     void InsertIntoNode(Node* node, std::uint64_t id, const DocRect& r);
     void Subdivide(Node* node);
     void QueryNode(const Node* node, const DocRect& viewRect, std::vector<std::uint64_t>& out) const;

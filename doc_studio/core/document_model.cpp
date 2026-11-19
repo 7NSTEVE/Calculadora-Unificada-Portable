@@ -8,38 +8,206 @@ namespace DocStudio {
 
 namespace {
 
-std::string AsciiLower(const std::string& s) {
-    std::string r = s;
-    for (char& c : r) {
-        if (static_cast<unsigned char>(c) < 128) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+bool DecodeUtf8Char(const std::string& s, std::size_t& pos, std::uint32_t& outCp) {
+    if (pos >= s.size()) return false;
+    const std::uint8_t b0 = static_cast<std::uint8_t>(s[pos]);
+    if ((b0 & 0x80u) == 0u) {
+        outCp = b0;
+        pos += 1;
+        return true;
+    }
+    if ((b0 & 0xE0u) == 0xC0u && pos + 1 < s.size()) {
+        const std::uint8_t b1 = static_cast<std::uint8_t>(s[pos + 1]);
+        if ((b1 & 0xC0u) == 0x80u) {
+            outCp = ((b0 & 0x1Fu) << 6) | (b1 & 0x3Fu);
+            pos += 2;
+            return true;
         }
     }
-    return r;
+    if ((b0 & 0xF0u) == 0xE0u && pos + 2 < s.size()) {
+        const std::uint8_t b1 = static_cast<std::uint8_t>(s[pos + 1]);
+        const std::uint8_t b2 = static_cast<std::uint8_t>(s[pos + 2]);
+        if ((b1 & 0xC0u) == 0x80u && (b2 & 0xC0u) == 0x80u) {
+            outCp = ((b0 & 0x0Fu) << 12) | ((b1 & 0x3Fu) << 6) | (b2 & 0x3Fu);
+            pos += 3;
+            return true;
+        }
+    }
+    if ((b0 & 0xF8u) == 0xF0u && pos + 3 < s.size()) {
+        const std::uint8_t b1 = static_cast<std::uint8_t>(s[pos + 1]);
+        const std::uint8_t b2 = static_cast<std::uint8_t>(s[pos + 2]);
+        const std::uint8_t b3 = static_cast<std::uint8_t>(s[pos + 3]);
+        if ((b1 & 0xC0u) == 0x80u && (b2 & 0xC0u) == 0x80u && (b3 & 0xC0u) == 0x80u) {
+            outCp = ((b0 & 0x07u) << 18) | ((b1 & 0x3Fu) << 12) | ((b2 & 0x3Fu) << 6) | (b3 & 0x3Fu);
+            pos += 4;
+            return true;
+        }
+    }
+    outCp = b0;
+    pos += 1;
+    return true;
+}
+
+std::uint32_t LowerUnicodeCodepoint(std::uint32_t cp) noexcept {
+    if (cp >= 'A' && cp <= 'Z') return cp + 32u;
+    if (cp >= 0x00C0u && cp <= 0x00DEu && cp != 0x00D7u) return cp + 0x20u;
+    if (cp >= 0x0100u && cp <= 0x012Eu && (cp % 2u) == 0u) return cp + 1u;
+    if (cp == 0x0130u) return 'i';
+    if (cp >= 0x0132u && cp <= 0x0136u && (cp % 2u) == 0u) return cp + 1u;
+    if (cp >= 0x0139u && cp <= 0x0147u && (cp % 2u) == 1u) return cp + 1u;
+    if (cp >= 0x014Au && cp <= 0x0176u && (cp % 2u) == 0u) return cp + 1u;
+    if (cp == 0x0178u) return 0x00FFu;
+    if (cp >= 0x0179u && cp <= 0x017Du && (cp % 2u) == 1u) return cp + 1u;
+    if (cp == 0x0386u) return 0x03ACu;
+    if (cp >= 0x0388u && cp <= 0x038Au) return cp + 0x25u;
+    if (cp == 0x038Cu) return 0x03CCu;
+    if (cp == 0x038Eu || cp == 0x038Fu) return cp + 0x3Fu;
+    if (cp >= 0x0391u && cp <= 0x03ABu && cp != 0x03A2u) return cp + 0x20u;
+    if (cp == 0x03C2u) return 0x03C3u;
+    if (cp >= 0x0400u && cp <= 0x040Fu) return cp + 0x50u;
+    if (cp >= 0x0410u && cp <= 0x042Fu) return cp + 0x20u;
+    return cp;
+}
+
+std::uint32_t StripLatinDiacritic(std::uint32_t cp) noexcept {
+    switch (cp) {
+        case 0x00E0u: case 0x00E1u: case 0x00E2u: case 0x00E3u: case 0x00E4u: case 0x00E5u: return 'a';
+        case 0x00C0u: case 0x00C1u: case 0x00C2u: case 0x00C3u: case 0x00C4u: case 0x00C5u: return 'A';
+        case 0x00E7u: return 'c';
+        case 0x00C7u: return 'C';
+        case 0x00E8u: case 0x00E9u: case 0x00EAu: case 0x00EBu: return 'e';
+        case 0x00C8u: case 0x00C9u: case 0x00CAu: case 0x00CBu: return 'E';
+        case 0x00ECu: case 0x00EDu: case 0x00EEu: case 0x00EFu: return 'i';
+        case 0x00CCu: case 0x00CDu: case 0x00CEu: case 0x00CFu: return 'I';
+        case 0x00F2u: case 0x00F3u: case 0x00F4u: case 0x00F5u: case 0x00F6u: return 'o';
+        case 0x00D2u: case 0x00D3u: case 0x00D4u: case 0x00D5u: case 0x00D6u: return 'O';
+        case 0x00F9u: case 0x00FAu: case 0x00FBu: case 0x00FCu: return 'u';
+        case 0x00D9u: case 0x00DAu: case 0x00DBu: case 0x00DCu: return 'U';
+        case 0x00FDu: case 0x00FFu: return 'y';
+        case 0x00DDu: case 0x0178u: return 'Y';
+        case 0x00F1u: return 'n';
+        case 0x00D1u: return 'N';
+        default: return cp;
+    }
+}
+
+struct NormalizedCodepoints {
+    std::vector<std::uint32_t> cps;
+    std::vector<std::size_t> srcStartOffsets; // utf8 byte start for each cp
+    std::vector<std::size_t> srcEndOffsets;   // utf8 byte end for each cp
+};
+
+NormalizedCodepoints NormalizeTextForSearch(const std::string& utf8, bool caseSensitive, bool accentInsensitive) {
+    NormalizedCodepoints out;
+    out.cps.reserve(utf8.size());
+    out.srcStartOffsets.reserve(utf8.size());
+    out.srcEndOffsets.reserve(utf8.size());
+
+    std::size_t pos = 0;
+    while (pos < utf8.size()) {
+        const std::size_t cpStart = pos;
+        std::uint32_t cp = 0;
+        if (!DecodeUtf8Char(utf8, pos, cp)) break;
+        const std::size_t cpEnd = pos;
+        if (cp >= 0x0300u && cp <= 0x036Fu && accentInsensitive) continue; // combining diacritics
+
+        auto pushMapped = [&](std::uint32_t c) {
+            if (!caseSensitive) c = LowerUnicodeCodepoint(c);
+            if (accentInsensitive) {
+                c = StripLatinDiacritic(c);
+                if (!caseSensitive) c = LowerUnicodeCodepoint(c);
+            }
+            out.cps.push_back(c);
+            out.srcStartOffsets.push_back(cpStart);
+            out.srcEndOffsets.push_back(cpEnd);
+        };
+
+        switch (cp) {
+            case 0xFB00u: pushMapped('f'); pushMapped('f'); break;
+            case 0xFB01u: pushMapped('f'); pushMapped('i'); break;
+            case 0xFB02u: pushMapped('f'); pushMapped('l'); break;
+            case 0xFB03u: pushMapped('f'); pushMapped('f'); pushMapped('i'); break;
+            case 0xFB04u: pushMapped('f'); pushMapped('f'); pushMapped('l'); break;
+            case 0xFB05u: pushMapped('f'); pushMapped('t'); break;
+            case 0xFB06u: pushMapped('s'); pushMapped('t'); break;
+            default: pushMapped(cp); break;
+        }
+    }
+    return out;
+}
+
+std::string SliceUtf8SafeSnippet(const std::string& utf8, std::size_t matchStart, std::size_t matchEnd) {
+    std::size_t snipStart = (matchStart > 32u) ? (matchStart - 32u) : 0u;
+    while (snipStart < matchStart && snipStart < utf8.size() &&
+           (static_cast<std::uint8_t>(utf8[snipStart]) & 0xC0u) == 0x80u) {
+        ++snipStart;
+    }
+    std::size_t snipEnd = (std::min)(utf8.size(), matchEnd + 40u);
+    while (snipEnd < utf8.size() &&
+           (static_cast<std::uint8_t>(utf8[snipEnd]) & 0xC0u) == 0x80u) {
+        ++snipEnd;
+    }
+    return utf8.substr(snipStart, snipEnd - snipStart);
 }
 
 void SearchInText(
     std::size_t pageIdx,
     const std::string& haystack,
-    const std::string& needle,
+    const NormalizedCodepoints& needleNorm,
     bool caseSensitive,
+    bool accentInsensitive,
     std::vector<SearchMatch>& out)
 {
-    if (haystack.empty() || needle.empty()) return;
-    const std::string h = caseSensitive ? haystack : AsciiLower(haystack);
-    const std::string n = caseSensitive ? needle : AsciiLower(needle);
-    std::size_t pos = 0;
-    while ((pos = h.find(n, pos)) != std::string::npos) {
-        const std::size_t snipStart = (pos > 28) ? (pos - 28) : 0;
-        const std::size_t snipEnd = (std::min)(haystack.size(), pos + needle.size() + 36);
-        SearchMatch m{};
-        m.pageIndex = pageIdx;
-        m.charOffset = pos;
-        m.charLength = needle.size();
-        m.snippetUtf8 = haystack.substr(snipStart, snipEnd - snipStart);
-        out.push_back(std::move(m));
-        pos += (std::max<std::size_t>)(1u, n.size());
+    if (haystack.empty() || needleNorm.cps.empty()) return;
+    const NormalizedCodepoints hayNorm = NormalizeTextForSearch(haystack, caseSensitive, accentInsensitive);
+    if (hayNorm.cps.size() < needleNorm.cps.size()) return;
+
+    const std::size_t nLen = needleNorm.cps.size();
+    for (std::size_t i = 0; i + nLen <= hayNorm.cps.size(); ) {
+        bool match = true;
+        for (std::size_t j = 0; j < nLen; ++j) {
+            if (hayNorm.cps[i + j] != needleNorm.cps[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            const std::size_t byteStart = hayNorm.srcStartOffsets[i];
+            const std::size_t byteEnd = hayNorm.srcEndOffsets[i + nLen - 1];
+            SearchMatch m{};
+            m.pageIndex = pageIdx;
+            m.charOffset = byteStart;
+            m.charLength = byteEnd - byteStart;
+            m.snippetUtf8 = SliceUtf8SafeSnippet(haystack, byteStart, byteEnd);
+            out.push_back(std::move(m));
+            i += (std::max<std::size_t>)(1u, nLen);
+        } else {
+            ++i;
+        }
     }
+}
+
+bool ContainsNormalizedMatch(
+    const std::string& haystack,
+    const NormalizedCodepoints& needleNorm,
+    bool caseSensitive,
+    bool accentInsensitive)
+{
+    if (haystack.empty() || needleNorm.cps.empty()) return false;
+    const NormalizedCodepoints hayNorm = NormalizeTextForSearch(haystack, caseSensitive, accentInsensitive);
+    if (hayNorm.cps.size() < needleNorm.cps.size()) return false;
+    const std::size_t nLen = needleNorm.cps.size();
+    for (std::size_t i = 0; i + nLen <= hayNorm.cps.size(); ++i) {
+        bool match = true;
+        for (std::size_t j = 0; j < nLen; ++j) {
+            if (hayNorm.cps[i + j] != needleNorm.cps[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -208,24 +376,42 @@ AnnotationObject* DocumentModel::FindPageObjectMutable(std::size_t pageIdx, std:
     return nullptr;
 }
 
-std::vector<SearchMatch> DocumentModel::SearchText(const std::string& queryUtf8, bool caseSensitive) const {
+std::vector<SearchMatch> DocumentModel::SearchText(
+    const std::string& queryUtf8,
+    bool caseSensitive,
+    bool accentInsensitive) const
+{
     std::vector<SearchMatch> out;
     if (queryUtf8.empty()) return out;
+    const NormalizedCodepoints needleNorm = NormalizeTextForSearch(queryUtf8, caseSensitive, accentInsensitive);
+    if (needleNorm.cps.empty()) return out;
 
     for (std::size_t p = 0; p < pages_.size(); ++p) {
         const auto& pg = pages_[p];
-        SearchInText(p, pg.extractedTextUtf8, queryUtf8, caseSensitive, out);
-        SearchInText(p, pg.ocrTextUtf8, queryUtf8, caseSensitive, out);
+        SearchInText(p, pg.extractedTextUtf8, needleNorm, caseSensitive, accentInsensitive, out);
+        SearchInText(p, pg.ocrTextUtf8, needleNorm, caseSensitive, accentInsensitive, out);
         for (const auto& obj : pg.objects) {
-            if (obj.kind == ObjectKind::TextBox && !obj.textUtf8.empty()) {
-                const std::string h = caseSensitive ? obj.textUtf8 : AsciiLower(obj.textUtf8);
-                const std::string n = caseSensitive ? queryUtf8 : AsciiLower(queryUtf8);
-                if (h.find(n) != std::string::npos) {
+            std::string searchable;
+            if (!obj.textUtf8.empty()) searchable += obj.textUtf8;
+            if (!obj.formulaExprUtf8.empty()) {
+                if (!searchable.empty()) searchable += ' ';
+                searchable += obj.formulaExprUtf8;
+            }
+            if (!obj.evaluatedResultUtf8.empty()) {
+                if (!searchable.empty()) searchable += ' ';
+                searchable += obj.evaluatedResultUtf8;
+            }
+            if (!obj.calcModelIdUtf8.empty()) {
+                if (!searchable.empty()) searchable += ' ';
+                searchable += obj.calcModelIdUtf8 + " " + obj.calcKeySeqUtf8;
+            }
+            if (!searchable.empty()) {
+                if (ContainsNormalizedMatch(searchable, needleNorm, caseSensitive, accentInsensitive)) {
                     SearchMatch m{};
                     m.pageIndex = p;
                     m.charOffset = 0;
                     m.charLength = queryUtf8.size();
-                    m.snippetUtf8 = obj.textUtf8;
+                    m.snippetUtf8 = searchable;
                     m.hasBox = true;
                     const double pw = (std::max)(1.0, pg.EffectiveWidthPt());
                     const double ph = (std::max)(1.0, pg.EffectiveHeightPt());
@@ -238,6 +424,202 @@ std::vector<SearchMatch> DocumentModel::SearchText(const std::string& queryUtf8,
                     out.push_back(std::move(m));
                 }
             }
+        }
+    }
+    return out;
+}
+
+void DocumentModel::SetLayers(std::vector<LayerModel> layers) {
+    if (layers.empty()) {
+        layers.push_back(LayerModel{});
+    }
+    layers_ = std::move(layers);
+    nextLayerId_ = 1;
+    bool activeFound = false;
+    for (const auto& l : layers_) {
+        if (l.id > nextLayerId_) nextLayerId_ = l.id;
+        if (l.id == activeLayerId_) activeFound = true;
+    }
+    if (!activeFound) activeLayerId_ = layers_.front().id;
+    BumpRevision();
+}
+
+std::uint64_t DocumentModel::AddLayer(const std::string& nameUtf8) {
+    LayerModel layer;
+    layer.id = ++nextLayerId_;
+    layer.nameUtf8 = nameUtf8.empty() ? ("Capa " + std::to_string(layer.id)) : nameUtf8;
+    layers_.push_back(std::move(layer));
+    dirty_ = true;
+    BumpRevision();
+    return layers_.back().id;
+}
+
+bool DocumentModel::RemoveLayer(std::uint64_t layerId) {
+    if (layers_.size() <= 1) return false;
+    for (std::size_t i = 0; i < layers_.size(); ++i) {
+        if (layers_[i].id == layerId) {
+            layers_.erase(layers_.begin() + static_cast<std::ptrdiff_t>(i));
+            if (activeLayerId_ == layerId) activeLayerId_ = layers_.front().id;
+            dirty_ = true;
+            BumpRevision();
+            return true;
+        }
+    }
+    return false;
+}
+
+bool DocumentModel::SetLayerProperties(
+    std::uint64_t layerId,
+    bool visible,
+    bool locked,
+    bool includeInExport,
+    double opacity)
+{
+    for (auto& l : layers_) {
+        if (l.id == layerId) {
+            l.visible = visible;
+            l.locked = locked;
+            l.includeInExport = includeInExport;
+            l.opacity = std::clamp(opacity, 0.05, 1.0);
+            dirty_ = true;
+            BumpRevision();
+            return true;
+        }
+    }
+    return false;
+}
+
+bool DocumentModel::MoveLayer(std::size_t fromIdx, std::size_t toIdx) {
+    if (fromIdx >= layers_.size() || toIdx >= layers_.size() || fromIdx == toIdx) return false;
+    LayerModel item = std::move(layers_[fromIdx]);
+    layers_.erase(layers_.begin() + static_cast<std::ptrdiff_t>(fromIdx));
+    layers_.insert(layers_.begin() + static_cast<std::ptrdiff_t>(toIdx), std::move(item));
+    dirty_ = true;
+    BumpRevision();
+    return true;
+}
+
+const LayerModel* DocumentModel::FindLayer(std::uint64_t layerId) const noexcept {
+    for (const auto& l : layers_) {
+        if (l.id == layerId) return &l;
+    }
+    return nullptr;
+}
+
+bool DocumentModel::IsLayerVisible(std::uint64_t layerId) const noexcept {
+    const auto* l = FindLayer(layerId);
+    return l ? l->visible : true;
+}
+
+bool DocumentModel::IsLayerLocked(std::uint64_t layerId) const noexcept {
+    const auto* l = FindLayer(layerId);
+    return l ? l->locked : false;
+}
+
+bool DocumentModel::IsLayerExportable(std::uint64_t layerId) const noexcept {
+    const auto* l = FindLayer(layerId);
+    return l ? l->includeInExport : true;
+}
+
+std::uint64_t DocumentModel::AddInkLink(InkLink link) {
+    if (link.id == 0) {
+        link.id = ++nextLinkId_;
+    } else if (link.id > nextLinkId_) {
+        nextLinkId_ = link.id;
+    }
+    inkLinks_.push_back(std::move(link));
+    dirty_ = true;
+    BumpRevision();
+    return inkLinks_.back().id;
+}
+
+bool DocumentModel::RemoveInkLink(std::uint64_t linkId) {
+    for (std::size_t i = 0; i < inkLinks_.size(); ++i) {
+        if (inkLinks_[i].id == linkId) {
+            inkLinks_.erase(inkLinks_.begin() + static_cast<std::ptrdiff_t>(i));
+            dirty_ = true;
+            BumpRevision();
+            return true;
+        }
+    }
+    return false;
+}
+
+void DocumentModel::ToggleCollapsedRange(int startPage0, int endPage0) {
+    const int a = (std::min)(startPage0, endPage0);
+    const int b = (std::max)(startPage0, endPage0);
+    for (std::size_t i = 0; i < collapsedRanges_.size(); ++i) {
+        if (collapsedRanges_[i].startPage0 == a && collapsedRanges_[i].endPage0 == b) {
+            collapsedRanges_[i].collapsed = !collapsedRanges_[i].collapsed;
+            if (!collapsedRanges_[i].collapsed) {
+                collapsedRanges_.erase(collapsedRanges_.begin() + static_cast<std::ptrdiff_t>(i));
+            }
+            dirty_ = true;
+            BumpRevision();
+            return;
+        }
+    }
+    collapsedRanges_.push_back(CollapsedPageRange{ a, b, true });
+    dirty_ = true;
+    BumpRevision();
+}
+
+bool DocumentModel::IsPageCollapsed(int pageIndex0) const noexcept {
+    for (const auto& r : collapsedRanges_) {
+        if (r.collapsed && pageIndex0 >= r.startPage0 && pageIndex0 <= r.endPage0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::uint64_t DocumentModel::AddBookmark(std::string titleUtf8, std::size_t pageIndex, double worldY, int level) {
+    for (const auto& bm : bookmarks_) {
+        if (bm.id > nextBookmarkId_) nextBookmarkId_ = bm.id;
+    }
+    DocumentBookmark b{};
+    b.id = ++nextBookmarkId_;
+    b.titleUtf8 = std::move(titleUtf8);
+    b.pageIndex = pageIndex;
+    b.worldY = worldY;
+    b.level = level;
+    bookmarks_.push_back(b);
+    dirty_ = true;
+    BumpRevision();
+    return b.id;
+}
+
+bool DocumentModel::RemoveBookmark(std::uint64_t bookmarkId) {
+    for (std::size_t i = 0; i < bookmarks_.size(); ++i) {
+        if (bookmarks_[i].id == bookmarkId) {
+            bookmarks_.erase(bookmarks_.begin() + static_cast<std::ptrdiff_t>(i));
+            dirty_ = true;
+            BumpRevision();
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string FoldUtf8ForSearch(const std::string& utf8, bool caseSensitive, bool accentInsensitive) {
+    const NormalizedCodepoints norm = NormalizeTextForSearch(utf8, caseSensitive, accentInsensitive);
+    std::string out;
+    out.reserve(utf8.size());
+    for (std::uint32_t cp : norm.cps) {
+        if (cp < 0x80u) {
+            out.push_back(static_cast<char>(cp));
+        } else if (cp < 0x800u) {
+            out.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+            out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+        } else if (cp < 0x10000u) {
+            out.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+            out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+        } else {
+            out.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+            out.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
+            out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+            out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
         }
     }
     return out;

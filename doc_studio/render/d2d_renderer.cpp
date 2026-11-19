@@ -1,4 +1,7 @@
 #include "d2d_renderer.hpp"
+#include "card_render_common.hpp"
+#include "math_box_typesetter.hpp"
+#include "../core/ink_engine.hpp"
 #include "../core/utf_conv.hpp"
 
 #include <d2d1.h>
@@ -39,6 +42,163 @@ D2D1_RECT_F ToD2DRect(const DocRect& r) noexcept {
         static_cast<FLOAT>(r.Right()),
         static_cast<FLOAT>(r.Bottom()));
 }
+
+class D2DMathBackend final : public MathTypeset::IMathDrawBackend {
+public:
+    D2DMathBackend(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, IDWriteFactory* dw)
+        : rt_(rt), brush_(brush), dw_(dw) {}
+
+    MathTypeset::TextMetrics2D MeasureText(
+        const std::string& utf8,
+        double fontSizePx,
+        MathTypeset::FontStyleRole role) override
+    {
+        MathTypeset::TextMetrics2D out{};
+        if (!dw_ || utf8.empty()) {
+            out.ascent = fontSizePx * 0.78;
+            out.descent = fontSizePx * 0.22;
+            return out;
+        }
+        ComPtr<IDWriteTextLayout> layout = CreateLayout(utf8, fontSizePx, role);
+        if (!layout) {
+            out.width = fontSizePx * 0.52 * static_cast<double>(utf8.size());
+            out.ascent = fontSizePx * 0.78;
+            out.descent = fontSizePx * 0.22;
+            return out;
+        }
+        DWRITE_TEXT_METRICS tm{};
+        if (SUCCEEDED(layout->GetMetrics(&tm))) {
+            out.width = static_cast<double>(tm.widthIncludingTrailingWhitespace);
+        }
+        DWRITE_LINE_METRICS lm{};
+        UINT32 actualLines = 0;
+        if (SUCCEEDED(layout->GetLineMetrics(&lm, 1, &actualLines)) && actualLines >= 1) {
+            out.ascent = static_cast<double>(lm.baseline);
+            out.descent = (std::max)(fontSizePx * 0.18, static_cast<double>(lm.height - lm.baseline));
+        } else {
+            out.ascent = fontSizePx * 0.78;
+            out.descent = fontSizePx * 0.22;
+        }
+        return out;
+    }
+
+    void DrawTextRun(
+        double x,
+        double baselineY,
+        const std::string& utf8,
+        double fontSizePx,
+        MathTypeset::FontStyleRole role,
+        DocColor color) override
+    {
+        if (!rt_ || !brush_ || !dw_ || utf8.empty()) return;
+        ComPtr<IDWriteTextLayout> layout = CreateLayout(utf8, fontSizePx, role);
+        if (!layout) return;
+        double baseline = fontSizePx * 0.78;
+        DWRITE_LINE_METRICS lm{};
+        UINT32 actualLines = 0;
+        if (SUCCEEDED(layout->GetLineMetrics(&lm, 1, &actualLines)) && actualLines >= 1) {
+            baseline = static_cast<double>(lm.baseline);
+        }
+        brush_->SetColor(ToD2DColor(color));
+        rt_->DrawTextLayout(
+            D2D1::Point2F(static_cast<FLOAT>(x), static_cast<FLOAT>(baselineY - baseline)),
+            layout.Get(), brush_, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+    }
+
+    void DrawLine(
+        double x0, double y0,
+        double x1, double y1,
+        double thickness,
+        DocColor color) override
+    {
+        if (!rt_ || !brush_) return;
+        brush_->SetColor(ToD2DColor(color));
+        rt_->DrawLine(
+            D2D1::Point2F(static_cast<FLOAT>(x0), static_cast<FLOAT>(y0)),
+            D2D1::Point2F(static_cast<FLOAT>(x1), static_cast<FLOAT>(y1)),
+            brush_, static_cast<FLOAT>((std::max)(0.6, thickness)));
+    }
+
+    void DrawRoundedPill(
+        double x, double y, double w, double h,
+        double radius,
+        DocColor fill,
+        DocColor stroke,
+        double strokeWidth) override
+    {
+        if (!rt_ || !brush_) return;
+        const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
+            D2D1::RectF(static_cast<FLOAT>(x), static_cast<FLOAT>(y),
+                        static_cast<FLOAT>(x + w), static_cast<FLOAT>(y + h)),
+            static_cast<FLOAT>(radius), static_cast<FLOAT>(radius));
+        if (fill.a > 0) {
+            brush_->SetColor(ToD2DColor(fill));
+            rt_->FillRoundedRectangle(rr, brush_);
+        }
+        if (stroke.a > 0 && strokeWidth > 0.0) {
+            brush_->SetColor(ToD2DColor(stroke));
+            rt_->DrawRoundedRectangle(rr, brush_, static_cast<FLOAT>(strokeWidth));
+        }
+    }
+
+private:
+    ComPtr<IDWriteTextLayout> CreateLayout(
+        const std::string& utf8,
+        double fontSizePx,
+        MathTypeset::FontStyleRole role)
+    {
+        const wchar_t* family = L"Segoe UI";
+        DWRITE_FONT_WEIGHT weight = DWRITE_FONT_WEIGHT_NORMAL;
+        DWRITE_FONT_STYLE style = DWRITE_FONT_STYLE_NORMAL;
+        switch (role) {
+        case MathTypeset::FontStyleRole::UiRegular:
+            family = L"Segoe UI";
+            weight = DWRITE_FONT_WEIGHT_NORMAL;
+            break;
+        case MathTypeset::FontStyleRole::UiSemiBold:
+            family = L"Segoe UI";
+            weight = DWRITE_FONT_WEIGHT_SEMI_BOLD;
+            break;
+        case MathTypeset::FontStyleRole::MathItalic:
+            family = L"Cambria Math";
+            style = DWRITE_FONT_STYLE_ITALIC;
+            break;
+        case MathTypeset::FontStyleRole::MathRoman:
+            family = L"Cambria Math";
+            break;
+        case MathTypeset::FontStyleRole::MathBold:
+            family = L"Cambria Math";
+            weight = DWRITE_FONT_WEIGHT_BOLD;
+            break;
+        case MathTypeset::FontStyleRole::MathSymbol:
+            family = L"Cambria Math";
+            break;
+        case MathTypeset::FontStyleRole::KeycapLabel:
+            family = L"Segoe UI";
+            weight = DWRITE_FONT_WEIGHT_SEMI_BOLD;
+            break;
+        }
+        ComPtr<IDWriteTextFormat> fmt;
+        if (FAILED(dw_->CreateTextFormat(
+                family, nullptr, weight, style, DWRITE_FONT_STRETCH_NORMAL,
+                static_cast<FLOAT>((std::max)(5.5, fontSizePx)), L"es-ES", &fmt)) || !fmt) {
+            return nullptr;
+        }
+        fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        const std::wstring wtxt = Utf8ToWide(utf8);
+        ComPtr<IDWriteTextLayout> layout;
+        if (FAILED(dw_->CreateTextLayout(
+                wtxt.c_str(), static_cast<UINT32>(wtxt.size()),
+                fmt.Get(), 4096.0f, 512.0f, &layout))) {
+            return nullptr;
+        }
+        return layout;
+    }
+
+    ID2D1RenderTarget* rt_ = nullptr;
+    ID2D1SolidColorBrush* brush_ = nullptr;
+    IDWriteFactory* dw_ = nullptr;
+};
 
 } // namespace
 
@@ -103,7 +263,14 @@ void PageRenderCache::RequestAsync(const PageCacheKey& key, std::uint64_t genera
         auto it = inFlight_.find(key);
         if (it != inFlight_.end() && it->second >= generation) return;
         inFlight_[key] = generation;
-        if (queue_.size() > 64) queue_.pop_front();
+        while (queue_.size() >= 64) {
+            const auto dropped = std::move(queue_.front());
+            queue_.pop_front();
+            auto dit = inFlight_.find(dropped.key);
+            if (dit != inFlight_.end() && dit->second <= dropped.generation) {
+                inFlight_.erase(dit);
+            }
+        }
         queue_.push_back({ key, generation, std::move(onReady) });
     }
     cv_.notify_one();
@@ -235,7 +402,7 @@ struct D2DRenderer::Impl {
         return bmp.Detach();
     }
 
-    ID2D1Bitmap* AcquireGpuBitmapForEncodedAsset(
+    ComPtr<ID2D1Bitmap> AcquireGpuBitmapForEncodedAsset(
         ID2D1RenderTarget* rt,
         const std::string& cacheTag,
         const std::vector<std::uint8_t>& bytes,
@@ -244,7 +411,7 @@ struct D2DRenderer::Impl {
         if (!rt || !wicFactory || bytes.empty()) return nullptr;
         if (cacheResult) {
             for (const auto& entry : assetGpuBitmaps) {
-                if (entry.key == cacheTag) return entry.bmp.Get();
+                if (entry.key == cacheTag) return entry.bmp;
             }
         }
         ComPtr<IWICStream> stream;
@@ -265,7 +432,7 @@ struct D2DRenderer::Impl {
             if (assetGpuBitmaps.size() > 64) assetGpuBitmaps.erase(assetGpuBitmaps.begin());
             assetGpuBitmaps.push_back({ cacheTag, bmp });
         }
-        return bmp.Get();
+        return bmp;
     }
 
     void DrawPaperPattern(
@@ -273,7 +440,8 @@ struct D2DRenderer::Impl {
         ID2D1SolidColorBrush* brush,
         const DocRect& worldRegion,
         PaperPattern pattern,
-        const Camera2D& cam)
+        const Camera2D& cam,
+        bool darkPaper = false)
     {
         if (pattern == PaperPattern::Plain) return;
 
@@ -304,7 +472,7 @@ struct D2DRenderer::Impl {
         if (pattern == PaperPattern::Ruled) {
             const double step = 24.0;
             if (step * cam.zoom >= 4.0) {
-                brush->SetColor(ToD2DColor(DocColor::RGBA(205, 221, 244, 255)));
+                brush->SetColor(ToD2DColor(darkPaper ? DocColor::RGBA(44, 52, 66, 255) : DocColor::RGBA(205, 221, 244, 255)));
                 const double startY = std::floor(worldRegion.y / step) * step;
                 for (double y = startY; y <= worldRegion.Bottom(); y += step) {
                     const DocPoint p0 = cam.WorldToScreen(worldRegion.x, y);
@@ -316,17 +484,17 @@ struct D2DRenderer::Impl {
                 const double marginX = worldRegion.x + 56.0;
                 const DocPoint m0 = cam.WorldToScreen(marginX, worldRegion.y);
                 const DocPoint m1 = cam.WorldToScreen(marginX, worldRegion.Bottom());
-                brush->SetColor(ToD2DColor(DocColor::RGBA(240, 150, 155, 255)));
+                brush->SetColor(ToD2DColor(darkPaper ? DocColor::RGBA(120, 52, 60, 220) : DocColor::RGBA(240, 150, 155, 255)));
                 rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(m0.x), static_cast<FLOAT>(m0.y)),
                              D2D1::Point2F(static_cast<FLOAT>(m1.x), static_cast<FLOAT>(m1.y)),
                              brush, 1.2f);
             }
         } else if (pattern == PaperPattern::Grid) {
-            drawGridLines(20.0, DocColor::RGBA(218, 228, 240, 255), 1.0f);
+            drawGridLines(20.0, darkPaper ? DocColor::RGBA(40, 46, 58, 255) : DocColor::RGBA(218, 228, 240, 255), 1.0f);
         } else if (pattern == PaperPattern::Dots) {
             const double step = 20.0;
             if (step * cam.zoom >= 6.0) {
-                brush->SetColor(ToD2DColor(DocColor::RGBA(175, 186, 204, 255)));
+                brush->SetColor(ToD2DColor(darkPaper ? DocColor::RGBA(62, 70, 86, 255) : DocColor::RGBA(175, 186, 204, 255)));
                 const float r = (std::max)(1.0f, static_cast<float>(1.2 * cam.zoom));
                 const double startX = std::floor(worldRegion.x / step) * step;
                 const double startY = std::floor(worldRegion.y / step) * step;
@@ -338,8 +506,8 @@ struct D2DRenderer::Impl {
                 }
             }
         } else if (pattern == PaperPattern::Millimeter) {
-            drawGridLines(8.0, DocColor::RGBA(228, 240, 232, 255), 0.7f);
-            drawGridLines(40.0, DocColor::RGBA(178, 214, 190, 255), 1.1f);
+            drawGridLines(8.0, darkPaper ? DocColor::RGBA(36, 44, 44, 255) : DocColor::RGBA(228, 240, 232, 255), 0.7f);
+            drawGridLines(40.0, darkPaper ? DocColor::RGBA(52, 68, 62, 255) : DocColor::RGBA(178, 214, 190, 255), 1.1f);
         }
     }
 
@@ -352,8 +520,12 @@ struct D2DRenderer::Impl {
         double originWorldX,
         double originWorldY,
         bool isSelected,
-        bool cacheGpuAssets)
+        bool cacheGpuAssets,
+        const ViewportOverlayState* overlay = nullptr)
     {
+        double layerOpacity = 1.0;
+        if (!RenderCommon::ShouldDrawObjectOnLayer(doc, obj, layerOpacity, overlay)) return;
+
         auto toScreen = [&](double lx, double ly) -> D2D1_POINT_2F {
             const DocPoint sp = cam.WorldToScreen(originWorldX + lx, originWorldY + ly);
             return D2D1::Point2F(static_cast<FLOAT>(sp.x), static_cast<FLOAT>(sp.y));
@@ -364,20 +536,40 @@ struct D2DRenderer::Impl {
         };
 
         if (obj.kind == ObjectKind::InkStroke) {
-            DocColor col = obj.strokeColor;
-            if (obj.isHighlighter && col.a > 140) col.a = 98;
-            brush->SetColor(ToD2DColor(col));
-            if (obj.inkPoints.size() == 1) {
+            const std::vector<InkPoint> filteredPts = (overlay && overlay->replayActive)
+                ? InkEngine::FilterInkPointsAtReplayTime(obj, overlay->replayCursorMs)
+                : obj.inkPoints;
+            if (filteredPts.empty()) return;
+
+            DocColor baseCol = RenderCommon::ApplyLayerOpacity(obj.strokeColor, layerOpacity);
+            if ((obj.isHighlighter || obj.penStyle == InkPenStyle::Highlighter) && baseCol.a > 140) {
+                baseCol.a = 98;
+            }
+            if (filteredPts.size() == 1) {
+                brush->SetColor(ToD2DColor(baseCol));
                 const float r = (std::max)(1.0f, static_cast<float>(obj.strokeWidth * 0.5 * cam.zoom));
-                rt->FillEllipse(D2D1::Ellipse(toScreen(obj.inkPoints[0].x, obj.inkPoints[0].y), r, r), brush);
+                rt->FillEllipse(D2D1::Ellipse(toScreen(filteredPts[0].x, filteredPts[0].y), r, r), brush);
             } else {
-                for (std::size_t i = 1; i < obj.inkPoints.size(); ++i) {
-                    const auto& p0 = obj.inkPoints[i - 1];
-                    const auto& p1 = obj.inkPoints[i];
-                    const double pAvg = 0.5 * (p0.pressure + p1.pressure);
-                    const double widthWorld = obj.isHighlighter
-                        ? (std::max)(4.0, obj.strokeWidth)
-                        : (std::max)(0.6, obj.strokeWidth * (0.45 + 1.1 * pAvg));
+                for (std::size_t i = 1; i < filteredPts.size(); ++i) {
+                    const auto& p0 = filteredPts[i - 1];
+                    const auto& p1 = filteredPts[i];
+                    const double segDist = std::hypot(p1.x - p0.x, p1.y - p0.y);
+                    const double dtMs = (p1.timestampMs > p0.timestampMs)
+                        ? static_cast<double>(p1.timestampMs - p0.timestampMs) : 16.0;
+                    const double speed = (segDist * 1000.0) / (std::max)(1.0, dtMs);
+                    const InkPoint mid{
+                        0.5 * (p0.x + p1.x),
+                        0.5 * (p0.y + p1.y),
+                        0.5f * (p0.pressure + p1.pressure),
+                        0.5f * (p0.tiltXDeg + p1.tiltXDeg),
+                        0.5f * (p0.tiltYDeg + p1.tiltYDeg),
+                        p1.timestampMs
+                    };
+                    const double widthWorld = InkEngine::ComputeEffectiveWidth(mid, obj, speed);
+                    const double tiltAlpha = InkEngine::ComputeTiltAlphaMultiplier(mid, obj.penStyle);
+                    DocColor segCol = baseCol;
+                    segCol.a = static_cast<std::uint8_t>(std::clamp(std::lround(baseCol.a * tiltAlpha), 1L, 255L));
+                    brush->SetColor(ToD2DColor(segCol));
                     const float wPx = (std::max)(0.8f, static_cast<float>(widthWorld * cam.zoom));
                     rt->DrawLine(toScreen(p0.x, p0.y), toScreen(p1.x, p1.y), brush, wPx, roundStroke.Get());
                 }
@@ -442,17 +634,31 @@ struct D2DRenderer::Impl {
                 rt->FillRectangle(sr, brush);
             }
             if (dwFactory && !obj.textUtf8.empty()) {
-                brush->SetColor(ToD2DColor(obj.strokeColor));
                 const float fontPx = (std::max)(6.0f, static_cast<float>(obj.fontSizePt * cam.zoom));
-                const std::wstring wfam = Utf8ToWide(obj.fontFamilyUtf8.empty() ? "Segoe UI" : obj.fontFamilyUtf8);
-                ComPtr<IDWriteTextFormat> fmt;
-                if (SUCCEEDED(dwFactory->CreateTextFormat(
-                        wfam.c_str(), nullptr,
-                        obj.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
-                        obj.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
-                        DWRITE_FONT_STRETCH_NORMAL, fontPx, L"es-ES", &fmt)) && fmt) {
-                    const std::wstring wtxt = Utf8ToWide(obj.textUtf8);
-                    rt->DrawTextW(wtxt.c_str(), static_cast<UINT32>(wtxt.size()), fmt.Get(), sr, brush);
+                if (MathTypeset::TextContainsMathMarkup(obj.textUtf8)) {
+                    rt->PushAxisAlignedClip(sr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    D2DMathBackend mbk(rt, brush, dwFactory.Get());
+                    std::istringstream iss(obj.textUtf8);
+                    std::string line;
+                    double curY = sr.top + 2.0;
+                    const double maxW = (std::max)(12.0, static_cast<double>(sr.right - sr.left) - 4.0);
+                    while (std::getline(iss, line) && curY < sr.bottom) {
+                        if (!line.empty() && line.back() == '\r') line.pop_back();
+                        curY += MathTypeset::DrawRichMathLine(mbk, line, sr.left + 2.0, curY, maxW, fontPx, obj.strokeColor, false);
+                    }
+                    rt->PopAxisAlignedClip();
+                } else {
+                    brush->SetColor(ToD2DColor(obj.strokeColor));
+                    const std::wstring wfam = Utf8ToWide(obj.fontFamilyUtf8.empty() ? "Segoe UI" : obj.fontFamilyUtf8);
+                    ComPtr<IDWriteTextFormat> fmt;
+                    if (SUCCEEDED(dwFactory->CreateTextFormat(
+                            wfam.c_str(), nullptr,
+                            obj.bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+                            obj.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+                            DWRITE_FONT_STRETCH_NORMAL, fontPx, L"es-ES", &fmt)) && fmt) {
+                        const std::wstring wtxt = Utf8ToWide(obj.textUtf8);
+                        rt->DrawTextW(wtxt.c_str(), static_cast<UINT32>(wtxt.size()), fmt.Get(), sr, brush);
+                    }
                 }
             }
         } else if (obj.kind == ObjectKind::Image) {
@@ -460,9 +666,9 @@ struct D2DRenderer::Impl {
             const D2D1_RECT_F sr = rectToScreen(obj.bounds);
             if (bytesPtr && !bytesPtr->empty()) {
                 const std::string tag = !obj.assetKey.empty() ? obj.assetKey : ("inline_" + std::to_string(obj.id));
-                ID2D1Bitmap* bmp = AcquireGpuBitmapForEncodedAsset(rt, tag, *bytesPtr, cacheGpuAssets);
+                ComPtr<ID2D1Bitmap> bmp = AcquireGpuBitmapForEncodedAsset(rt, tag, *bytesPtr, cacheGpuAssets);
                 if (bmp) {
-                    rt->DrawBitmap(bmp, sr);
+                    rt->DrawBitmap(bmp.Get(), sr);
                 }
             } else {
                 brush->SetColor(ToD2DColor(DocColor::RGBA(200, 210, 224, 255)));
@@ -475,8 +681,8 @@ struct D2DRenderer::Impl {
             const std::vector<std::uint8_t>* bytesPtr = !obj.pngBytes.empty() ? &obj.pngBytes : doc.FindAsset(obj.assetKey);
             if (bytesPtr && !bytesPtr->empty()) {
                 const std::string tag = !obj.assetKey.empty() ? obj.assetKey : ("pdfcard_" + std::to_string(obj.id));
-                if (ID2D1Bitmap* bmp = AcquireGpuBitmapForEncodedAsset(rt, tag, *bytesPtr, cacheGpuAssets)) {
-                    rt->DrawBitmap(bmp, sr);
+                if (ComPtr<ID2D1Bitmap> bmp = AcquireGpuBitmapForEncodedAsset(rt, tag, *bytesPtr, cacheGpuAssets)) {
+                    rt->DrawBitmap(bmp.Get(), sr);
                 }
             }
             brush->SetColor(ToD2DColor(DocColor::RGBA(59, 130, 246, 255)));
@@ -489,6 +695,93 @@ struct D2DRenderer::Impl {
                     const std::wstring title = L"PDF p." + std::to_wstring(obj.pdfSourcePageIndex0 + 1) + L"\n" + Utf8ToWide(obj.captionUtf8);
                     rt->DrawTextW(title.c_str(), static_cast<UINT32>(title.size()), fmt.Get(),
                         D2D1::RectF(sr.left + 8.0f, sr.top + 8.0f, sr.right - 8.0f, sr.bottom - 8.0f), brush);
+                }
+            }
+        } else if (obj.kind == ObjectKind::StudyTape ||
+                   obj.kind == ObjectKind::MathBlock ||
+                   obj.kind == ObjectKind::CircuitBlock ||
+                   obj.kind == ObjectKind::CalcSessionCard ||
+                   obj.kind == ObjectKind::PlotBlock) {
+            const D2D1_RECT_F sr = rectToScreen(obj.bounds);
+            const auto card = RenderCommon::BuildStemCardLayout(obj);
+            const float cardRad = (std::max)(4.0f, static_cast<float>(10.0 * cam.zoom));
+            const D2D1_ROUNDED_RECT cardRR = D2D1::RoundedRect(sr, cardRad, cardRad);
+            // Subtle elevation shadow for content card (standard material, never Liquid Glass)
+            brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(DocColor::RGBA(15, 23, 42, 22), layerOpacity)));
+            rt->FillRoundedRectangle(D2D1::RoundedRect(
+                D2D1::RectF(sr.left + 1.0f, sr.top + 2.5f, sr.right + 1.0f, sr.bottom + 2.5f), cardRad, cardRad), brush);
+            brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(card.bg, layerOpacity)));
+            rt->FillRoundedRectangle(cardRR, brush);
+            brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(card.border, layerOpacity)));
+            rt->DrawRoundedRectangle(cardRR, brush, (std::max)(1.0f, static_cast<float>(1.25 * cam.zoom)));
+
+            const float pad = static_cast<float>(6.0 * cam.zoom);
+            if (dwFactory) {
+                rt->PushAxisAlignedClip(sr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                D2DMathBackend mbk(rt, brush, dwFactory.Get());
+                const DocRect cardBox{
+                    static_cast<double>(sr.left), static_cast<double>(sr.top),
+                    static_cast<double>(sr.right - sr.left), static_cast<double>(sr.bottom - sr.top)
+                };
+                MathTypeset::DrawStemCardContent(
+                    mbk, obj, cardBox, cam.zoom,
+                    RenderCommon::ApplyLayerOpacity(card.titleColor, layerOpacity),
+                    RenderCommon::ApplyLayerOpacity(card.bodyColor, layerOpacity),
+                    card.headerUtf8, card.bodyUtf8);
+                rt->PopAxisAlignedClip();
+            }
+
+            if (obj.kind == ObjectKind::CalcSessionCard && !obj.pngBytes.empty()) {
+                const float imgW = (std::min)(static_cast<float>((sr.right - sr.left) * 0.42f), static_cast<float>(130.0 * cam.zoom));
+                const float imgH = (std::min)(static_cast<float>((sr.bottom - sr.top) * 0.60f), imgW * 0.55f);
+                if (imgW > 18.0f && imgH > 12.0f) {
+                    const D2D1_RECT_F lcdR = D2D1::RectF(sr.right - imgW - pad, sr.top + pad * 3.5f, sr.right - pad, sr.top + pad * 3.5f + imgH);
+                    if (ComPtr<ID2D1Bitmap> bmp = AcquireGpuBitmapForEncodedAsset(rt, "calc_lcd_" + std::to_string(obj.id), obj.pngBytes, cacheGpuAssets)) {
+                        rt->DrawBitmap(bmp.Get(), lcdR);
+                    }
+                }
+            } else if (obj.kind == ObjectKind::PlotBlock) {
+                const auto plot = RenderCommon::BuildPlotRenderData(obj);
+                const float px0 = sr.left + pad * 1.2f;
+                const float py0 = sr.top + pad * 4.2f;
+                const float px1 = (std::max)(px0 + 16.0f, sr.right - pad * 1.2f);
+                const float py1 = (std::max)(py0 + 16.0f, sr.bottom - pad * 3.0f);
+                brush->SetColor(ToD2DColor(DocColor::RGBA(255, 255, 255, 235)));
+                rt->FillRectangle(D2D1::RectF(px0, py0, px1, py1), brush);
+                brush->SetColor(ToD2DColor(DocColor::RGBA(148, 163, 184, 255)));
+                rt->DrawRectangle(D2D1::RectF(px0, py0, px1, py1), brush, 1.0f);
+
+                auto mapPt = [&](double wx, double wy) -> D2D1_POINT_2F {
+                    const double nx = (wx - plot.xMin) / (std::max)(1e-9, plot.xMax - plot.xMin);
+                    const double ny = (wy - plot.yMin) / (std::max)(1e-9, plot.yMax - plot.yMin);
+                    return D2D1::Point2F(
+                        static_cast<FLOAT>(px0 + std::clamp(nx, 0.0, 1.0) * (px1 - px0)),
+                        static_cast<FLOAT>(py1 - std::clamp(ny, 0.0, 1.0) * (py1 - py0)));
+                };
+                if (plot.is3D && !plot.surface3DSegments.empty()) {
+                    const float segW = (std::max)(1.0f, static_cast<float>(1.35 * cam.zoom));
+                    for (const auto& seg : plot.surface3DSegments) {
+                        brush->SetColor(ToD2DColor(seg.color));
+                        rt->DrawLine(mapPt(seg.a.x, seg.a.y), mapPt(seg.b.x, seg.b.y), brush, segW);
+                    }
+                } else {
+                    if (plot.xMin <= 0.0 && plot.xMax >= 0.0) {
+                        const auto a = mapPt(0.0, plot.yMin), b = mapPt(0.0, plot.yMax);
+                        rt->DrawLine(a, b, brush, 0.9f);
+                    }
+                    if (plot.yMin <= 0.0 && plot.yMax >= 0.0) {
+                        const auto a = mapPt(plot.xMin, 0.0), b = mapPt(plot.xMax, 0.0);
+                        rt->DrawLine(a, b, brush, 0.9f);
+                    }
+                    brush->SetColor(ToD2DColor(DocColor::RGBA(79, 70, 229, 255)));
+                    for (std::size_t i = 1; i < plot.curvePoints.size(); ++i) {
+                        rt->DrawLine(mapPt(plot.curvePoints[i - 1].x, plot.curvePoints[i - 1].y),
+                                     mapPt(plot.curvePoints[i].x, plot.curvePoints[i].y), brush, (std::max)(1.3f, static_cast<float>(1.8 * cam.zoom)));
+                    }
+                    brush->SetColor(ToD2DColor(DocColor::RGBA(220, 38, 38, 255)));
+                    for (const auto& sp : plot.scatterPoints) {
+                        rt->FillEllipse(D2D1::Ellipse(mapPt(sp.x, sp.y), 3.0f, 3.0f), brush);
+                    }
                 }
             }
         }
@@ -520,10 +813,19 @@ struct D2DRenderer::Impl {
         ComPtr<ID2D1SolidColorBrush> brush;
         if (FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 1), &brush)) || !brush) return;
 
+        const bool isDark = (overlay && overlay->darkTheme);
+        const bool isHc = (overlay && overlay->highContrast);
+
         if (forceCanvasMode || doc.Mode() == DocumentMode::InfiniteCanvas) {
-            rt->Clear(ToD2DColor(DocColor::RGBA(252, 253, 255, 255)));
+            if (isDark) {
+                rt->Clear(ToD2DColor(DocColor::RGBA(25, 28, 36, 255)));
+            } else if (isHc) {
+                rt->Clear(ToD2DColor(DocColor::RGBA(255, 255, 255, 255)));
+            } else {
+                rt->Clear(ToD2DColor(DocColor::RGBA(250, 252, 255, 255)));
+            }
             const DocRect viewWorld = cam.ScreenRectToWorld({ 0.0, 0.0, static_cast<double>(widthPx), static_cast<double>(heightPx) });
-            DrawPaperPattern(rt, brush.Get(), viewWorld, doc.CanvasBackground(), cam);
+            DrawPaperPattern(rt, brush.Get(), viewWorld, doc.CanvasBackground(), cam, isDark);
 
             const std::vector<std::uint64_t> visibleIds = doc.QueryCanvasRect(viewWorld);
             std::vector<const AnnotationObject*> drawList;
@@ -536,17 +838,43 @@ struct D2DRenderer::Impl {
             });
 
             for (const auto* o : drawList) {
-                const bool sel = overlay && overlay->selectedObjectId == o->id;
-                DrawAnnotationObject(rt, brush.Get(), doc, *o, cam, 0.0, 0.0, sel, !synchronousOffscreen);
+                const bool sel = RenderCommon::IsObjectSelectedInOverlay(overlay, o->id);
+                DrawAnnotationObject(rt, brush.Get(), doc, *o, cam, 0.0, 0.0, sel, !synchronousOffscreen, overlay);
             }
             if (overlay && overlay->draftObject) {
-                DrawAnnotationObject(rt, brush.Get(), doc, *overlay->draftObject, cam, 0.0, 0.0, false, !synchronousOffscreen);
+                DrawAnnotationObject(rt, brush.Get(), doc, *overlay->draftObject, cam, 0.0, 0.0, false, !synchronousOffscreen, overlay);
             }
+            if (overlay && overlay->laserPointer.active) {
+                const auto& lp = overlay->laserPointer;
+                if (lp.trail.size() >= 2) {
+                    for (std::size_t i = 1; i < lp.trail.size(); ++i) {
+                        const double frac = static_cast<double>(i) / static_cast<double>(lp.trail.size());
+                        brush->SetColor(ToD2DColor(DocColor::RGBA(239, 68, 68, static_cast<std::uint8_t>(40 + 180 * frac))));
+                        const DocPoint a = cam.WorldToScreen(lp.trail[i - 1].x, lp.trail[i - 1].y);
+                        const DocPoint b = cam.WorldToScreen(lp.trail[i].x, lp.trail[i].y);
+                        rt->DrawLine(D2D1::Point2F(static_cast<FLOAT>(a.x), static_cast<FLOAT>(a.y)),
+                                     D2D1::Point2F(static_cast<FLOAT>(b.x), static_cast<FLOAT>(b.y)),
+                                     brush.Get(), static_cast<FLOAT>(2.0 + 3.0 * frac), roundStroke.Get());
+                    }
+                }
+                const DocPoint tip = cam.WorldToScreen(lp.worldX, lp.worldY);
+                brush->SetColor(ToD2DColor(DocColor::RGBA(239, 68, 68, 95)));
+                rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(static_cast<FLOAT>(tip.x), static_cast<FLOAT>(tip.y)), 11.0f, 11.0f), brush.Get());
+                brush->SetColor(ToD2DColor(DocColor::RGBA(255, 255, 255, 245)));
+                rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(static_cast<FLOAT>(tip.x), static_cast<FLOAT>(tip.y)), 4.5f, 4.5f), brush.Get());
+            }
+            DrawHudOverlays(rt, brush.Get(), doc, cam, widthPx, heightPx, overlay);
             return;
         }
 
-        // Paginated PDF / Notebook Mode
-        rt->Clear(ToD2DColor(DocColor::RGBA(36, 42, 52, 255)));
+        // Paginated PDF / Notebook Mode (Apple HIG Light/Dark/HighContrast desk surface)
+        if (isDark) {
+            rt->Clear(ToD2DColor(DocColor::RGBA(20, 23, 30, 255)));
+        } else if (isHc) {
+            rt->Clear(ToD2DColor(DocColor::RGBA(242, 245, 250, 255)));
+        } else {
+            rt->Clear(ToD2DColor(DocColor::RGBA(232, 237, 245, 255)));
+        }
         const DocRect viewWorld = cam.ScreenRectToWorld({ 0.0, 0.0, static_cast<double>(widthPx), static_cast<double>(heightPx) });
         std::size_t firstPg = 0, lastPg = 0;
         if (!doc.Layout().ComputeVisibleRange(viewWorld.y, viewWorld.Bottom(), firstPg, lastPg, 1)) {
@@ -560,11 +888,23 @@ struct D2DRenderer::Impl {
             const DocRect pageWorld = place->WorldRect();
             const D2D1_RECT_F pageScreen = ToD2DRect(cam.WorldRectToScreen(pageWorld));
 
-            // Shadow + crisp white page card
-            brush->SetColor(ToD2DColor(DocColor::RGBA(15, 19, 25, 130)));
-            rt->FillRectangle(D2D1::RectF(pageScreen.left + 4.0f, pageScreen.top + 5.0f, pageScreen.right + 4.0f, pageScreen.bottom + 5.0f), brush.Get());
+            // Multi-layered soft Apple HIG page shadow + crisp white sheet (content layer: NEVER glass)
+            for (int sh = 3; sh >= 1; --sh) {
+                const float pad = static_cast<float>(sh) * 2.5f;
+                const float dy = static_cast<float>(sh) * 2.2f;
+                const std::uint8_t a = isDark
+                    ? static_cast<std::uint8_t>(42 - sh * 10)
+                    : static_cast<std::uint8_t>(20 - sh * 5);
+                brush->SetColor(ToD2DColor(DocColor::RGBA(15, 23, 42, a)));
+                rt->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(pageScreen.left - pad * 0.4f, pageScreen.top + dy - 1.0f,
+                        pageScreen.right + pad * 0.4f, pageScreen.bottom + dy + pad * 0.4f), 4.0f, 4.0f),
+                    brush.Get());
+            }
             brush->SetColor(ToD2DColor(DocColor::RGBA(255, 255, 255, 255)));
             rt->FillRectangle(pageScreen, brush.Get());
+            brush->SetColor(ToD2DColor(isHc ? DocColor::RGBA(25, 32, 44, 220) : DocColor::RGBA(198, 208, 222, 160)));
+            rt->DrawRectangle(pageScreen, brush.Get(), isHc ? 1.25f : 0.8f);
 
             const auto& pg = pages[p];
             if (pg.hasPdfSource && !pg.sourcePdfPathUtf8.empty()) {
@@ -622,11 +962,11 @@ struct D2DRenderer::Impl {
 
             // Annotations
             for (const auto& obj : pg.objects) {
-                const bool sel = overlay && overlay->selectedObjectId == obj.id;
-                DrawAnnotationObject(rt, brush.Get(), doc, obj, cam, pageWorld.x, pageWorld.y, sel, !synchronousOffscreen);
+                const bool sel = RenderCommon::IsObjectSelectedInOverlay(overlay, obj.id);
+                DrawAnnotationObject(rt, brush.Get(), doc, obj, cam, pageWorld.x, pageWorld.y, sel, !synchronousOffscreen, overlay);
             }
             if (overlay && overlay->draftObject && p == overlay->draftPageIndex) {
-                DrawAnnotationObject(rt, brush.Get(), doc, *overlay->draftObject, cam, pageWorld.x, pageWorld.y, false, !synchronousOffscreen);
+                DrawAnnotationObject(rt, brush.Get(), doc, *overlay->draftObject, cam, pageWorld.x, pageWorld.y, false, !synchronousOffscreen, overlay);
             }
 
             // Search match highlights on this page
@@ -665,6 +1005,78 @@ struct D2DRenderer::Impl {
             }
 
             rt->PopAxisAlignedClip();
+        }
+        DrawHudOverlays(rt, brush.Get(), doc, cam, widthPx, heightPx, overlay);
+    }
+
+    void DrawHudOverlays(
+        ID2D1RenderTarget* rt,
+        ID2D1SolidColorBrush* brush,
+        const DocumentModel& doc,
+        const Camera2D& cam,
+        int widthPx,
+        int heightPx,
+        const ViewportOverlayState* overlay)
+    {
+        if (!overlay) return;
+
+        if (overlay->rulerState.visible && d2dFactory) {
+            const auto rg = RenderCommon::BuildRulerOverlay(overlay->rulerState, cam);
+            ComPtr<ID2D1PathGeometry> poly;
+            if (SUCCEEDED(d2dFactory->CreatePathGeometry(&poly)) && poly) {
+                ComPtr<ID2D1GeometrySink> sink;
+                if (SUCCEEDED(poly->Open(&sink)) && sink) {
+                    sink->BeginFigure(
+                        D2D1::Point2F(static_cast<FLOAT>(rg.corners[0].x), static_cast<FLOAT>(rg.corners[0].y)),
+                        D2D1_FIGURE_BEGIN_FILLED);
+                    for (int k = 1; k < 4; ++k) {
+                        sink->AddLine(D2D1::Point2F(static_cast<FLOAT>(rg.corners[k].x), static_cast<FLOAT>(rg.corners[k].y)));
+                    }
+                    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                    sink->Close();
+                }
+                brush->SetColor(ToD2DColor(DocColor::RGBA(224, 242, 254, 175)));
+                rt->FillGeometry(poly.Get(), brush);
+                brush->SetColor(ToD2DColor(DocColor::RGBA(2, 132, 199, 240)));
+                rt->DrawGeometry(poly.Get(), brush, 1.5f);
+            }
+            brush->SetColor(ToD2DColor(DocColor::RGBA(3, 105, 161, 255)));
+            rt->DrawLine(
+                D2D1::Point2F(static_cast<FLOAT>(rg.activeEdge0.x), static_cast<FLOAT>(rg.activeEdge0.y)),
+                D2D1::Point2F(static_cast<FLOAT>(rg.activeEdge1.x), static_cast<FLOAT>(rg.activeEdge1.y)),
+                brush, 2.2f);
+            for (const auto& tk : rg.ticks) {
+                rt->DrawLine(
+                    D2D1::Point2F(static_cast<FLOAT>(tk.p0.x), static_cast<FLOAT>(tk.p0.y)),
+                    D2D1::Point2F(static_cast<FLOAT>(tk.p1.x), static_cast<FLOAT>(tk.p1.y)),
+                    brush, tk.major ? 1.4f : 0.9f);
+            }
+            if (dwFactory && !rg.badgeUtf8.empty()) {
+                ComPtr<IDWriteTextFormat> fmt;
+                if (SUCCEEDED(dwFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD,
+                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.5f, L"es-ES", &fmt)) && fmt) {
+                    const std::wstring wb = Utf8ToWide(rg.badgeUtf8);
+                    brush->SetColor(ToD2DColor(DocColor::RGBA(12, 74, 110, 255)));
+                    rt->DrawTextW(wb.c_str(), static_cast<UINT32>(wb.size()), fmt.Get(),
+                        D2D1::RectF(static_cast<FLOAT>(rg.badgePos.x), static_cast<FLOAT>(rg.badgePos.y),
+                                    static_cast<FLOAT>(rg.badgePos.x + 110.0), static_cast<FLOAT>(rg.badgePos.y + 22.0)), brush);
+                }
+            }
+        }
+
+        if (overlay->minimapVisible) {
+            const auto mm = RenderCommon::BuildMinimapOverlay(doc, cam, widthPx, heightPx);
+            const D2D1_RECT_F pr = ToD2DRect(mm.panelScreen);
+            brush->SetColor(ToD2DColor(DocColor::RGBA(15, 23, 42, 215)));
+            rt->FillRectangle(pr, brush);
+            brush->SetColor(ToD2DColor(DocColor::RGBA(100, 116, 139, 240)));
+            rt->DrawRectangle(pr, brush, 1.2f);
+            for (const auto& it : mm.items) {
+                brush->SetColor(ToD2DColor(it.color));
+                rt->FillRectangle(ToD2DRect(it.rectScreen), brush);
+            }
+            brush->SetColor(ToD2DColor(DocColor::RGBA(250, 204, 21, 250)));
+            rt->DrawRectangle(ToD2DRect(mm.viewportScreen), brush, 1.6f);
         }
     }
 };

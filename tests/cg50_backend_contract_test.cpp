@@ -1,8 +1,18 @@
 #include "cg50_backend.h"
 #include "cg50_keys_exact.h"
 #include "classwiz_keys_exact.h"
+#include "calc_engine.h"
+#include "../linux/engines/tests/u13_lcd_font_helper.hpp"
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 
 #include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -86,6 +96,29 @@ int main()
     if (backend.Diagnostic().empty()) {
         return Fail("initial diagnostic empty");
     }
+    if (backend.GetEngine() != Cg50Backend::Engine::None || backend.IsRomNative()) {
+        return Fail("initial engine must be None and not RomNative");
+    }
+    if (backend.StatusLabel().empty()) {
+        return Fail("initial StatusLabel must not be empty");
+    }
+    if (backend.GetRuntimeStatus().cpuState != Cg50Backend::CpuState::Empty) {
+        return Fail("initial RuntimeStatus cpuState must be Empty");
+    }
+    if (backend.HasPersistedUserRom() || backend.SaveStateToFile(L"x.sav") ||
+        backend.LoadStateFromFile(L"x.sav") || backend.PersistUserRom()) {
+        return Fail("Unavailable GCal backend persistence stubs must return false");
+    }
+
+    // Verify InitializeFromFile(nonexistent) sets Faulted with diagnostic
+    {
+        Cg50Backend missingFw;
+        if (missingFw.InitializeFromFile(LR"(Q:\__nonexistent_cg50_fw_m1_4__.bin)") ||
+            missingFw.GetState() != Cg50Backend::State::Faulted ||
+            missingFw.Diagnostic().empty()) {
+            return Fail("InitializeFromFile(nonexistent) must fail with Faulted and diagnostic");
+        }
+    }
 
     // NOTA: se inicializa UNA sola vez. El runtime real de CASIO no admite
     // re-crear el emulador en el mismo proceso tras TerminateEmulator con los
@@ -102,8 +135,19 @@ int main()
         if (backend.GetState() != Cg50Backend::State::Ready) {
             return Fail("Initialize succeeded but state is not Ready");
         }
-        if (backend.Diagnostic().empty()) {
-            return Fail("Ready backend must keep diagnostic");
+        if (backend.GetEngine() != Cg50Backend::Engine::GCal || backend.IsRomNative()) {
+            return Fail("Ready backend must report Engine::GCal and IsRomNative() == false");
+        }
+        if (backend.StatusLabel().empty()) {
+            return Fail("Ready StatusLabel must not be empty");
+        }
+        const auto rt0 = backend.GetRuntimeStatus();
+        if (rt0.cpuState != Cg50Backend::CpuState::Running || !rt0.systemRomLoaded || !rt0.userRomLoaded) {
+            return Fail("Ready RuntimeStatus must report Running + loaded system/user ROMs");
+        }
+        if (backend.SaveStateToFile(L"x.sav") || backend.LoadStateFromFile(L"x.sav") ||
+            backend.PersistUserRom() || backend.HasPersistedUserRom()) {
+            return Fail("GCal persistence stubs must return false cleanly while Ready");
         }
         auto fb = backend.Framebuffer();
         if (!fb.pixels || fb.width == 0 || fb.height == 0) {
@@ -205,9 +249,12 @@ int main()
     const bool secondInit = backend.Initialize(dummyFw, sizeof(dummyFw));
     std::cout << "[TEST] Second Initialize returned " << secondInit
               << ", state=" << (int)backend.GetState() << std::endl;
-    if (withFw) {
-        if (!secondInit || backend.GetState() != Cg50Backend::State::Ready) {
-            return Fail("Second Initialize() failed to return Ready");
+    if (withFw && (!secondInit || backend.GetState() != Cg50Backend::State::Ready)) {
+        return Fail("Second Initialize() failed to return Ready");
+    }
+    if (secondInit) {
+        if (backend.GetState() != Cg50Backend::State::Ready) {
+            return Fail("Second Initialize() succeeded but state is not Ready");
         }
         std::cout << "[TEST] Stepping 100 frames in second instance..." << std::endl;
         for (int frame = 0; frame < 100; ++frame) {
@@ -216,6 +263,48 @@ int main()
         std::cout << "[TEST] Second instance step OK" << std::endl;
         backend.Reset();
         std::cout << "[TEST] Second Reset OK" << std::endl;
+    }
+
+    // Verify GCAL_RUNTIME_DIR env override points to isolated temp dir safely without crashing
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const fs::path isoDir = fs::temp_directory_path(ec) / ("cg50_iso_env_" + std::to_string(GetCurrentProcessId()));
+        fs::create_directories(isoDir, ec);
+        {
+            std::ofstream dummyDll(isoDir / "GCalAppIF.dll", std::ios::binary | std::ios::trunc);
+        }
+        SetEnvironmentVariableW(L"GCAL_RUNTIME_DIR", isoDir.wstring().c_str());
+        Cg50Backend envProbe;
+        const bool envOk = envProbe.Initialize(nullptr, 0);
+        if (envOk || envProbe.GetState() != Cg50Backend::State::Faulted) {
+            SetEnvironmentVariableW(L"GCAL_RUNTIME_DIR", nullptr);
+            fs::remove_all(isoDir, ec);
+            return Fail("GCAL_RUNTIME_DIR corrupt-dir override must fail cleanly with Faulted");
+        }
+        SetEnvironmentVariableW(L"GCAL_RUNTIME_DIR", nullptr);
+        fs::remove_all(isoDir, ec);
+        std::cout << "[PASS] GCAL_RUNTIME_DIR isolated probe completed\n";
+    }
+
+    // U-13 18-case differential check against MathEvaluator (calc_engine.h)
+    {
+        const auto& cases = U13Matrix::Get18Cases();
+        if (cases.size() != 18) return Fail("U-13 matrix size != 18");
+        for (const auto& c : cases) {
+            std::wstring wExpr(c.expr, c.expr + std::strlen(c.expr));
+            double val = 0.0;
+            std::wstring err;
+            if (!MathEvaluator::Evaluate(wExpr, 0.0, ANG_DEG, val, err)) {
+                return Fail("U-13 MathEvaluator failed in Cg50BackendContractTest");
+            }
+            const std::wstring wFmt = MathEvaluator::FormatResult(val);
+            const std::wstring wExp(c.expectedDot, c.expectedDot + std::strlen(c.expectedDot));
+            if (wFmt != wExp) {
+                return Fail("U-13 MathEvaluator result mismatch in Cg50BackendContractTest");
+            }
+        }
+        std::cout << "[PASS] U-13 18-case MathEvaluator differential check (18/18)\n";
     }
 
     std::wcout << L"Cg50BackendContractTest OK\n";

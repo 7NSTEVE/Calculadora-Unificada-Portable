@@ -102,6 +102,7 @@ public:
 
     bool IsLoaded() const noexcept { return loaded_; }
     const std::string& PdfVersion() const noexcept { return version_; }
+    PdfRef CatalogRef() const noexcept { return rootRef_; }
     std::size_t PageCount() const noexcept { return pages_.size(); }
     const PdfPageInfo& PageAt(std::size_t idx) const { return pages_.at(idx); }
     const std::vector<PdfPageInfo>& Pages() const noexcept { return pages_; }

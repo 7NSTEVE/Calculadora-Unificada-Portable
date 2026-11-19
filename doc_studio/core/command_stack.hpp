@@ -33,10 +33,19 @@ public:
     bool Undo(DocumentModel& doc);
     bool Redo(DocumentModel& doc);
 
-    bool CanUndo() const noexcept { return cursor_ > 0; }
+    bool CanUndo() const noexcept { return cursor_ > undoBoundary_; }
     bool CanRedo() const noexcept { return cursor_ < history_.size(); }
-    std::size_t UndoCount() const noexcept { return cursor_; }
+    std::size_t UndoCount() const noexcept { return cursor_ > undoBoundary_ ? (cursor_ - undoBoundary_) : 0; }
     std::size_t RedoCount() const noexcept { return history_.size() - cursor_; }
+
+    // Safety boundary preventing Undo from erasing initial loaded/recovered document state
+    void SetUndoBoundary() noexcept { undoBoundary_ = cursor_; }
+    void ClearUndoBoundary() noexcept { undoBoundary_ = 0; }
+    std::size_t UndoBoundary() const noexcept { return undoBoundary_; }
+
+    // Pause background autosave while crash recovery / conflict merge is active
+    void SetAutoSavePaused(bool paused) noexcept { autoSavePaused_ = paused; }
+    bool IsAutoSavePaused() const noexcept { return autoSavePaused_; }
 
     std::string UndoDescription() const;
     std::string RedoDescription() const;
@@ -48,7 +57,9 @@ private:
     std::vector<std::unique_ptr<ICommand>> history_;
     std::size_t cursor_ = 0;
     std::size_t cleanCursor_ = 0;
+    std::size_t undoBoundary_ = 0;
     bool cleanInvalidated_ = false;
+    bool autoSavePaused_ = false;
     std::size_t maxDepth_ = 256;
 
     void UpdateDirtyFlag(DocumentModel& doc) const noexcept;

@@ -1179,7 +1179,9 @@ inline LRESULT CALLBACK LearningStudioWndProc(HWND hWnd, UINT msg, WPARAM wParam
 
         if (g_studioTab == 0) {
             // TAB 0: TECLAS E INDICADORES (3 CAPAS)
-            int targetModel = (g_studioModelFilter >= 0 && g_studioModelFilter <= 2) ? g_studioModelFilter : g_activeCalcIdx;
+            int targetModel = (g_studioModelFilter >= 0 && g_studioModelFilter <= 2)
+                ? g_studioModelFilter
+                : ((g_activeCalcIdx >= 0 && g_activeCalcIdx <= 2) ? g_activeCalcIdx : 0);
 
             // Subseccion A: Indicadores LCD del modelo (si aplica a CW / ES)
             if (targetModel == 0 || targetModel == 1) {
@@ -1761,18 +1763,9 @@ inline LRESULT CALLBACK LearningStudioWndProc(HWND hWnd, UINT msg, WPARAM wParam
         si.nPos = g_studioScrollY;
         SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
 
-        // CABECERA FIJA SUPERIOR
+        // CABECERA FIJA SUPERIOR LIQUID GLASS 2.0
         RECT rcHdr = { 0, 0, rc.right, STUDIO_HEADER_H };
-        HBRUSH hHdr = CreateSolidBrush(CasioTheme::StudioStageBg());
-        FillRect(hdc, &rcHdr, hHdr);
-        DeleteObject(hHdr);
-
-        HPEN hSep = CreatePen(PS_SOLID, 1, CasioTheme::StudioBorder());
-        HGDIOBJ oP = SelectObject(hdc, hSep);
-        MoveToEx(hdc, 0, STUDIO_HEADER_H - 1, nullptr);
-        LineTo(hdc, rc.right, STUDIO_HEADER_H - 1);
-        SelectObject(hdc, oP);
-        DeleteObject(hSep);
+        CasioTheme::DrawLiquidGlassHeaderStrip(hdc, rcHdr, true);
 
         SelectObject(hdc, hTitleF);
         SetTextColor(hdc, CasioTheme::StudioText());
@@ -1785,16 +1778,16 @@ inline LRESULT CALLBACK LearningStudioWndProc(HWND hWnd, UINT msg, WPARAM wParam
 
         if (!g_studioSearchQuery.empty()) {
             RECT rClr = { rc.right - 108, 11, rc.right - 18, 37 };
-            CasioTheme::DrawStudioButton(hdc, rClr, L"Limpiar", hBtnF, CasioTheme::BTN_DANGER, false, false, 7.0f);
+            CasioTheme::DrawStudioButton(hdc, rClr, L"Limpiar", hBtnF, CasioTheme::BTN_DANGER, false, false, 12.0f);
             StudioHitAction act; act.rect = rClr; act.kind = StudioHitAction::ACT_CLEAR_SEARCH;
             g_studioHeaderActions.push_back(act);
         }
 
-        // Selector segmentado de modelo a la derecha del cuadro de busqueda
+        // Selector segmentado flotante Liquid Glass 2.0 de modelo a la derecha del cuadro de busqueda
         const wchar_t* mLabels[4] = { L"Todos", L"ClassWiz", L"ES PLUS", L"fx-CG50" };
         int mStartX = (std::max)(290, (int)rc.right - 390);
         RECT rSegM = { mStartX - 4, 47, mStartX + 4 * 92 + 2, 81 };
-        CasioTheme::FillRoundRectAA(hdc, rSegM, 8.0f, CasioTheme::StudioTrack(), CasioTheme::StudioBorder(), 1.0f);
+        CasioTheme::DrawFloatingGlassCapsule(hdc, rSegM, s, -1.0f, false);
         for (int i = 0; i < 4; ++i) {
             int mf = i - 1;
             RECT rm = { mStartX + i * 92, 50, mStartX + i * 92 + 88, 78 };
@@ -1804,7 +1797,7 @@ inline LRESULT CALLBACK LearningStudioWndProc(HWND hWnd, UINT msg, WPARAM wParam
             g_studioHeaderActions.push_back(act);
         }
 
-        // 6 Pestanas principales en control segmentado
+        // 6 Pestanas principales en capsula flotante Liquid Glass 2.0
         const std::wstring manualsTabLabel =
             L"Manuales PDF (" + std::to_wstring(sizeof(g_officialManuals) / sizeof(g_officialManuals[0])) + L")";
         const wchar_t* tabLabels[6] = {
@@ -1817,7 +1810,7 @@ inline LRESULT CALLBACK LearningStudioWndProc(HWND hWnd, UINT msg, WPARAM wParam
         };
         int tabAvail = (std::max)(600, (int)rc.right - 36);
         RECT rTabTrack = { 15, 91, 21 + tabAvail, 135 };
-        CasioTheme::FillRoundRectAA(hdc, rTabTrack, 8.0f, CasioTheme::StudioTrack(), CasioTheme::StudioBorder(), 1.0f);
+        CasioTheme::DrawFloatingGlassCapsule(hdc, rTabTrack, s, -1.0f, false);
         int tabW = (tabAvail - 5 * 6) / 6;
         int tx = 18;
         for (int t = 0; t < 6; ++t) {

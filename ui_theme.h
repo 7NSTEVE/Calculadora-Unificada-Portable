@@ -20,6 +20,10 @@
 #include <string>
 #include <vector>
 #include "operation_capture.h"
+#include "ui_glass/liquid_glass_tokens.hpp"
+#include "ui_glass/liquid_glass_math.hpp"
+#include "ui_glass/vector_icons.hpp"
+#include "ui_glass/gdi_liquid_glass.hpp"
 
 namespace CasioTheme {
 
@@ -58,8 +62,41 @@ inline constexpr COLORREF TextPrimary   = RGB(241, 245, 249);
 inline constexpr COLORREF TextSecondary = RGB(148, 163, 184);
 inline constexpr COLORREF TextMuted     = RGB(100, 116, 139);
 
-// ── Estado global del tema del espacio principal (Claro Glass Apple HIG por defecto) ──
+// ── Estado global del tema (Apple HIG + macOS 27 Golden Gate Liquid Glass 2.0) ──
 inline bool g_studioDarkTheme = false;
+inline UiGlass::GlassSettings g_glassSettings{};
+
+inline void SyncGlassSettingsFromLegacyFlag() noexcept {
+    if (g_studioDarkTheme) {
+        if (g_glassSettings.mode != UiGlass::AppearanceMode::Dark) {
+            g_glassSettings.mode = UiGlass::AppearanceMode::Dark;
+        }
+    } else if (g_glassSettings.mode == UiGlass::AppearanceMode::Dark) {
+        g_glassSettings.mode = UiGlass::AppearanceMode::Light;
+    }
+}
+
+inline void SetStudioAppearanceMode(UiGlass::AppearanceMode mode) noexcept {
+    g_glassSettings.mode = mode;
+    g_glassSettings.increaseContrast = (mode == UiGlass::AppearanceMode::HighContrast);
+    g_studioDarkTheme = (mode == UiGlass::AppearanceMode::Dark);
+    UiGlass::SaveGlassSettings(g_glassSettings);
+}
+
+inline void SetStudioGlassOpacity(float opacity01, bool reduceTrans = false) noexcept {
+    g_glassSettings.userOpacitySlider = (std::max)(0.0f, (std::min)(1.0f, opacity01));
+    g_glassSettings.reduceTransparency = reduceTrans;
+    UiGlass::SaveGlassSettings(g_glassSettings);
+}
+
+inline const UiGlass::GlassSettings& GetActiveGlassSettings() noexcept {
+    SyncGlassSettingsFromLegacyFlag();
+    return g_glassSettings;
+}
+
+inline UiGlass::GlassPalette ActiveGlassPalette() noexcept {
+    return UiGlass::GetPalette(GetActiveGlassSettings());
+}
 
 namespace Light {
 inline constexpr COLORREF CanvasBg      = RGB(245, 247, 250);
@@ -92,34 +129,34 @@ inline constexpr COLORREF VioletSoft    = RGB(240, 236, 255);
 inline constexpr COLORREF VioletText    = RGB(91, 56, 194);
 } // namespace Light
 
-inline COLORREF StudioCanvasBg()      { return g_studioDarkTheme ? CanvasBg      : Light::CanvasBg; }
-inline COLORREF StudioStageBg()       { return g_studioDarkTheme ? StageBg       : Light::StageBg; }
-inline COLORREF StudioSurface()       { return g_studioDarkTheme ? Surface1      : Light::Surface1; }
-inline COLORREF StudioSurfaceAlt()    { return g_studioDarkTheme ? Surface2      : Light::Surface2; }
-inline COLORREF StudioSurface3()      { return g_studioDarkTheme ? Surface3      : Light::Surface3; }
-inline COLORREF StudioInputBg()       { return g_studioDarkTheme ? InputBg       : Light::InputBg; }
-inline COLORREF StudioTrack()         { return g_studioDarkTheme ? Surface2      : Light::Track; }
-inline COLORREF StudioBorder()        { return g_studioDarkTheme ? BorderSubtle  : Light::BorderSubtle; }
-inline COLORREF StudioBorderStrong()  { return g_studioDarkTheme ? BorderStrong  : Light::BorderStrong; }
-inline COLORREF StudioAccent()        { return g_studioDarkTheme ? AccentBlue    : Light::AccentBlue; }
-inline COLORREF StudioAccentHover()   { return g_studioDarkTheme ? AccentHover   : Light::AccentHover; }
-inline COLORREF StudioAccentSoft()    { return g_studioDarkTheme ? AccentSoft    : Light::AccentSoft; }
-inline COLORREF StudioAccentText()    { return g_studioDarkTheme ? AccentText    : Light::AccentText; }
-inline COLORREF StudioSuccess()       { return g_studioDarkTheme ? SuccessGreen  : Light::SuccessGreen; }
+inline COLORREF StudioCanvasBg()      { return ActiveGlassPalette().windowCanvasTop.ToColorRef(); }
+inline COLORREF StudioStageBg()       { return ActiveGlassPalette().windowCanvasBottom.ToColorRef(); }
+inline COLORREF StudioSurface()       { return ActiveGlassPalette().contentCard.ToColorRef(); }
+inline COLORREF StudioSurfaceAlt()    { return ActiveGlassPalette().contentCardElevated.ToColorRef(); }
+inline COLORREF StudioSurface3()      { return ActiveGlassPalette().sidebarHover.ToColorRef(); }
+inline COLORREF StudioInputBg()       { return ActiveGlassPalette().contentPaper.ToColorRef(); }
+inline COLORREF StudioTrack()         { return ActiveGlassPalette().sidebarBg.ToColorRef(); }
+inline COLORREF StudioBorder()        { return ActiveGlassPalette().borderSubtle.ToColorRef(); }
+inline COLORREF StudioBorderStrong()  { return ActiveGlassPalette().borderStrong.ToColorRef(); }
+inline COLORREF StudioAccent()        { return ActiveGlassPalette().accentBlue.ToColorRef(); }
+inline COLORREF StudioAccentHover()   { return ActiveGlassPalette().accentBlueHover.ToColorRef(); }
+inline COLORREF StudioAccentSoft()    { return ActiveGlassPalette().accentBlueSoft.ToColorRef(); }
+inline COLORREF StudioAccentText()    { return ActiveGlassPalette().accentBlue.ToColorRef(); }
+inline COLORREF StudioSuccess()       { return ActiveGlassPalette().accentGreen.ToColorRef(); }
 inline COLORREF StudioSuccessSoft()   { return g_studioDarkTheme ? SuccessSoft   : Light::SuccessSoft; }
-inline COLORREF StudioSuccessText()   { return g_studioDarkTheme ? SuccessText   : Light::SuccessText; }
-inline COLORREF StudioAmber()         { return g_studioDarkTheme ? AmberWarm     : Light::AmberWarm; }
+inline COLORREF StudioSuccessText()   { return g_studioDarkTheme ? SuccessText   : (ActiveGlassPalette().accentGreen.ToColorRef()); }
+inline COLORREF StudioAmber()         { return ActiveGlassPalette().accentOrange.ToColorRef(); }
 inline COLORREF StudioAmberSoft()     { return g_studioDarkTheme ? AmberSoft     : Light::AmberSoft; }
 inline COLORREF StudioAmberText()     { return g_studioDarkTheme ? AmberText     : Light::AmberText; }
-inline COLORREF StudioViolet()        { return g_studioDarkTheme ? VioletAccent  : Light::VioletAccent; }
+inline COLORREF StudioViolet()        { return ActiveGlassPalette().accentPurple.ToColorRef(); }
 inline COLORREF StudioVioletSoft()    { return g_studioDarkTheme ? VioletSoft    : Light::VioletSoft; }
 inline COLORREF StudioVioletText()    { return g_studioDarkTheme ? VioletText    : Light::VioletText; }
-inline COLORREF StudioRose()          { return g_studioDarkTheme ? RoseRed       : Light::RoseRed; }
+inline COLORREF StudioRose()          { return ActiveGlassPalette().accentRed.ToColorRef(); }
 inline COLORREF StudioRoseSoft()      { return g_studioDarkTheme ? RoseSoft      : Light::RoseSoft; }
 inline COLORREF StudioRoseText()      { return g_studioDarkTheme ? RoseText      : Light::RoseText; }
-inline COLORREF StudioText()          { return g_studioDarkTheme ? TextPrimary   : Light::TextPrimary; }
-inline COLORREF StudioTextSec()       { return g_studioDarkTheme ? TextSecondary : Light::TextSecondary; }
-inline COLORREF StudioTextMuted()     { return g_studioDarkTheme ? TextMuted     : Light::TextMuted; }
+inline COLORREF StudioText()          { return ActiveGlassPalette().labelPrimary.ToColorRef(); }
+inline COLORREF StudioTextSec()       { return ActiveGlassPalette().labelSecondary.ToColorRef(); }
+inline COLORREF StudioTextMuted()     { return ActiveGlassPalette().labelTertiary.ToColorRef(); }
 
 enum ButtonVariant {
     BTN_SECONDARY     = 0,
@@ -166,13 +203,7 @@ enum TransportKind {
 };
 
 inline HFONT CreateUiFont(int pxHeight, bool bold = false, bool italic = false) {
-    return CreateFontW(
-        -pxHeight, 0, 0, 0,
-        bold ? FW_SEMIBOLD : FW_NORMAL,
-        italic ? TRUE : FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI"
-    );
+    return UiGlass::CreateHigUiFont(pxHeight, bold ? FW_SEMIBOLD : FW_NORMAL, italic);
 }
 
 inline Gdiplus::Color ToGpColor(COLORREF c, BYTE alpha = 255) {
@@ -345,20 +376,8 @@ struct UiScaleScope {
 };
 
 inline void ApplyDwmDarkTitleBar(HWND hwnd, bool dark) {
-    if (!hwnd || !IsWindow(hwnd)) return;
-    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
-    if (!hDwm) return;
-    using PfnDwmSetAttr = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
-    auto fn = reinterpret_cast<PfnDwmSetAttr>(GetProcAddress(hDwm, "DwmSetWindowAttribute"));
-    if (fn) {
-        BOOL val = dark ? TRUE : FALSE;
-        // 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (Win11 / Win10 20H1+), 19 = fallback anterior
-        if (FAILED(fn(hwnd, 20, &val, sizeof(val)))) {
-            fn(hwnd, 19, &val, sizeof(val));
-        }
-    }
-    FreeLibrary(hDwm);
-    if (IsWindowVisible(hwnd)) {
+    UiGlass::ApplyGoldenGateWindowFrame(hwnd, dark);
+    if (hwnd && IsWindow(hwnd) && IsWindowVisible(hwnd)) {
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
@@ -695,25 +714,102 @@ inline void DrawSegmentItem(
     }
 }
 
+// Render a true optically refracted Liquid Glass 2.0 floating capsule over hdc
+// safely handling active GM_ADVANCED WorldTransforms (UiScaleScope).
+inline void DrawFloatingGlassCapsule(
+    HDC hdc, const RECT& logicalRc, float uiScale = 1.0f,
+    float logicalCornerRadius = -1.0f, bool prominent = false)
+{
+    if (!hdc || logicalRc.right <= logicalRc.left + 4 || logicalRc.bottom <= logicalRc.top + 4) return;
+    if (!EnsureGdiplusInitialized()) return;
+
+    const int saved = SaveDC(hdc);
+    XFORM xf{};
+    const bool hasXf = (GetGraphicsMode(hdc) == GM_ADVANCED) && GetWorldTransform(hdc, &xf);
+    RECT physRc = logicalRc;
+    float effScale = (uiScale > 0.05f) ? uiScale : 1.0f;
+    if (hasXf) {
+        physRc.left   = static_cast<LONG>(std::lround(logicalRc.left   * xf.eM11 + xf.eDx));
+        physRc.top    = static_cast<LONG>(std::lround(logicalRc.top    * xf.eM22 + xf.eDy));
+        physRc.right  = static_cast<LONG>(std::lround(logicalRc.right  * xf.eM11 + xf.eDx));
+        physRc.bottom = static_cast<LONG>(std::lround(logicalRc.bottom * xf.eM22 + xf.eDy));
+        effScale = (xf.eM11 > 0.05f) ? xf.eM11 : effScale;
+        ModifyWorldTransform(hdc, nullptr, MWT_IDENTITY);
+    }
+
+    const UiGlass::GlassSettings& gs = GetActiveGlassSettings();
+    const UiGlass::GlassPalette pal = UiGlass::GetPalette(gs);
+    const float physR = (logicalCornerRadius < 0.0f) ? -1.0f : (logicalCornerRadius * effScale);
+    if (prominent) {
+        UiGlass::DrawLiquidGlassCapsuleOnHdc(hdc, physRc, gs, physR, pal.accentBlue, 0.66f);
+    } else {
+        UiGlass::DrawLiquidGlassCapsuleOnHdc(hdc, physRc, gs, physR);
+    }
+    RestoreDC(hdc, saved);
+}
+
+// Apple HIG macOS 27 Golden Gate atmospheric header band with subtle tonal wave
+// and ScrollEdgeEffectStyle.soft transition (never harsh opaque dark slab)
+inline void DrawLiquidGlassHeaderStrip(HDC hdc, const RECT& rcHeader, bool withBottomDivider = true)
+{
+    if (!hdc || rcHeader.right <= rcHeader.left || rcHeader.bottom <= rcHeader.top) return;
+    if (!EnsureGdiplusInitialized()) return;
+    const UiGlass::GlassSettings& gs = GetActiveGlassSettings();
+    const UiGlass::GlassPalette pal = UiGlass::GetPalette(gs);
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    const float x = static_cast<float>(rcHeader.left);
+    const float y = static_cast<float>(rcHeader.top);
+    const float w = static_cast<float>(rcHeader.right - rcHeader.left);
+    const float h = static_cast<float>(rcHeader.bottom - rcHeader.top);
+
+    Gdiplus::LinearGradientBrush base(
+        Gdiplus::PointF(x, y), Gdiplus::PointF(x, y + h),
+        UiGlass::ToGdip(pal.windowCanvasTop), UiGlass::ToGdip(pal.windowCanvasBottom));
+    g.FillRectangle(&base, x, y, w, h);
+
+    if (!gs.IsHighContrast()) {
+        Gdiplus::LinearGradientBrush wave(
+            Gdiplus::PointF(x, y), Gdiplus::PointF(x + w, y + h),
+            UiGlass::ToGdip(pal.accentBlue, gs.IsDark() ? 24 : 18),
+            UiGlass::ToGdip(pal.accentIndigo, gs.IsDark() ? 18 : 13));
+        g.FillRectangle(&wave, x, y, w, h);
+    }
+
+    const int fadeH = (std::min)(14, static_cast<int>(h / 3));
+    if (fadeH >= 4) {
+        UiGlass::DrawScrollEdgeSoftFade(g, RECT{ rcHeader.left, rcHeader.bottom - fadeH, rcHeader.right, rcHeader.bottom }, gs, false);
+    }
+    if (withBottomDivider) {
+        Gdiplus::Pen sep(UiGlass::ToGdip(pal.separator), 1.0f);
+        g.DrawLine(&sep, x, y + h - 1.0f, x + w, y + h - 1.0f);
+    }
+}
+
 inline void DrawStudioAtmosphericBackdrop(HDC hdc, const RECT& rc)
 {
     if (rc.right <= rc.left || rc.bottom <= rc.top || !EnsureGdiplusInitialized()) return;
+    const UiGlass::GlassSettings& gs = GetActiveGlassSettings();
+    const UiGlass::GlassPalette pal = UiGlass::GetPalette(gs);
     Gdiplus::Graphics g(hdc);
     const Gdiplus::RectF r(static_cast<float>(rc.left), static_cast<float>(rc.top),
         static_cast<float>(rc.right - rc.left), static_cast<float>(rc.bottom - rc.top));
 
-    if (!g_studioDarkTheme) {
-        Gdiplus::LinearGradientBrush base(r,
-            Gdiplus::Color(255, 247, 249, 252),
-            Gdiplus::Color(255, 241, 244, 249),
-            Gdiplus::LinearGradientModeVertical);
-        g.FillRectangle(&base, r);
-    } else {
-        Gdiplus::LinearGradientBrush base(r,
-            Gdiplus::Color(255, 15, 18, 25),
-            Gdiplus::Color(255, 19, 24, 33),
-            Gdiplus::LinearGradientModeVertical);
-        g.FillRectangle(&base, r);
+    Gdiplus::LinearGradientBrush base(r,
+        UiGlass::ToGdip(pal.windowCanvasTop),
+        UiGlass::ToGdip(pal.windowCanvasBottom),
+        Gdiplus::LinearGradientModeVertical);
+    g.FillRectangle(&base, r);
+
+    // Subtle Apple HIG atmospheric radial aura behind top floating glass bar & bottom dock
+    // so optical Snell bevel refraction catches genuine chromatic nuance without distracting from hardware
+    if (!gs.IsHighContrast()) {
+        Gdiplus::LinearGradientBrush topAura(
+            Gdiplus::PointF(r.X, r.Y),
+            Gdiplus::PointF(r.X + r.Width, r.Y + (std::min)(r.Height, 120.0f)),
+            UiGlass::ToGdip(pal.accentBlue, gs.IsDark() ? 22 : 16),
+            UiGlass::ToGdip(pal.accentIndigo, gs.IsDark() ? 14 : 10));
+        g.FillRectangle(&topAura, r.X, r.Y, r.Width, (std::min)(r.Height, 76.0f));
     }
 }
 
@@ -721,45 +817,48 @@ inline void DrawStudioButton(
     HDC hdc, const RECT& rc, const std::wstring& txt, HFONT hFont,
     int variant = BTN_SECONDARY, bool active = false, bool hovered = false, float radius = 7.0f)
 {
+    const UiGlass::GlassSettings& gs = GetActiveGlassSettings();
+    const UiGlass::GlassPalette pal = UiGlass::GetPalette(gs);
+    const bool hc = gs.IsHighContrast();
     if (!g_studioDarkTheme) {
-        COLORREF fill = Light::Surface1;
-        COLORREF border = Light::BorderSubtle;
-        COLORREF fg = Light::TextPrimary;
+        COLORREF fill = hc ? pal.contentCard.ToColorRef() : Light::Surface1;
+        COLORREF border = hc ? pal.borderStrong.ToColorRef() : Light::BorderSubtle;
+        COLORREF fg = hc ? pal.labelPrimary.ToColorRef() : Light::TextPrimary;
         switch (variant) {
         case BTN_PRIMARY:
-            fill   = hovered ? Light::AccentHover : Light::AccentBlue;
-            border = fill;
+            fill   = hovered ? Light::AccentHover : pal.accentBlue.ToColorRef();
+            border = hc ? pal.borderStrong.ToColorRef() : fill;
             fg     = RGB(255, 255, 255);
             break;
         case BTN_SUCCESS:
             fill   = active ? Light::SuccessGreen : Light::SuccessSoft;
-            border = active ? Light::SuccessGreen : RGB(174, 224, 202);
+            border = hc ? pal.borderStrong.ToColorRef() : (active ? Light::SuccessGreen : RGB(174, 224, 202));
             fg     = active ? RGB(255, 255, 255) : Light::SuccessText;
             break;
         case BTN_VIOLET:
             fill   = active ? Light::VioletAccent : Light::VioletSoft;
-            border = active ? Light::VioletAccent : RGB(205, 194, 246);
+            border = hc ? pal.borderStrong.ToColorRef() : (active ? Light::VioletAccent : RGB(205, 194, 246));
             fg     = active ? RGB(255, 255, 255) : Light::VioletText;
             break;
         case BTN_AMBER:
             fill   = active ? Light::AmberWarm : Light::AmberSoft;
-            border = active ? Light::AmberWarm : RGB(236, 208, 158);
+            border = hc ? pal.borderStrong.ToColorRef() : (active ? Light::AmberWarm : RGB(236, 208, 158));
             fg     = active ? RGB(255, 255, 255) : Light::AmberText;
             break;
         case BTN_DANGER:
             fill   = active ? Light::RoseRed : Light::RoseSoft;
-            border = active ? Light::RoseRed : RGB(240, 190, 204);
+            border = hc ? pal.borderStrong.ToColorRef() : (active ? Light::RoseRed : RGB(240, 190, 204));
             fg     = active ? RGB(255, 255, 255) : Light::RoseText;
             break;
         case BTN_TOOLBAR_GHOST:
-            fill   = active ? Light::AccentSoft : (hovered ? RGB(239, 243, 249) : CLR_INVALID);
-            border = active ? RGB(178, 210, 248) : (hovered ? Light::BorderSubtle : CLR_INVALID);
-            fg     = active ? Light::AccentText : (hovered ? Light::TextPrimary : Light::TextSecondary);
+            fill   = active ? pal.accentBlueSoft.ToColorRef() : (hovered ? pal.glassPillHover.ToColorRef() : CLR_INVALID);
+            border = active ? pal.accentBlue.ToColorRef() : (hovered ? (hc ? pal.borderStrong.ToColorRef() : pal.borderSubtle.ToColorRef()) : CLR_INVALID);
+            fg     = active ? pal.accentBlue.ToColorRef() : (hovered ? pal.labelPrimary.ToColorRef() : (hc ? pal.labelPrimary.ToColorRef() : pal.labelSecondary.ToColorRef()));
             break;
         default: // BTN_SECONDARY / BTN_GHOST
-            fill   = active ? Light::AccentSoft : (hovered ? RGB(243, 246, 251) : Light::Surface1);
-            border = active ? Light::AccentBlue : (hovered ? Light::BorderStrong : Light::BorderSubtle);
-            fg     = active ? Light::AccentText : Light::TextPrimary;
+            fill   = active ? pal.accentBlueSoft.ToColorRef() : (hovered ? pal.contentCardElevated.ToColorRef() : pal.contentCard.ToColorRef());
+            border = active ? pal.accentBlue.ToColorRef() : (hc ? pal.borderStrong.ToColorRef() : (hovered ? Light::BorderStrong : Light::BorderSubtle));
+            fg     = active ? pal.accentBlue.ToColorRef() : pal.labelPrimary.ToColorRef();
             break;
         }
         if (fill == CLR_INVALID && border == CLR_INVALID) {
@@ -785,27 +884,34 @@ inline void DrawStudioSegmentItem(
     bool selected, bool hovered, bool emphasizeAccent = false)
 {
     if (rc.right <= rc.left || rc.bottom <= rc.top) return;
-    if (!g_studioDarkTheme) {
-        if (selected) {
-            const COLORREF fill = Light::Surface1;
-            const COLORREF border = emphasizeAccent ? RGB(194, 212, 238) : Light::BorderSubtle;
-            const COLORREF fg = emphasizeAccent ? Light::AccentText : Light::TextPrimary;
-            DrawModernPill(hdc, rc, fill, border, fg, txt, hFont, 6.0f);
-        } else if (hovered) {
-            DrawModernPill(hdc, rc, RGB(238, 242, 249), CLR_INVALID, Light::TextPrimary, txt, hFont, 6.0f);
-        } else {
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, Light::TextSecondary);
-            HGDIOBJ oldF = hFont ? SelectObject(hdc, hFont) : nullptr;
-            RECT tx = rc;
-            tx.left += 4;
-            tx.right -= 4;
-            DrawTextW(hdc, txt.c_str(), -1, &tx, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-            if (oldF) SelectObject(hdc, oldF);
-        }
-        return;
+    const UiGlass::GlassSettings& gs = GetActiveGlassSettings();
+    const UiGlass::GlassPalette pal = UiGlass::GetPalette(gs);
+    const float h = static_cast<float>(rc.bottom - rc.top);
+    const float innerR = (std::max)(6.0f, h * 0.45f); // concentric pill radius inside outer capsule
+
+    if (selected) {
+        const COLORREF fill = pal.glassPillSelected.ToColorRef();
+        const COLORREF border = gs.IsHighContrast()
+            ? pal.borderStrong.ToColorRef()
+            : (emphasizeAccent ? pal.accentBlue.ToColorRef() : pal.borderSubtle.ToColorRef());
+        // WCAG AAA legibility (>8.5:1) for emphasized active pill ink in Dark Mode
+        const COLORREF darkAccentFg = RGB(122, 198, 255);
+        const COLORREF fg = emphasizeAccent
+            ? (gs.IsDark() ? darkAccentFg : pal.accentBlue.ToColorRef())
+            : pal.labelPrimary.ToColorRef();
+        DrawModernPill(hdc, rc, fill, border, fg, txt, hFont, innerR);
+    } else if (hovered) {
+        DrawModernPill(hdc, rc, pal.glassPillHover.ToColorRef(), CLR_INVALID, pal.labelPrimary.ToColorRef(), txt, hFont, innerR);
+    } else {
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, pal.labelSecondary.ToColorRef());
+        HGDIOBJ oldF = hFont ? SelectObject(hdc, hFont) : nullptr;
+        RECT tx = rc;
+        tx.left += 4;
+        tx.right -= 4;
+        DrawTextW(hdc, txt.c_str(), -1, &tx, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        if (oldF) SelectObject(hdc, oldF);
     }
-    DrawSegmentItem(hdc, rc, txt, hFont, selected, hovered, false);
 }
 
 inline void DrawCalculatorAmbientHalo(HDC hdc, const RECT& vp, bool active, float radius = 18.0f, bool withPedestal = false, float uiScale = 1.0f)
@@ -840,15 +946,18 @@ inline void DrawCalculatorAmbientHalo(HDC hdc, const RECT& vp, bool active, floa
             g.FillPath(&sb, &ps);
         }
 
+        const UiGlass::GlassSettings& gs = GetActiveGlassSettings();
+        const UiGlass::GlassPalette pal = UiGlass::GetPalette(gs);
         Gdiplus::GraphicsPath pCard;
         AddRoundRectPath(pCard, static_cast<float>(rCard.left), static_cast<float>(rCard.top),
             static_cast<float>(rCard.right - rCard.left), static_cast<float>(rCard.bottom - rCard.top), cr);
         if (!g_studioDarkTheme) {
-            Gdiplus::SolidBrush fillBr(active ? Gdiplus::Color(255, 255, 255, 255) : Gdiplus::Color(242, 255, 255, 255));
+            Gdiplus::SolidBrush fillBr(active ? UiGlass::ToGdip(pal.contentCard, 255) : UiGlass::ToGdip(pal.contentCard, 244));
             g.FillPath(&fillBr, &pCard);
-            Gdiplus::Pen borderPen(
-                active ? Gdiplus::Color(235, 0, 122, 255) : Gdiplus::Color(255, 220, 226, 235),
-                active ? (1.6f * uiScale) : (1.0f * uiScale));
+            const Gdiplus::Color bdCol = active
+                ? UiGlass::ToGdip(pal.accentBlue, 240)
+                : (gs.IsHighContrast() ? UiGlass::ToGdip(pal.borderStrong, 255) : UiGlass::ToGdip(pal.borderSubtle, 255));
+            Gdiplus::Pen borderPen(bdCol, (active || gs.IsHighContrast()) ? (1.6f * uiScale) : (1.0f * uiScale));
             g.DrawPath(&borderPen, &pCard);
         } else {
             Gdiplus::SolidBrush fillBr(active ? Gdiplus::Color(255, 27, 33, 46) : Gdiplus::Color(245, 23, 27, 36));
@@ -861,19 +970,20 @@ inline void DrawCalculatorAmbientHalo(HDC hdc, const RECT& vp, bool active, floa
         return;
     }
 
-    // Subtle grounded contact shadow behind solo hardware (zero neon/blue halo)
+    // Subtle Apple HIG grounded elliptical contact shadow strictly beneath the solo chassis
+    // (avoids painting a rectangular tinted box behind transparent rounded skin corners)
+    const float shW = static_cast<float>(vw) * 0.84f;
+    const float shH = (std::max)(12.0f * uiScale, static_cast<float>(vh) * 0.032f);
+    const float shX = static_cast<float>(vp.left) + (static_cast<float>(vw) - shW) * 0.5f;
+    const float shY = static_cast<float>(vp.bottom) - shH * 0.45f;
     for (int i = 3; i >= 1; --i) {
-        RECT r = vp;
-        InflateRect(&r, i, i);
-        OffsetRect(&r, 0, i * 2);
-        Gdiplus::GraphicsPath p;
-        AddRoundRectPath(p, static_cast<float>(r.left), static_cast<float>(r.top),
-            static_cast<float>(r.right - r.left), static_cast<float>(r.bottom - r.top), radius + i);
+        const float expandX = static_cast<float>(i) * 5.0f * uiScale;
+        const float expandY = static_cast<float>(i) * 2.2f * uiScale;
         const BYTE a = !g_studioDarkTheme
             ? static_cast<BYTE>((std::max)(4, 18 - i * 4))
-            : static_cast<BYTE>((std::max)(5, 24 - i * 6));
+            : static_cast<BYTE>((std::max)(6, 30 - i * 7));
         Gdiplus::SolidBrush br(!g_studioDarkTheme ? Gdiplus::Color(a, 15, 23, 42) : Gdiplus::Color(a, 0, 0, 0));
-        g.FillPath(&br, &p);
+        g.FillEllipse(&br, shX - expandX, shY - expandY * 0.35f, shW + expandX * 2.0f, shH + expandY * 1.4f);
     }
 }
 
@@ -1039,8 +1149,8 @@ inline void DrawToggleSwitch(HDC hdc, const RECT& trackRc, bool checked, COLORRE
         ? (static_cast<float>(trackRc.right) - pad - d)
         : (static_cast<float>(trackRc.left) + pad);
     float ky = static_cast<float>(trackRc.top) + pad;
-    Gdiplus::SolidBrush thumb(Gdiplus::Color(255, 255, 255, 255));
-    g.FillEllipse(&thumb, kx, ky, d, d);
+    UiGlass::DrawAquaVitreousOrb(g, kx + d * 0.5f, ky + d * 0.5f, d * 0.5f,
+        Gdiplus::Color(255, 255, 255, 255), false, !lightSurface);
 }
 
 inline void DrawRadioCircle(HDC hdc, int cx, int cy, int r, bool checked, COLORREF accent = AccentBlue) {

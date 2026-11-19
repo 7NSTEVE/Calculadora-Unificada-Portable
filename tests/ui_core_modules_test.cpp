@@ -10,6 +10,8 @@
 #include "cw2_keys_exact.h"
 #include "key_capture_rects.h"
 #include "calcemu.h"
+#include "calc_engine.h"
+#include "../linux/engines/tests/u13_lcd_font_helper.hpp"
 
 #include <cstdio>
 #include <cstdint>
@@ -30,6 +32,45 @@ int Fail(const char* what)
 {
     std::cerr << "[FAIL] " << what << "\n";
     return 1;
+}
+
+std::filesystem::path ResolveTestRepoRoot()
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    auto looksLikeRepo = [&](const fs::path& dir) -> bool {
+        return !dir.empty() &&
+               fs::exists(dir / "roms" / "fx991lax.rom", ec) &&
+               fs::exists(dir / "manuales" / "indice_paginas_pdf.tsv", ec);
+    };
+
+    wchar_t envBuf[32768]{};
+    const DWORD envLen = GetEnvironmentVariableW(L"CASIO_UNIFIED_HOME", envBuf, 32768);
+    if (envLen > 0 && envLen < 32768) {
+        fs::path p(envBuf);
+        if (looksLikeRepo(p)) return p;
+    }
+
+    wchar_t exeBuf[32768]{};
+    const DWORD exeLen = GetModuleFileNameW(nullptr, exeBuf, 32768);
+    if (exeLen > 0 && exeLen < 32768) {
+        fs::path cur = fs::path(exeBuf).parent_path();
+        for (int i = 0; i < 6 && !cur.empty(); ++i) {
+            if (looksLikeRepo(cur)) return cur;
+            fs::path parent = cur.parent_path();
+            if (parent == cur) break;
+            cur = parent;
+        }
+    }
+
+    fs::path cwd = fs::current_path(ec);
+    for (int i = 0; i < 4 && !cwd.empty(); ++i) {
+        if (looksLikeRepo(cwd)) return cwd;
+        fs::path parent = cwd.parent_path();
+        if (parent == cwd) break;
+        cwd = parent;
+    }
+    return fs::path(CASIO_REPO_DIR);
 }
 
 bool ContainsCaseInsensitive(const std::wstring& hay, const std::wstring& needle)
@@ -399,7 +440,7 @@ int TestWin32ClipboardMultiFormat()
 int TestCalcEmuRomModesAndSaveRestore()
 {
     namespace fs = std::filesystem;
-    const fs::path repo(CASIO_REPO_DIR);
+    const fs::path repo = ResolveTestRepoRoot();
     const fs::path cwRomPath = repo / "roms" / "fx991lax.rom";
     const fs::path esRomPath = repo / "roms" / "fx570vnplus.rom";
     if (!fs::exists(cwRomPath) || !fs::exists(esRomPath)) {
@@ -710,7 +751,7 @@ int TestKnowledgeCatalogCompletenessAndJson()
     }
 
     // Export canonical deterministic catalog JSON into repo/catalog/casio_knowledge_catalog.json
-    const fs::path repo(CASIO_REPO_DIR);
+    const fs::path repo = ResolveTestRepoRoot();
     const fs::path jsonPath = repo / "catalog" / "casio_knowledge_catalog.json";
     if (!CasioKnowledge::ExportCatalogToJson(jsonPath.wstring())) {
         return Fail("ExportCatalogToJson failed");
@@ -736,7 +777,7 @@ int TestKnowledgeCatalogCompletenessAndJson()
 int TestCatalogSequencesOnRealRoms()
 {
     namespace fs = std::filesystem;
-    const fs::path repo(CASIO_REPO_DIR);
+    const fs::path repo = ResolveTestRepoRoot();
     const fs::path cwRomPath = repo / "roms" / "fx991lax.rom";
     const fs::path esRomPath = repo / "roms" / "fx570vnplus.rom";
     auto readRom = [](const fs::path& p) -> std::vector<unsigned char> {
@@ -835,7 +876,7 @@ int TestCatalogSequencesOnRealRoms()
 int TestNeutralUiStringsAndZeroEmojis()
 {
     namespace fs = std::filesystem;
-    const fs::path repo(CASIO_REPO_DIR);
+    const fs::path repo = ResolveTestRepoRoot();
     const char* files[] = {
         "main.cpp",
         "fx991cw_host.h",
@@ -1050,7 +1091,7 @@ int TestFx991CwKeysAndCaptureRects()
     }
 
     // Verify official 992x2140 interface.png and calibrated 992x2082 model.lua
-    const std::filesystem::path repoRoot(CASIO_REPO_DIR);
+    const std::filesystem::path repoRoot = ResolveTestRepoRoot();
     const auto ifacePath = repoRoot / "runtime" / "fx991cw" / "models" / "fx991cw_emu" / "interface.png";
     const auto luaPath = repoRoot / "runtime" / "fx991cw" / "models" / "fx991cw_emu" / "model.lua";
     if (!EnsureGdiplusInitialized()) return Fail("Gdiplus init failed");
@@ -1075,7 +1116,7 @@ int TestFx991CwKeysAndCaptureRects()
 int TestNativePdfViewerAll16Manuals()
 {
     namespace fs = std::filesystem;
-    const fs::path manualsDir = fs::path(CASIO_REPO_DIR) / "manuales";
+    const fs::path manualsDir = ResolveTestRepoRoot() / "manuales";
     if (!fs::exists(manualsDir)) return Fail("Missing manuales/ directory");
 
     constexpr size_t total = sizeof(g_officialManuals) / sizeof(g_officialManuals[0]);
@@ -1146,6 +1187,119 @@ int TestNativePdfViewerAll16Manuals()
     return 0;
 }
 
+int TestU13EighteenCaseRomDifferentialMatrix()
+{
+    namespace fs = std::filesystem;
+    const fs::path repo = ResolveTestRepoRoot();
+    const fs::path cwRomPath = repo / "roms" / "fx991lax.rom";
+    const fs::path esRomPath = repo / "roms" / "fx570vnplus.rom";
+    auto readRom = [](const fs::path& p) -> std::vector<unsigned char> {
+        std::ifstream f(p, std::ios::binary | std::ios::ate);
+        if (!f) return {};
+        const auto sz = static_cast<size_t>(f.tellg());
+        f.seekg(0);
+        std::vector<unsigned char> data(sz);
+        if (!f.read(reinterpret_cast<char*>(data.data()), sz)) return {};
+        return data;
+    };
+
+    const auto& cases = U13Matrix::Get18Cases();
+    if (cases.size() != 18) return Fail("U-13 matrix case count != 18");
+
+    // 1) Blanca fx-570LA X (LineIO, comma decimal)
+    {
+        auto rom = readRom(cwRomPath);
+        if (rom.empty()) return Fail("U-13 failed reading fx991lax.rom");
+        CalcEmuModel m{ CALCEMU_HW_CLASSWIZ, 0, 0x0003, 0x00 };
+        CalcEmu* emu = calcemu_create(&m, rom.data(), rom.size());
+        if (!emu) return Fail("U-13 calcemu_create CW failed");
+        calcemu_power_on(emu);
+        calcemu_advance(emu, 2000);
+        // LineIO setup: SHIFT (0x07) -> MENU (0x47) -> 1 (0x00) -> 3 (0x20)
+        calcemu_tap_key(emu, 0x07, 400, 1500);
+        calcemu_tap_key(emu, 0x47, 400, 1500);
+        calcemu_tap_key(emu, 0x00, 400, 1500);
+        calcemu_tap_key(emu, 0x20, 400, 2000);
+
+        const int w = calcemu_screen_width(emu);
+        const int h = calcemu_screen_rows(emu);
+        std::vector<std::uint8_t> px(static_cast<size_t>(w) * h);
+        for (const auto& c : cases) {
+            calcemu_tap_key(emu, 0x42, 400, 2500); // AC
+            for (const auto& kt : c.keys) {
+                calcemu_tap_key(emu, kt.nxCode, 400, 1500);
+            }
+            calcemu_tap_key(emu, 0x60, 400, 2500); // =
+            calcemu_screen_pixels(emu, px.data(), px.size());
+            const auto lines = U13Matrix::DecodeLcdLines(px, w, h);
+            const std::string got = lines.empty() ? std::string() : lines.back();
+            const std::string exp = U13Matrix::ExpectedForLax(c.expectedDot);
+            if (got != exp) {
+                std::cerr << "[FAIL] U-13 Win LAX [" << c.id << "] exp=" << exp << " got=" << got << "\n";
+                calcemu_destroy(emu);
+                return 1;
+            }
+        }
+        calcemu_destroy(emu);
+    }
+
+    // 2) Gris fx-570VN PLUS (LineIO, dot decimal)
+    {
+        auto rom = readRom(esRomPath);
+        if (rom.empty()) return Fail("U-13 failed reading fx570vnplus.rom");
+        CalcEmuModel m{ CALCEMU_HW_ES_PLUS, 0, 0x0001, 0x08 };
+        CalcEmu* emu = calcemu_create(&m, rom.data(), rom.size());
+        if (!emu) return Fail("U-13 calcemu_create ES failed");
+        calcemu_power_on(emu);
+        calcemu_advance(emu, 2000);
+        // LineIO setup: SHIFT (0x07) -> MODE (0x47) -> 2 (0x10)
+        calcemu_tap_key(emu, 0x07, 400, 1500);
+        calcemu_tap_key(emu, 0x47, 400, 1500);
+        calcemu_tap_key(emu, 0x10, 400, 2000);
+
+        const int w = calcemu_screen_width(emu);
+        const int h = calcemu_screen_rows(emu);
+        std::vector<std::uint8_t> px(static_cast<size_t>(w) * h);
+        for (const auto& c : cases) {
+            calcemu_tap_key(emu, 0x42, 400, 2500); // AC
+            for (const auto& kt : c.keys) {
+                calcemu_tap_key(emu, kt.nxCode, 400, 1500);
+            }
+            calcemu_tap_key(emu, 0x60, 400, 2500); // =
+            calcemu_screen_pixels(emu, px.data(), px.size());
+            const auto lines = U13Matrix::DecodeLcdLines(px, w, h);
+            const std::string got = lines.empty() ? std::string() : lines.back();
+            if (got != c.expectedDot) {
+                std::cerr << "[FAIL] U-13 Win VN+ [" << c.id << "] exp=" << c.expectedDot << " got=" << got << "\n";
+                calcemu_destroy(emu);
+                return 1;
+            }
+        }
+        calcemu_destroy(emu);
+    }
+
+    // 3) Differential check against MathEvaluator (calc_engine.h)
+    for (const auto& c : cases) {
+        std::wstring wExpr(c.expr, c.expr + std::strlen(c.expr));
+        double outVal = 0.0;
+        std::wstring err;
+        if (!MathEvaluator::Evaluate(wExpr, 0.0, ANG_DEG, outVal, err)) {
+            std::cerr << "[FAIL] U-13 MathEvaluator error on " << c.expr << "\n";
+            return 1;
+        }
+        const std::wstring wFmt = MathEvaluator::FormatResult(outVal);
+        const std::wstring wExp(c.expectedDot, c.expectedDot + std::strlen(c.expectedDot));
+        if (wFmt != wExp) {
+            std::wcerr << L"[FAIL] U-13 MathEvaluator mismatch on " << wExpr
+                       << L": exp=" << wExp << L" got=" << wFmt << L"\n";
+            return 1;
+        }
+    }
+
+    std::cout << "[PASS] TestU13EighteenCaseRomDifferentialMatrix (18/18 LAX + 18/18 VN+ + 18/18 MathEvaluator)\n";
+    return 0;
+}
+
 } // namespace
 
 int main()
@@ -1161,6 +1315,7 @@ int main()
     if (TestUiScalingAndTransformAlignment() != 0) return 1;
     if (TestFx991CwKeysAndCaptureRects() != 0) return 1;
     if (TestNativePdfViewerAll16Manuals() != 0) return 1;
-    std::cout << "ALL UiCoreModules TESTS PASSED (11/11)\n";
+    if (TestU13EighteenCaseRomDifferentialMatrix() != 0) return 1;
+    std::cout << "ALL UiCoreModules TESTS PASSED (12/12)\n";
     return 0;
 }

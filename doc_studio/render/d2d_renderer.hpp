@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -24,6 +25,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#endif
 
 namespace DocStudio {
 
@@ -110,11 +112,21 @@ struct ViewportOverlayState {
     const AnnotationObject* draftObject = nullptr;
     std::size_t draftPageIndex = 0;
     std::uint64_t selectedObjectId = 0;
+    std::vector<std::uint64_t> lassoSelectedIds;
     bool hasCropPreview = false;
     std::size_t cropPageIndex = 0;
     DocRect cropPreviewPageLocal{};
     const std::vector<SearchMatch>* searchMatches = nullptr;
     std::size_t activeSearchMatchIndex = 0;
+    bool replayActive = false;
+    std::uint64_t replayCursorMs = 0;
+    LaserPointerState laserPointer{};
+    bool presenterMode = false;
+    bool minimapVisible = false;
+    RulerState rulerState{};
+    bool focusMode = false;
+    bool darkTheme = false;
+    bool highContrast = false;
 };
 
 class D2DRenderer {
@@ -126,7 +138,20 @@ public:
     D2DRenderer& operator=(const D2DRenderer&) = delete;
 
     bool InitializeFactories();
+#ifdef _WIN32
     void AttachHwnd(HWND hwnd, int widthPx, int heightPx);
+#else
+    void RenderToCairo(
+        void* cairoContext,
+        const DocumentModel& doc,
+        const Camera2D& camera,
+        int widthPx,
+        int heightPx,
+        PageRenderCache* pageCache,
+        std::uint64_t asyncGen,
+        std::function<void()> onAsyncPageReady,
+        const ViewportOverlayState* overlay = nullptr);
+#endif
     void Resize(int widthPx, int heightPx);
     void DiscardDeviceResources();
 

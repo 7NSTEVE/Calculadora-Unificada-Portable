@@ -16,6 +16,9 @@ struct InkPoint {
     double x = 0.0;
     double y = 0.0;
     float pressure = 0.5f; // normalized 0.0 .. 1.0
+    float tiltXDeg = 0.0f; // stylus X tilt [-90..90]
+    float tiltYDeg = 0.0f; // stylus Y tilt [-90..90]
+    std::uint64_t timestampMs = 0; // millisecond capture offset for Ink Replay & Audio sync
 };
 
 struct DocRect {
@@ -87,7 +90,33 @@ enum class ObjectKind : std::uint8_t {
     Shape = 1,
     TextBox = 2,
     Image = 3,
-    PdfCard = 4
+    PdfCard = 4,
+    StudyTape = 5,
+    MathBlock = 6,
+    CircuitBlock = 7,
+    CalcSessionCard = 8,
+    PlotBlock = 9
+};
+
+enum class InkPenStyle : std::uint8_t {
+    Ballpoint = 0,
+    Fountain = 1,
+    Brush = 2,
+    Pencil = 3,
+    Highlighter = 4
+};
+
+enum class MathSubMode : std::uint8_t {
+    VarSub = 0, // #varsub: symbolic + substituted values/units + result
+    NoSub = 1,  // #nosub:  symbolic + result
+    NoVar = 2   // #novar:  substituted values/units + result
+};
+
+enum class EraserFilterMode : std::uint8_t {
+    All = 0,
+    HighlighterOnly = 1,
+    InkOnly = 2,
+    ShapesOnly = 3
 };
 
 enum class ShapeKind : std::uint8_t {
@@ -134,7 +163,38 @@ struct AnnotationObject {
 
     // PdfCard (used on InfiniteCanvas when importing a PDF page)
     std::string pdfSourcePathUtf8;
+    std::string pdfSourceAssetKey;
     int pdfSourcePageIndex0 = 0;
+
+    // Layers, Ink physics, Anchor, Study Tape, Audio timeline & STEM card extensions
+    std::uint64_t layerId = 1;
+    InkPenStyle penStyle = InkPenStyle::Ballpoint;
+    double stabilization = 0.20;
+    bool inkSnapped = false;
+    std::uint64_t anchorObjectId = 0;
+    DocPoint anchorOffset{};
+    bool tapeRevealed = false;
+    std::string formulaExprUtf8;
+    std::string formulaVarNameUtf8;
+    std::string evaluatedResultUtf8;
+    std::string stepCheckInputUtf8;
+    std::string stepCheckStatusUtf8;
+    std::string circuitNetlistUtf8;
+    std::string plotConfigUtf8;
+    std::string calcModelIdUtf8;
+    std::string calcKeySeqUtf8;
+    std::string calcLatexUtf8;
+    std::string audioAssetKey;
+    std::uint64_t inkStartTimeMs = 0;
+    std::uint64_t inkEndTimeMs = 0;
+
+    // Calcpad #varsub/#nosub/#novar, Maple Learn Parameter Sliders & OneNote/Goodnotes Tags
+    MathSubMode mathSubMode = MathSubMode::VarSub;
+    bool hasSlider = false;
+    double sliderMin = 0.0;
+    double sliderMax = 100.0;
+    double sliderValue = 0.0;
+    std::vector<std::string> tags; // e.g. "#examen", "#duda", "#definicion", "#pendiente"
 
     void RecomputeBounds() noexcept {
         if (kind == ObjectKind::InkStroke) {
@@ -189,9 +249,10 @@ struct PageModel {
     NormalizedCropRect crop{};
     PaperPattern background = PaperPattern::Plain;
 
-    // If sourced from an existing PDF file
+    // If sourced from an existing PDF file (plus portable asset key inside .cudoc)
     bool hasPdfSource = false;
     std::string sourcePdfPathUtf8;
+    std::string sourcePdfAssetKey;
     int sourcePageIndex0 = 0;
 
     // Optional cached OCR or extracted plain text
@@ -199,6 +260,7 @@ struct PageModel {
     std::string ocrTextUtf8;
 
     std::vector<AnnotationObject> objects;
+    std::uint64_t activeLayerId = 1;
 
     double EffectiveWidthPt() const noexcept {
         const int r = ((rotationDeg % 360) + 360) % 360;
@@ -211,6 +273,55 @@ struct PageModel {
         const double baseH = (r == 90 || r == 270) ? widthPt : heightPt;
         return baseH * (std::max)(0.05, crop.bottom - crop.top);
     }
+};
+
+struct LayerModel {
+    std::uint64_t id = 1;
+    std::string nameUtf8 = "Capa Principal";
+    bool visible = true;
+    bool locked = false;
+    bool includeInExport = true;
+    double opacity = 1.0;
+};
+
+struct InkLink {
+    std::uint64_t id = 0;
+    std::string sourceDocPathUtf8;
+    int sourcePageIndex0 = 0;
+    NormalizedCropRect sourceRectNorm{};
+    bool targetIsCanvas = true;
+    int targetPageIndex0 = 0;
+    std::uint64_t targetObjectId = 0;
+    std::string labelUtf8;
+};
+
+struct CollapsedPageRange {
+    int startPage0 = 0;
+    int endPage0 = 0;
+    bool collapsed = true;
+};
+
+struct LaserPointerState {
+    bool active = false;
+    double worldX = 0.0;
+    double worldY = 0.0;
+    std::vector<DocPoint> trail;
+};
+
+struct RulerState {
+    bool visible = false;
+    double centerX = 320.0;
+    double centerY = 260.0;
+    double angleDeg = 0.0; // 0..360 graduated protractor/ruler
+    double lengthPt = 360.0;
+};
+
+struct DocumentBookmark {
+    std::uint64_t id = 0;
+    std::string titleUtf8;
+    std::size_t pageIndex = 0;
+    double worldY = 0.0;
+    int level = 0; // hierarchical outline depth (0, 1, 2)
 };
 
 struct SearchMatch {

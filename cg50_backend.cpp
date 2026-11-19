@@ -6,11 +6,14 @@
 #include "debug_log.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <string>
 #include <vector>
 
 namespace {
+
+std::atomic<int> g_liveGcalEmulators{0};
 
 using GcaiCallback = int(__stdcall*)(int eventCode, void* payload, void* context);
 using GcaiCreateEmulator = int(__stdcall*)(
@@ -113,15 +116,30 @@ void PumpHostMessages(DWORD ms) {
     inPump = false;
 }
 
-bool SetKeyboardResetSignal(const bool asserted)
+bool ModuleContains(HMODULE module, std::uintptr_t rva, std::size_t bytes)
+{
+    if (!module) return false;
+    MODULEINFO info{};
+    if (!GetModuleInformation(GetCurrentProcess(), module, &info, sizeof(info))) {
+        return false;
+    }
+    return rva + bytes <= static_cast<std::size_t>(info.SizeOfImage);
+}
+
+bool SetKeyboardResetSignal(const bool asserted, const Cg50GcalProfile& p)
 {
 #if defined(_M_IX86)
     const HMODULE key = GetModuleHandleW(L"Key1616SwA.dll");
     if (key == nullptr) return false;
+    if (!ModuleContains(key, p.keySignalObjectRva, sizeof(unsigned char*)) ||
+        !ModuleContains(key, p.keyUpdateCallbackRva, sizeof(void*)) ||
+        !ModuleContains(key, p.keyFlushCallbackRva, sizeof(void*))) {
+        return false;
+    }
     const auto base = reinterpret_cast<std::uintptr_t>(key);
-    auto* const signalObject = *reinterpret_cast<unsigned char**>(base + 0xBB14);
-    void* const updateCallback = *reinterpret_cast<void**>(base + 0xEFF8);
-    const auto flushCallback = *reinterpret_cast<void(__cdecl**)()>(base + 0xEFF0);
+    auto* const signalObject = *reinterpret_cast<unsigned char**>(base + p.keySignalObjectRva);
+    void* const updateCallback = *reinterpret_cast<void**>(base + p.keyUpdateCallbackRva);
+    const auto flushCallback = *reinterpret_cast<void(__cdecl**)()>(base + p.keyFlushCallbackRva);
     if (signalObject == nullptr || updateCallback == nullptr || flushCallback == nullptr) {
         return false;
     }
@@ -132,18 +150,9 @@ bool SetKeyboardResetSignal(const bool asserted)
     return true;
 #else
     (void)asserted;
+    (void)p;
     return false;
 #endif
-}
-
-bool ModuleContains(HMODULE module, std::uintptr_t rva, std::size_t bytes)
-{
-    if (!module) return false;
-    MODULEINFO info{};
-    if (!GetModuleInformation(GetCurrentProcess(), module, &info, sizeof(info))) {
-        return false;
-    }
-    return rva + bytes <= static_cast<std::size_t>(info.SizeOfImage);
 }
 
 std::uint64_t FileSizeBytes(const std::wstring& path)
@@ -160,7 +169,8 @@ std::uint64_t FileSizeBytes(const std::wstring& path)
 
 bool FileExists(const std::wstring& path)
 {
-    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
 std::wstring JoinPath(const std::wstring& dir, const wchar_t* name)
@@ -286,6 +296,12 @@ bool LooksLikeGcalDir(const std::wstring& dir)
 
 bool FindGcalDirectory(std::wstring& outDir)
 {
+    const std::wstring envDir = GetEnvVarDynamicW(L"GCAL_RUNTIME_DIR");
+    if (!envDir.empty() && LooksLikeGcalDir(envDir)) {
+        outDir = envDir;
+        return true;
+    }
+
     const std::wstring exeDir = ModuleDirectory();
     const std::wstring cwd = GetCurrentDirectoryDynamicW();
     const std::vector<std::wstring> candidates =
@@ -479,18 +495,24 @@ struct Cg50Backend::Impl {
     std::wstring savedCurrentDirectory;
     bool dllDirectoryChanged = false;
     bool dllsWereFound = false;
+    bool systemRomPresent = false;
+    bool userRomPresent = false;
+
+    bool ownsLiveEmulator = false;
 
     void RestoreDllDirectory()
     {
         if (!dllDirectoryChanged) return;
         if (savedDllDirectory.empty()) {
-            SetDllDirectoryW(L"");
+            SetDllDirectoryW(nullptr);
         } else {
             SetDllDirectoryW(savedDllDirectory.c_str());
         }
         if (!savedCurrentDirectory.empty()) {
             SetCurrentDirectoryW(savedCurrentDirectory.c_str());
         }
+        savedDllDirectory.clear();
+        savedCurrentDirectory.clear();
         dllDirectoryChanged = false;
     }
 };
@@ -523,6 +545,10 @@ void Cg50Backend::UnloadHost()
             impl_->terminateEmulator(impl_->emulatorHandle);
         }
         impl_->emulatorHandle = nullptr;
+        if (impl_->ownsLiveEmulator) {
+            g_liveGcalEmulators.fetch_sub(1);
+            impl_->ownsLiveEmulator = false;
+        }
     }
     if (impl_->gcaiModule) {
         // Module is kept loaded in process to avoid thread tear-down races with DLSim32E background workers
@@ -543,6 +569,8 @@ void Cg50Backend::UnloadHost()
     impl_->RestoreDllDirectory();
     framebufferCopy_.clear();
     fbWidth_ = fbHeight_ = fbStride_ = 0;
+    impl_->systemRomPresent = false;
+    impl_->userRomPresent = false;
     engine_ = Engine::None;
 }
 
@@ -558,35 +586,45 @@ bool Cg50Backend::CaptureFramebuffer()
     }
 
     const auto* const imageBytes = static_cast<const unsigned char*>(image);
-    const auto* const pixels = imageBytes + p.lcdPixelOffset;
     const std::size_t surfaceBytes = Cg50SurfaceBytes(p);
-
-    const auto contentWidth = *reinterpret_cast<const std::uint32_t*>(
-        imageBytes + p.lcdContentWidthOffset);
-    const auto contentHeight = *reinterpret_cast<const std::uint32_t*>(
-        imageBytes + p.lcdContentHeightOffset);
-    const std::uint32_t width =
-        contentWidth != 0 ? contentWidth : p.lcdExpectedContentWidth;
-    const std::uint32_t height =
-        contentHeight != 0 ? contentHeight : p.lcdExpectedContentHeight;
-
-    if (width == 0 || height == 0 ||
-        width > p.lcdSurfaceWidth || height > p.lcdSurfaceHeight) {
-        impl_->lcdAccessor(0);
-        return false;
-    }
-
-    framebufferCopy_.assign(static_cast<std::size_t>(width) * height, 0);
-    const auto* src = reinterpret_cast<const std::uint32_t*>(pixels);
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
     bool copySuccess = false;
+
     __try {
-        for (std::uint32_t y = 0; y < height; ++y) {
-            std::memcpy(
-                framebufferCopy_.data() + static_cast<std::size_t>(y) * width,
-                src + static_cast<std::size_t>(y) * p.lcdSurfaceWidth,
-                static_cast<std::size_t>(width) * sizeof(std::uint32_t));
+        const auto contentWidth = *reinterpret_cast<const std::uint32_t*>(
+            imageBytes + p.lcdContentWidthOffset);
+        const auto contentHeight = *reinterpret_cast<const std::uint32_t*>(
+            imageBytes + p.lcdContentHeightOffset);
+        width = contentWidth != 0 ? contentWidth : p.lcdExpectedContentWidth;
+        height = contentHeight != 0 ? contentHeight : p.lcdExpectedContentHeight;
+
+        const std::size_t lastRowOffset =
+            (height > 0) ? (static_cast<std::size_t>(height - 1u) * p.lcdSurfaceWidth * p.lcdBytesPerPixel) : 0u;
+        const std::size_t rowBytes = static_cast<std::size_t>(width) * p.lcdBytesPerPixel;
+        const std::size_t pixelSpanBytes =
+            (width > 0 && height > 0)
+                ? (static_cast<std::size_t>(height - 1u) * p.lcdSurfaceWidth + width) * sizeof(std::uint32_t)
+                : 0u;
+        const bool withinSurface =
+            (width > 0 && height > 0 &&
+             width <= p.lcdSurfaceWidth && height <= p.lcdSurfaceHeight &&
+             p.lcdPixelOffset <= surfaceBytes &&
+             lastRowOffset <= surfaceBytes - p.lcdPixelOffset &&
+             rowBytes <= (surfaceBytes - p.lcdPixelOffset) - lastRowOffset &&
+             pixelSpanBytes <= surfaceBytes - p.lcdPixelOffset);
+
+        if (withinSurface) {
+            framebufferCopy_.assign(static_cast<std::size_t>(width) * height, 0);
+            const auto* src = reinterpret_cast<const std::uint32_t*>(imageBytes + p.lcdPixelOffset);
+            for (std::uint32_t y = 0; y < height; ++y) {
+                std::memcpy(
+                    framebufferCopy_.data() + static_cast<std::size_t>(y) * width,
+                    src + static_cast<std::size_t>(y) * p.lcdSurfaceWidth,
+                    static_cast<std::size_t>(width) * sizeof(std::uint32_t));
+            }
+            copySuccess = true;
         }
-        copySuccess = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         copySuccess = false;
     }
@@ -606,6 +644,12 @@ bool Cg50Backend::Initialize(const std::uint8_t* /*firmware*/, const std::size_t
     stages_ = StageStatus{};
     state_ = State::Unavailable;
     diagnostic_ = L"Buscando runtime GCal (GCalAppIF.dll)";
+
+    if (g_liveGcalEmulators.load() > 0) {
+        state_ = State::Faulted;
+        diagnostic_ = L"[Etapa 0] Ya existe una instancia GCal activa en este proceso";
+        return false;
+    }
 
     std::wstring targetDir;
     if (!FindGcalDirectory(targetDir)) {
@@ -710,6 +754,9 @@ bool Cg50Backend::Initialize(const std::uint8_t* /*firmware*/, const std::size_t
     if (!seed.userDataFound) {
         log_msg("CG50 etapa 0b: sin EmulatorData de usuario en %APPDATA%; plantilla del runtime en uso (LCD puede quedar en negro)");
     } else {
+        if (!seed.copyOk) {
+            log_msg("CG50 etapa 0b: directorio runtime de solo lectura; no se pudo copiar EmulatorData");
+        }
         char seedBuf[192]{};
         wsprintfA(seedBuf,
                   "CG50 etapa 0b: estado del usuario aplicado (copiados=%u cgm.dlm=%u romd=%u copyOk=%u)",
@@ -734,6 +781,8 @@ bool Cg50Backend::Initialize(const std::uint8_t* /*firmware*/, const std::size_t
             return false;
         }
     }
+    impl_->systemRomPresent = FileExists(emulatorData + L"\\CGM.dlm");
+    impl_->userRomPresent = FileExists(emulatorData + L"\\INIT\\CasioROMD.mem");
 
     std::wstring projectPath = emulatorData + L"\\CGM.dlp";
     if (!FileExists(projectPath)) {
@@ -762,6 +811,8 @@ bool Cg50Backend::Initialize(const std::uint8_t* /*firmware*/, const std::size_t
         UnloadHost();
         return false;
     }
+    impl_->ownsLiveEmulator = true;
+    g_liveGcalEmulators.fetch_add(1);
     stages_.stage5_createEmulatorOk = true;
     log_msg("CG50 etapa 5 OK: emulador creado");
     stages_.currentStage = 5;
@@ -898,8 +949,13 @@ bool Cg50Backend::Initialize(const std::uint8_t* /*firmware*/, const std::size_t
     }
 
     auto lcdBase = reinterpret_cast<uintptr_t>(lcdModule);
-    if (ModuleContains(lcdModule, p.lcdImageAccessorRva, sizeof(ImageAccessor))) {
-        impl_->lcdAccessor = *reinterpret_cast<ImageAccessor const*>(lcdBase + p.lcdImageAccessorRva);
+    for (int waitIdx = 0; waitIdx < 10 && !impl_->lcdAccessor; ++waitIdx) {
+        if (ModuleContains(lcdModule, p.lcdImageAccessorRva, sizeof(ImageAccessor))) {
+            impl_->lcdAccessor = *reinterpret_cast<ImageAccessor const*>(lcdBase + p.lcdImageAccessorRva);
+        }
+        if (!impl_->lcdAccessor) {
+            PumpHostMessages(100);
+        }
     }
     if (!impl_->lcdAccessor) {
         state_ = State::Faulted;
@@ -913,9 +969,9 @@ bool Cg50Backend::Initialize(const std::uint8_t* /*firmware*/, const std::size_t
     stages_.currentStage = 9;
 
     // Send reset pulse to boot SH7305 CPU emulator out of initial standby
-    SetKeyboardResetSignal(true);
+    SetKeyboardResetSignal(true, p);
     PumpHostMessages(350);
-    SetKeyboardResetSignal(false);
+    SetKeyboardResetSignal(false, p);
     PumpHostMessages(500);
 
     // Pulse AC/ON key (matrix code 0x0101) to power on LCD
@@ -935,6 +991,7 @@ bool Cg50Backend::Initialize(const std::uint8_t* /*firmware*/, const std::size_t
     stages_.stage11_keyInjectionActive = true;
     stages_.currentStage = 11;
 
+    impl_->RestoreDllDirectory();
     state_ = State::Ready;
     engine_ = Engine::GCal;
     diagnostic_ = L"GCal listo (framebuffer BGRA copiado; teclas 16-bit)";
@@ -979,6 +1036,7 @@ void Cg50Backend::Step(const std::uint32_t elapsedMicroseconds)
     const auto& p = impl_->profile;
     HMODULE gcSimMod = GetModuleHandleW(L"CASIO GCSim.dll");
     if (gcSimMod &&
+        ModuleContains(gcSimMod, p.gcsimPauseRva, sizeof(std::uint32_t)) &&
         ModuleContains(gcSimMod, p.gcsimRunRva, sizeof(std::uint32_t))) {
         auto pauseFlag = reinterpret_cast<uint32_t*>(
             reinterpret_cast<uintptr_t>(gcSimMod) + p.gcsimPauseRva);
@@ -1065,16 +1123,25 @@ Cg50Backend::FramebufferView Cg50Backend::Framebuffer()
 // (third_party/rom-native-reference/rama-cg50_backend.cpp).
 bool Cg50Backend::SaveStateToFile(const wchar_t* /*path*/)
 {
+    if (state_ == State::Ready) {
+        diagnostic_ = L"SaveStateToFile no soportado en backend GCal (requiere RomNative)";
+    }
     return false;
 }
 
 bool Cg50Backend::LoadStateFromFile(const wchar_t* /*path*/)
 {
+    if (state_ == State::Ready) {
+        diagnostic_ = L"LoadStateFromFile no soportado en backend GCal (requiere RomNative)";
+    }
     return false;
 }
 
 bool Cg50Backend::PersistUserRom()
 {
+    if (state_ == State::Ready) {
+        diagnostic_ = L"PersistUserRom no soportado en backend GCal (requiere RomNative)";
+    }
     return false;
 }
 
@@ -1083,8 +1150,15 @@ bool Cg50Backend::HasPersistedUserRom() const
     return false;
 }
 
-bool Cg50Backend::InitializeFromFile(const wchar_t* /*firmwarePath*/)
+bool Cg50Backend::InitializeFromFile(const wchar_t* firmwarePath)
 {
+    if (firmwarePath && *firmwarePath && !FileExists(firmwarePath)) {
+        UnloadHost();
+        stages_ = StageStatus{};
+        state_ = State::Faulted;
+        diagnostic_ = L"Archivo de firmware no encontrado: " + std::wstring(firmwarePath);
+        return false;
+    }
     return Initialize(nullptr, 0);
 }
 
@@ -1093,7 +1167,10 @@ Cg50Backend::RuntimeStatus Cg50Backend::GetRuntimeStatus() const noexcept
     RuntimeStatus out{};
     if (state_ == State::Ready) {
         out.cpuState = CpuState::Running;
+        out.systemRomLoaded = impl_ && impl_->systemRomPresent;
+        out.userRomLoaded = impl_ && impl_->userRomPresent;
         out.framebufferAvailable = !framebufferCopy_.empty();
+        out.instructions = stages_.frameCount;
     }
     return out;
 }

@@ -2,6 +2,7 @@
 #include "operation_capture.h"
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 #ifndef PW_RENDERFULLCONTENT
@@ -70,36 +71,109 @@ std::wstring ParentDir(const std::wstring& path)
     return path.substr(0, pos);
 }
 
-RuntimePaths ResolveRuntimePaths()
+std::wstring GetModuleDirectoryDynamicW()
+{
+    DWORD cap = 512;
+    std::wstring buf;
+    for (;;) {
+        buf.assign(cap, L'\0');
+        SetLastError(ERROR_SUCCESS);
+        const DWORD len = GetModuleFileNameW(nullptr, buf.data(), cap);
+        if (len == 0) return L"";
+        if (len < cap && GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+            buf.resize(len);
+            return ParentDir(buf);
+        }
+        if (cap >= 32768) {
+            buf.resize(len);
+            return ParentDir(buf);
+        }
+        cap *= 2;
+    }
+}
+
+std::wstring GetCurrentDirectoryDynamicW()
+{
+    const DWORD need = GetCurrentDirectoryW(0, nullptr);
+    if (need == 0) return L"";
+    std::wstring buf(need, L'\0');
+    const DWORD written = GetCurrentDirectoryW(need, buf.data());
+    if (written == 0 || written >= need) return L"";
+    buf.resize(written);
+    return buf;
+}
+
+std::wstring GetEnvVarDynamicW(const wchar_t* name)
+{
+    if (!name) return L"";
+    const DWORD need = GetEnvironmentVariableW(name, nullptr, 0);
+    if (need == 0) return L"";
+    std::wstring buf(need, L'\0');
+    const DWORD written = GetEnvironmentVariableW(name, buf.data(), need);
+    if (written == 0 || written >= need) return L"";
+    buf.resize(written);
+    return buf;
+}
+
+RuntimePaths ResolveRuntimePaths(std::wstring* outDiag = nullptr)
 {
     RuntimePaths out;
-    wchar_t exeBuf[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, exeBuf, MAX_PATH);
-    std::wstring exeDir = ParentDir(exeBuf);
+    const std::wstring exeDir = GetModuleDirectoryDynamicW();
+    const std::wstring cwd = GetCurrentDirectoryDynamicW();
+    const std::wstring envRuntime = GetEnvVarDynamicW(L"CASIO_FX991CW_RUNTIME_DIR");
+    const std::wstring envHome = GetEnvVarDynamicW(L"CASIO_UNIFIED_HOME");
 
-    const std::wstring candidates[] = {
-        exeDir + L"\\runtime\\fx991cw",
-        ParentDir(exeDir) + L"\\runtime\\fx991cw",
-        ParentDir(ParentDir(exeDir)) + L"\\runtime\\fx991cw"
-    };
+    std::vector<std::wstring> candidates;
+    if (!envRuntime.empty()) candidates.push_back(envRuntime);
+    if (!envHome.empty()) candidates.push_back(envHome + L"\\runtime\\fx991cw");
+    if (!exeDir.empty()) {
+        candidates.push_back(exeDir + L"\\runtime\\fx991cw");
+        const std::wstring p1 = ParentDir(exeDir);
+        if (!p1.empty()) {
+            candidates.push_back(p1 + L"\\runtime\\fx991cw");
+            const std::wstring p2 = ParentDir(p1);
+            if (!p2.empty()) {
+                candidates.push_back(p2 + L"\\runtime\\fx991cw");
+                const std::wstring p3 = ParentDir(p2);
+                if (!p3.empty()) candidates.push_back(p3 + L"\\runtime\\fx991cw");
+            }
+        }
+    }
+    if (!cwd.empty()) {
+        candidates.push_back(cwd + L"\\runtime\\fx991cw");
+    }
 
     for (const auto& cand : candidates) {
+        if (cand.empty()) continue;
         std::wstring emuDir = cand + L"\\emulator";
         std::wstring exe = emuDir + L"\\casioemu.exe";
+        std::wstring sdl2 = emuDir + L"\\SDL2.dll";
         std::wstring modelDir = cand + L"\\models\\fx991cw_emu";
         std::wstring lua = modelDir + L"\\model.lua";
         std::wstring rom = modelDir + L"\\rom.bin";
-        if (FileExistsW(exe) && DirExistsW(modelDir) && FileExistsW(lua) && FileExistsW(rom)) {
+        std::wstring iface = modelDir + L"\\interface.png";
+        if (FileExistsW(exe) && FileExistsW(sdl2) && DirExistsW(modelDir) &&
+            FileExistsW(lua) && FileExistsW(rom) && FileExistsW(iface)) {
             out.baseDir = cand;
             out.emulatorDir = emuDir;
             out.exePath = exe;
             out.modelDir = modelDir;
             out.defaultRamPath = modelDir + L"\\default_en.ram";
             std::wstring stateDir = ResolveWritableOutputDir(L"fx991cw_state");
-            out.stateRamPath = stateDir + L"\\fx991cw.ram";
+            if (!stateDir.empty() && IsDirectoryWritable(stateDir)) {
+                out.stateRamPath = stateDir + L"\\fx991cw.ram";
+            }
             out.valid = true;
             return out;
         }
+        if (FileExistsW(exe) && outDiag && outDiag->empty()) {
+            if (!FileExistsW(sdl2)) *outDiag = L"Falta runtime/fx991cw/emulator/SDL2.dll.";
+            else if (!FileExistsW(iface)) *outDiag = L"Falta runtime/fx991cw/models/fx991cw_emu/interface.png.";
+            else if (!FileExistsW(rom) || !FileExistsW(lua)) *outDiag = L"Faltan archivos de modelo fx991cw_emu.";
+        }
+    }
+    if (outDiag && outDiag->empty()) {
+        *outDiag = L"No se encontro runtime/fx991cw/emulator/casioemu.exe.";
     }
     return out;
 }
@@ -153,10 +227,18 @@ struct EnumFindCtx {
     HWND found = nullptr;
 };
 
+bool QueryProcessExitCode(DWORD& outExitCode)
+{
+    outExitCode = 0;
+    if (!g_host.hProcess) return false;
+    return GetExitCodeProcess(g_host.hProcess, &outExitCode) != FALSE;
+}
+
 BOOL CALLBACK FindSdlWindowProc(HWND hwnd, LPARAM lParam)
 {
     auto* ctx = reinterpret_cast<EnumFindCtx*>(lParam);
-    if (!ctx || hwnd == nullptr) return TRUE;
+    if (!ctx || hwnd == nullptr || !IsWindow(hwnd)) return TRUE;
+    if (GetWindow(hwnd, GW_OWNER) != nullptr) return TRUE;
     DWORD wpid = 0;
     GetWindowThreadProcessId(hwnd, &wpid);
     if (wpid != ctx->pid) return TRUE;
@@ -269,10 +351,13 @@ bool TryAttachChildWindow(HWND hParent, const RECT& viewportRect, bool visible)
 
 bool StartProcessInternal(HWND hParent, const RECT& viewportRect, bool visible, bool resetRam)
 {
-    RuntimePaths paths = ResolveRuntimePaths();
+    std::wstring pathDiag;
+    RuntimePaths paths = ResolveRuntimePaths(&pathDiag);
     if (!paths.valid) {
         g_host.state = Fx991CwState::NotFound;
-        g_host.lastError = L"No se encontro runtime/fx991cw/emulator/casioemu.exe.";
+        g_host.lastError = pathDiag.empty()
+            ? L"No se encontro runtime/fx991cw/emulator/casioemu.exe."
+            : pathDiag;
         return false;
     }
 
@@ -335,6 +420,14 @@ bool StartProcessInternal(HWND hParent, const RECT& viewportRect, bool visible, 
     g_host.hasAppliedRect = false;
 
     for (int i = 0; i < 12; ++i) {
+        if (!IsHostProcessAlive()) {
+            DWORD exitCode = 0;
+            QueryProcessExitCode(exitCode);
+            ClearDeadProcessHandles();
+            g_host.state = Fx991CwState::Failed;
+            g_host.lastError = L"casioemu.exe termino al iniciar (codigo " + std::to_wstring(exitCode) + L").";
+            return false;
+        }
         if (TryAttachChildWindow(hParent, viewportRect, visible)) {
             break;
         }
@@ -354,10 +447,14 @@ Fx991CwState Fx991CwHost::GetState()
 {
     if (g_host.state == Fx991CwState::Ready || g_host.state == Fx991CwState::Launching) {
         if (!IsHostProcessAlive()) {
+            DWORD exitCode = 0;
+            const bool hasExit = QueryProcessExitCode(exitCode);
             ClearDeadProcessHandles();
             g_host.state = IsRuntimeAvailable() ? Fx991CwState::Failed : Fx991CwState::NotFound;
             if (g_host.lastError.empty()) {
-                g_host.lastError = L"El proceso casioemu.exe finalizo de forma inesperada.";
+                g_host.lastError = hasExit
+                    ? (L"El proceso casioemu.exe finalizo de forma inesperada (codigo " + std::to_wstring(exitCode) + L").")
+                    : L"El proceso casioemu.exe finalizo de forma inesperada.";
             }
         }
     } else if (g_host.state == Fx991CwState::Stopped && !IsRuntimeAvailable()) {
@@ -400,9 +497,13 @@ void Fx991CwHost::PollAttach(HWND hParent, const RECT& viewportRect, bool visibl
 {
     if (!IsHostProcessAlive()) {
         if (g_host.hProcess) {
+            DWORD exitCode = 0;
+            const bool hasExit = QueryProcessExitCode(exitCode);
             ClearDeadProcessHandles();
             g_host.state = Fx991CwState::Failed;
-            g_host.lastError = L"casioemu.exe se cerro.";
+            g_host.lastError = hasExit
+                ? (L"casioemu.exe se cerro (codigo " + std::to_wstring(exitCode) + L").")
+                : L"casioemu.exe se cerro.";
         } else if (!IsRuntimeAvailable()) {
             g_host.state = Fx991CwState::NotFound;
         }
@@ -465,6 +566,7 @@ bool Fx991CwHost::ForwardKey(WPARAM vk, bool down)
 
 bool Fx991CwHost::ClickNormalized(double normX, double normY)
 {
+    if (!std::isfinite(normX) || !std::isfinite(normY)) return false;
     HWND hChild = GetChildHwnd();
     if (!hChild || !IsWindowVisible(hChild)) return false;
     RECT rc{};
@@ -473,12 +575,15 @@ bool Fx991CwHost::ClickNormalized(double normX, double normY)
     int h = rc.bottom - rc.top;
     if (w <= 0 || h <= 0) return false;
 
-    int px = (std::min)(w - 1, (std::max)(0, static_cast<int>(normX * w)));
-    int py = (std::min)(h - 1, (std::max)(0, static_cast<int>(normY * h)));
+    const double clampedX = std::clamp(normX, 0.0, 1.0);
+    const double clampedY = std::clamp(normY, 0.0, 1.0);
+    int px = (std::min)(w - 1, (std::max)(0, static_cast<int>(clampedX * w)));
+    int py = (std::min)(h - 1, (std::max)(0, static_cast<int>(clampedY * h)));
     LPARAM lp = MAKELPARAM(px, py);
     PostMessageW(hChild, WM_MOUSEMOVE, 0, lp);
     PostMessageW(hChild, WM_LBUTTONDOWN, MK_LBUTTON, lp);
     Sleep(45);
+    if (!IsWindow(hChild)) return false;
     PostMessageW(hChild, WM_LBUTTONUP, 0, lp);
     return true;
 }
@@ -516,8 +621,14 @@ HBITMAP Fx991CwHost::CaptureBitmap(bool lcdOnly, int& outW, int& outH)
     if (!ok) {
         ok = BitBlt(hdcFull, 0, 0, fullW, fullH, hdcScreen, 0, 0, SRCCOPY);
     }
+    if (!ok) {
+        SelectObject(hdcFull, oldFull);
+        DeleteObject(hBmpFull);
+        DeleteDC(hdcFull);
+        ReleaseDC(hChild, hdcScreen);
+        return nullptr;
+    }
 
-    HBITMAP resultBmp = nullptr;
     if (!lcdOnly) {
         SelectObject(hdcFull, oldFull);
         DeleteDC(hdcFull);
@@ -535,13 +646,23 @@ HBITMAP Fx991CwHost::CaptureBitmap(bool lcdOnly, int& outW, int& outH)
     int lh = (std::max)(1, by - ly);
 
     HDC hdcCrop = CreateCompatibleDC(hdcScreen);
-    resultBmp = CreateCompatibleBitmap(hdcScreen, lw, lh);
+    HBITMAP resultBmp = CreateCompatibleBitmap(hdcScreen, lw, lh);
     if (hdcCrop && resultBmp) {
         HGDIOBJ oldCrop = SelectObject(hdcCrop, resultBmp);
-        BitBlt(hdcCrop, 0, 0, lw, lh, hdcFull, lx, ly, SRCCOPY);
-        SelectObject(hdcCrop, oldCrop);
-        outW = lw;
-        outH = lh;
+        if (BitBlt(hdcCrop, 0, 0, lw, lh, hdcFull, lx, ly, SRCCOPY)) {
+            outW = lw;
+            outH = lh;
+        } else {
+            SelectObject(hdcCrop, oldCrop);
+            DeleteObject(resultBmp);
+            resultBmp = nullptr;
+        }
+        if (resultBmp) SelectObject(hdcCrop, oldCrop);
+    } else {
+        if (resultBmp) {
+            DeleteObject(resultBmp);
+            resultBmp = nullptr;
+        }
     }
     if (hdcCrop) DeleteDC(hdcCrop);
 
@@ -567,11 +688,12 @@ void Fx991CwHost::Shutdown()
     g_host.hChild = nullptr;
     g_host.hasAppliedRect = false;
     g_host.lastVisible = false;
+    g_host.lastError.clear();
 
     if (hChild && IsWindow(hChild)) {
         ShowWindow(hChild, SW_HIDE);
-        SetParent(hChild, nullptr);
         PostMessageW(hChild, WM_CLOSE, 0, 0);
+        SetParent(hChild, nullptr);
     }
 
     if (hProc) {

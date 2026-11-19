@@ -2,9 +2,11 @@
 #include "../core/zip_container.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <sstream>
 #include <utility>
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -12,6 +14,11 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include "../core/utf_conv.hpp"
+#include <filesystem>
+#include <fstream>
+#endif
 
 namespace DocStudio {
 
@@ -101,6 +108,7 @@ std::string ExtractXmlTagTextParagraphs(const std::string& xml, const std::strin
 }
 
 bool WriteAllFile(const std::wstring& path, const std::vector<std::uint8_t>& bytes, std::string* outErr) {
+#ifdef _WIN32
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) {
         if (outErr) *outErr = "No se pudo crear archivo de exportaci\xC3\xB3n OpenXML.";
@@ -120,9 +128,27 @@ bool WriteAllFile(const std::wstring& path, const std::vector<std::uint8_t>& byt
     FlushFileBuffers(hFile);
     CloseHandle(hFile);
     return true;
+#else
+    const std::filesystem::path p(WideToUtf8(path));
+    std::ofstream ofs(p, std::ios::binary | std::ios::trunc);
+    if (!ofs.is_open()) {
+        if (outErr) *outErr = "No se pudo crear archivo de exportaci\xC3\xB3n OpenXML.";
+        return false;
+    }
+    if (!bytes.empty()) {
+        ofs.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+    ofs.flush();
+    if (!ofs.good()) {
+        if (outErr) *outErr = "Error escribiendo archivo OpenXML.";
+        return false;
+    }
+    return true;
+#endif
 }
 
 bool ReadAllFile(const std::wstring& path, std::vector<std::uint8_t>& out, std::string* outErr) {
+#ifdef _WIN32
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) {
         if (outErr) *outErr = "No se pudo abrir archivo OpenXML.";
@@ -146,6 +172,24 @@ bool ReadAllFile(const std::wstring& path, std::vector<std::uint8_t>& out, std::
     }
     CloseHandle(hFile);
     return true;
+#else
+    const std::filesystem::path p(WideToUtf8(path));
+    std::ifstream ifs(p, std::ios::binary | std::ios::ate);
+    if (!ifs.is_open()) {
+        if (outErr) *outErr = "No se pudo abrir archivo OpenXML.";
+        return false;
+    }
+    const std::streampos sz = ifs.tellg();
+    if (sz < 0 || static_cast<std::uint64_t>(sz) > 256ull * 1024ull * 1024ull) {
+        return false;
+    }
+    out.resize(static_cast<std::size_t>(sz));
+    ifs.seekg(0, std::ios::beg);
+    if (!out.empty() && !ifs.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size()))) {
+        return false;
+    }
+    return true;
+#endif
 }
 
 std::string MakeDocxDrawingXml(const std::string& relId, std::uint64_t picId, double wPt, double hPt) {
@@ -448,18 +492,80 @@ bool OpenXmlInterop::ExportToPptxBytes(
         std::size_t shapeId = 2;
         std::size_t sRelCounter = 1;
 
-        auto appendTextShape = [&](const std::string& text, std::int64_t x, std::int64_t y, std::int64_t cx, std::int64_t cy) {
+        auto hexRgb = [](DocColor c) {
+            char buf[8]{};
+            std::snprintf(buf, sizeof(buf), "%02X%02X%02X", c.r, c.g, c.b);
+            return std::string(buf);
+        };
+
+        auto appendTextShape = [&](const std::string& text, std::int64_t x, std::int64_t y, std::int64_t cx, std::int64_t cy,
+                                   double fontPt = 14.0, DocColor color = DocColor::RGBA(20, 20, 25, 255), bool bold = false) {
             if (text.empty()) return;
+            const int szHundredths = (std::max)(800, (std::min)(7200, static_cast<int>(fontPt * 100.0)));
             slideXml << "<p:sp><p:nvSpPr><p:cNvPr id=\"" << (++shapeId) << "\" name=\"Texto\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>"
-                     << "<p:spPr><a:xfrm><a:off x=\"" << x << "\" y=\"" << y << "\"/><a:ext cx=\"" << cx << "\" cy=\"" << cy << "\"/></a:xfrm>"
+                     << "<p:spPr><a:xfrm><a:off x=\"" << x << "\" y=\"" << y << "\"/><a:ext cx=\"" << (std::max<std::int64_t>)(127000, cx) << "\" cy=\"" << (std::max<std::int64_t>)(127000, cy) << "\"/></a:xfrm>"
                      << "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr wrap=\"square\"/><a:lstStyle/>";
             for (const auto& line : SplitParagraphs(text)) {
-                slideXml << "<a:p><a:r><a:rPr lang=\"es-ES\" sz=\"1400\"/><a:t>" << XmlEscape(line) << "</a:t></a:r></a:p>";
+                slideXml << "<a:p><a:r><a:rPr lang=\"es-ES\" sz=\"" << szHundredths << "\""
+                         << (bold ? " b=\"1\"" : "")
+                         << "><a:solidFill><a:srgbClr val=\"" << hexRgb(color) << "\"/></a:solidFill></a:rPr><a:t>"
+                         << XmlEscape(line) << "</a:t></a:r></a:p>";
             }
             slideXml << "</p:txBody></p:sp>\n";
         };
 
-        if (i < optionalPageSnapshotsPng.size() && !optionalPageSnapshotsPng[i].empty()) {
+        auto appendObjectsToSlide = [&](const std::vector<AnnotationObject>& objs, double srcW, double srcH,
+                                        std::int64_t offX, std::int64_t offY, std::int64_t boxW, std::int64_t boxH) {
+            const double sx = static_cast<double>(boxW) / (std::max)(72.0, srcW);
+            const double sy = static_cast<double>(boxH) / (std::max)(72.0, srcH);
+            const double s = (std::min)(sx, sy);
+            for (const auto& obj : objs) {
+                const std::int64_t ox = offX + static_cast<std::int64_t>(obj.bounds.x * s);
+                const std::int64_t oy = offY + static_cast<std::int64_t>(obj.bounds.y * s);
+                const std::int64_t ow = (std::max<std::int64_t>)(91440, static_cast<std::int64_t>(obj.bounds.w * s));
+                const std::int64_t oh = (std::max<std::int64_t>)(91440, static_cast<std::int64_t>(obj.bounds.h * s));
+                if (obj.kind == ObjectKind::TextBox && !obj.textUtf8.empty()) {
+                    appendTextShape(obj.textUtf8, ox, oy, ow, oh, obj.fontSizePt, obj.strokeColor, obj.bold);
+                } else if (obj.kind == ObjectKind::Shape) {
+                    const char* prst = (obj.shapeKind == ShapeKind::Ellipse) ? "ellipse"
+                                     : (obj.shapeKind == ShapeKind::Arrow) ? "rightArrow"
+                                     : "rect";
+                    slideXml << "<p:sp><p:nvSpPr><p:cNvPr id=\"" << (++shapeId) << "\" name=\"Forma\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>"
+                             << "<p:spPr><a:xfrm><a:off x=\"" << ox << "\" y=\"" << oy << "\"/><a:ext cx=\"" << ow << "\" cy=\"" << oh << "\"/></a:xfrm>"
+                             << "<a:prstGeom prst=\"" << prst << "\"><a:avLst/></a:prstGeom>";
+                    if (obj.fillColor.a > 0) {
+                        slideXml << "<a:solidFill><a:srgbClr val=\"" << hexRgb(obj.fillColor) << "\"/></a:solidFill>";
+                    } else {
+                        slideXml << "<a:noFill/>";
+                    }
+                    slideXml << "<a:ln w=\"" << static_cast<std::int64_t>((std::max)(1.0, obj.strokeWidth) * 12700.0)
+                             << "\"><a:solidFill><a:srgbClr val=\"" << hexRgb(obj.strokeColor) << "\"/></a:solidFill></a:ln>"
+                             << "</p:spPr>";
+                    if (!obj.textUtf8.empty()) {
+                        slideXml << "<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang=\"es-ES\" sz=\"1200\"/><a:t>"
+                                 << XmlEscape(obj.textUtf8) << "</a:t></a:r></a:p></p:txBody>";
+                    }
+                    slideXml << "</p:sp>\n";
+                } else if (obj.kind == ObjectKind::Image) {
+                    const std::vector<std::uint8_t>* imgPtr = !obj.pngBytes.empty() ? &obj.pngBytes : doc.FindAsset(obj.assetKey);
+                    if (imgPtr && !imgPtr->empty()) {
+                        const std::string mediaName = "objImg" + std::to_string(++globalMediaIdx) + ".png";
+                        const std::string rid = "rId" + std::to_string(++sRelCounter);
+                        zip.SetEntry("ppt/media/" + mediaName, *imgPtr);
+                        sRels << "<Relationship Id=\"" << rid
+                              << "\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/"
+                              << mediaName << "\"/>\n";
+                        slideXml << "<p:pic><p:nvPicPr><p:cNvPr id=\"" << (++shapeId) << "\" name=\"" << mediaName << "\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>"
+                                 << "<p:blipFill><a:blip r:embed=\"" << rid << "\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>"
+                                 << "<p:spPr><a:xfrm><a:off x=\"" << ox << "\" y=\"" << oy << "\"/><a:ext cx=\"" << ow << "\" cy=\"" << oh << "\"/></a:xfrm>"
+                                 << "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>\n";
+                    }
+                }
+            }
+        };
+
+        const bool hasSnap = (i < optionalPageSnapshotsPng.size() && !optionalPageSnapshotsPng[i].empty());
+        if (hasSnap) {
             const std::string mediaName = "slideImg" + std::to_string(++globalMediaIdx) + ".png";
             const std::string rid = "rId" + std::to_string(++sRelCounter);
             zip.SetEntry("ppt/media/" + mediaName, optionalPageSnapshotsPng[i]);
@@ -473,14 +579,19 @@ bool OpenXmlInterop::ExportToPptxBytes(
         }
 
         if (doc.Mode() == DocumentMode::InfiniteCanvas) {
-            std::string combined;
+            double maxW = 800.0, maxH = 600.0;
             for (const auto& obj : doc.CanvasObjects()) {
-                if (obj.kind == ObjectKind::TextBox && !obj.textUtf8.empty()) {
-                    if (!combined.empty()) combined += '\n';
-                    combined += obj.textUtf8;
-                }
+                maxW = (std::max)(maxW, obj.bounds.Right() + 40.0);
+                maxH = (std::max)(maxH, obj.bounds.Bottom() + 40.0);
             }
-            appendTextShape(doc.Title() + (combined.empty() ? "" : ("\n" + combined)), 5200000, 457200, 6500000, 5800000);
+            if (hasSnap) {
+                appendObjectsToSlide(doc.CanvasObjects(), maxW, maxH, 5200000, 457200, 6500000, 5800000);
+            } else {
+                appendObjectsToSlide(doc.CanvasObjects(), maxW, maxH, 457200, 365760, 11200000, 6100000);
+            }
+            if (!doc.Title().empty()) {
+                appendTextShape(doc.Title(), hasSnap ? 5200000 : 457200, 140000, 6500000, 240000, 16.0, DocColor::RGBA(20, 45, 95, 255), true);
+            }
         } else if (i < doc.Pages().size()) {
             const auto& pg = doc.Pages()[i];
             std::string slideText = !pg.extractedTextUtf8.empty() ? pg.extractedTextUtf8 : pg.ocrTextUtf8;
@@ -490,10 +601,16 @@ bool OpenXmlInterop::ExportToPptxBytes(
                     slideText += obj.textUtf8;
                 }
             }
-            const std::int64_t tx = (i < optionalPageSnapshotsPng.size() && !optionalPageSnapshotsPng[i].empty()) ? 5200000 : 457200;
-            const std::int64_t tw = (tx > 1000000) ? 6500000 : 11000000;
-            appendTextShape(slideText.empty() ? (doc.Title() + " - P\xC3\xA1gina " + std::to_string(i + 1)) : slideText,
-                            tx, 457200, tw, 5800000);
+            const std::int64_t tx = hasSnap ? 5200000 : 457200;
+            const std::int64_t tw = hasSnap ? 6500000 : 11200000;
+            if (!slideText.empty()) {
+                appendTextShape(slideText, tx, 457200, tw, 5800000);
+            } else if (!hasSnap) {
+                appendTextShape(doc.Title() + " - P\xC3\xA1gina " + std::to_string(i + 1), tx, 457200, tw, 5800000);
+            }
+            if (!pg.objects.empty() && !hasSnap) {
+                appendObjectsToSlide(pg.objects, pg.EffectiveWidthPt(), pg.EffectiveHeightPt(), 457200, 457200, 11200000, 5800000);
+            }
         }
 
         slideXml << "</p:spTree></p:cSld></p:sld>";

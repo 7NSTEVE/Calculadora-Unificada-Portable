@@ -709,9 +709,7 @@ static LRESULT CALLBACK SmartHelpWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
             DeleteObject(brBg);
 
         RECT rcHeader = { 0, 0, rc.right, HELP_TOP_FIXED_H };
-        HBRUSH brHdr = CreateSolidBrush(CasioTheme::StudioStageBg());
-        FillRect(hdc, &rcHeader, brHdr);
-        DeleteObject(brHdr);
+        CasioTheme::DrawLiquidGlassHeaderStrip(hdc, rcHeader, true);
 
         SetBkMode(hdc, TRANSPARENT);
 
@@ -803,8 +801,8 @@ static LRESULT CALLBACK SmartHelpWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         SetTextColor(hdc, CasioTheme::StudioTextSec());
         DrawTextW(hdc, statPillTxt.c_str(), -1, &rcStatPill, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
-        // Segmented Category Bar
-        CasioTheme::FillRoundRectAA(hdc, rcSegTrack, 9.0f, CasioTheme::StudioTrack(), CasioTheme::StudioBorder(), 1.0f);
+        // Floating Liquid Glass 2.0 Segmented Category Bar
+        CasioTheme::DrawFloatingGlassCapsule(hdc, rcSegTrack, s, -1.0f, false);
         const wchar_t* catLabels[5] = {
             L"Todas (4 Calc + Soft)",
             L"Negra / Blanca (991CW \x00B7 LA X)",

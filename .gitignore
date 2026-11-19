@@ -1,6 +1,9 @@
 # Build and CMake artifacts
 build/
 build-*/
+linux/build-*/
+linux/dist-linux/
+linux/*.tar.gz
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
@@ -39,10 +42,11 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
-# Local runtime captures, INI settings, emulator state, and exported guides
+# Local runtime captures, INI settings, emulator state, audit artifacts, and exported guides
 capturas/
 guias/
 fx991cw_state/
+verification/
 config_unificada.ini
 casio_favoritos.ini
 BACKLOG.zip

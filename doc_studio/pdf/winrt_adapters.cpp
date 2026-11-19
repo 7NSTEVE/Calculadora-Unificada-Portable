@@ -559,8 +559,14 @@ bool DecodeStreamToBgra32ViaWic(IStream* stream, std::vector<std::uint8_t>& outB
 void WinRtPdfRenderer::ClearOpenDocumentCache() {
     RunInMta([]() {
         PdfDocCache::Instance().Clear();
+        // Flush WinRT/COM DLLs (notably Windows.Data.Pdf.dll) cleanly while still
+        // inside the live MTA apartment and outside the OS loader lock, preventing
+        // DXGI_ERROR_INVALID_CALL (0x87a / 2170) during LdrShutdownProcess.
+        CoFreeUnusedLibrariesEx(0, 0);
+        CoFreeUnusedLibrariesEx(0, 0);
     });
     MtaDispatcher::Instance().Shutdown();
+    CoFreeUnusedLibrariesEx(0, 0);
 }
 
 bool WinRtPdfRenderer::GetPageCountAndSize(

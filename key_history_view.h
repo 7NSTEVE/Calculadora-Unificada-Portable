@@ -1132,16 +1132,14 @@ LRESULT CALLBACK HistoryWndProc(HWND hWnd,UINT message,WPARAM wParam,LPARAM lPar
             ClearDockedExplorerHitRects();
         }
 
-        // Cabecera limpia del panel contextual Historial (0..hdrH)
+        // Cabecera Liquid Glass 2.0 del panel contextual Historial (0..hdrH)
         RECT rcHdr = { 0, 0, client.right, hdrH };
-        FillRect(dc, &rcHdr, g_brSidebar);
+        CasioTheme::DrawLiquidGlassHeaderStrip(dc, rcHdr, true);
 
         HPEN penL = CreatePen(PS_SOLID, 1, CasioTheme::StudioBorder());
         HGDIOBJ oPen = SelectObject(dc, penL);
         MoveToEx(dc, 0, 0, nullptr);
         LineTo(dc, 0, client.bottom);
-        MoveToEx(dc, 0, hdrH - 1, nullptr);
-        LineTo(dc, client.right, hdrH - 1);
         SelectObject(dc, oPen);
         DeleteObject(penL);
 
@@ -1161,15 +1159,15 @@ LRESULT CALLBACK HistoryWndProc(HWND hWnd,UINT message,WPARAM wParam,LPARAM lPar
         DeleteObject(hHistTitle);
 
         CasioTheme::DrawStudioButton(dc, g_histQuickBtnClear, L"", g_fontSmall,
-            CasioTheme::BTN_SECONDARY, false, false, 6.0f);
+            CasioTheme::BTN_SECONDARY, false, false, 8.0f);
         CasioTheme::DrawTrashIconGdi(dc, g_histQuickBtnClear, CasioTheme::StudioTextSec());
         CasioTheme::DrawStudioButton(dc, g_histQuickBtnCfg, L"Centro", g_fontSmall,
-            CasioTheme::BTN_SECONDARY, false, false, 6.0f);
+            CasioTheme::BTN_SECONDARY, false, false, 8.0f);
         CasioTheme::DrawStudioButton(dc, g_histQuickBtnClose, L"\u00D7", g_fontBold,
-            CasioTheme::BTN_TOOLBAR_GHOST, false, false, 6.0f);
+            CasioTheme::BTN_TOOLBAR_GHOST, false, false, 8.0f);
 
-        // Selector segmentado limpio de 3 pestanas (Teclas | Capturas | Pasos)
-        CasioTheme::FillRoundRectAA(dc, segOuter, 8.0f, CasioTheme::StudioTrack(), CasioTheme::StudioBorder(), 1.0f);
+        // Selector segmentado flotante Liquid Glass 2.0 de 3 pestanas (Teclas | Capturas | Pasos)
+        CasioTheme::DrawFloatingGlassCapsule(dc, segOuter, scale, -1.0f, false);
         const RECT tabRcs[3] = { tabKeys, tabCaps, tabPlay };
         auto fmtTab = [](const wchar_t* base, size_t count) -> std::wstring {
             return count > 0 ? (std::wstring(base) + L" (" + std::to_wstring(count) + L")") : std::wstring(base);
@@ -1181,7 +1179,7 @@ LRESULT CALLBACK HistoryWndProc(HWND hWnd,UINT message,WPARAM wParam,LPARAM lPar
         };
         for (int t = 0; t < 3; ++t) {
             bool act = (g_historyViewTab == t);
-            CasioTheme::DrawStudioSegmentItem(dc, tabRcs[t], tabTxt[t], act ? g_fontBold : g_fontSmall, act, false, false);
+            CasioTheme::DrawStudioSegmentItem(dc, tabRcs[t], tabTxt[t], act ? g_fontBold : g_fontSmall, act, false, act);
         }
 
         // Vista previa de formula en vivo solo cuando hay expresion activa

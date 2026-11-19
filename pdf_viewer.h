@@ -1986,45 +1986,55 @@ inline void PaintPdfToolbar(PdfViewerState* st, HDC hdc, const RECT& cli) {
     HGDIOBJ oldBmp = SelectObject(memDc, hMem);
 
     RECT bg{ 0, 0, w, h };
-    HBRUSH brSurf = CreateSolidBrush(CasioTheme::StudioSurface());
-    FillRect(memDc, &bg, brSurf);
-    DeleteObject(brSurf);
-
-    HPEN pBorder = CreatePen(PS_SOLID, 1, CasioTheme::StudioBorder());
-    HGDIOBJ oldPen = SelectObject(memDc, pBorder);
-    MoveToEx(memDc, 0, h - 1, nullptr);
-    LineTo(memDc, w, h - 1);
-    SelectObject(memDc, oldPen);
-    DeleteObject(pBorder);
+    CasioTheme::DrawLiquidGlassHeaderStrip(memDc, bg, true);
 
     const float sc = st->uiScale;
+    const int pad = CasioTheme::UiToDevice(4, sc);
+    const float pillR = static_cast<float>(CasioTheme::UiToDevice(14, sc));
+
+    // Apple HIG Liquid Glass 2.0 floating grouped toolbar capsules (never glass-on-glass)
+    RECT grpDocs{
+        st->btnRects[BTN_MANUALS].left - pad, st->btnRects[BTN_MANUALS].top - pad / 2,
+        st->btnRects[BTN_TOPICS].right + pad, st->btnRects[BTN_TOPICS].bottom + pad / 2
+    };
+    RECT grpNav{
+        st->btnRects[BTN_PREV].left - pad, st->btnRects[BTN_PREV].top - pad / 2,
+        st->btnRects[BTN_NEXT].right + pad, st->btnRects[BTN_NEXT].bottom + pad / 2
+    };
+    RECT grpZoom{
+        st->btnRects[BTN_ZOOM_OUT].left - pad, st->btnRects[BTN_ZOOM_OUT].top - pad / 2,
+        st->btnRects[BTN_ZOOM_IN].right + pad, st->btnRects[BTN_ZOOM_IN].bottom + pad / 2
+    };
+    CasioTheme::DrawFloatingGlassCapsule(memDc, grpDocs, 1.0f, -1.0f, false);
+    CasioTheme::DrawFloatingGlassCapsule(memDc, grpNav, 1.0f, -1.0f, false);
+    CasioTheme::DrawFloatingGlassCapsule(memDc, grpZoom, 1.0f, -1.0f, false);
+
     HFONT fUi = CasioTheme::CreateUiFont(CasioTheme::UiToDevice(13, sc), true);
     HFONT fSmall = CasioTheme::CreateUiFont(CasioTheme::UiToDevice(12, sc), false);
 
     auto drawBtn = [&](int id, const std::wstring& lbl, int variant, bool active) {
         CasioTheme::DrawStudioButton(
-            memDc, st->btnRects[id], lbl, fUi, variant, active, st->hoverBtn == id,
-            static_cast<float>(CasioTheme::UiToDevice(7, sc)));
+            memDc, st->btnRects[id], lbl, fUi, variant, active, st->hoverBtn == id, pillR);
     };
 
-    drawBtn(BTN_MANUALS, L"Manuales", CasioTheme::BTN_SECONDARY, false);
-    drawBtn(BTN_OPEN, L"Abrir...", CasioTheme::BTN_SECONDARY, false);
+    drawBtn(BTN_MANUALS, L"Manuales", CasioTheme::BTN_TOOLBAR_GHOST, false);
+    drawBtn(BTN_OPEN, L"Abrir...", CasioTheme::BTN_TOOLBAR_GHOST, false);
 
     if (!st->topics.empty()) {
         wchar_t tbuf[48]{};
         swprintf_s(tbuf, L"Temas (%zu)", st->topics.size());
-        drawBtn(BTN_TOPICS, tbuf, CasioTheme::BTN_VIOLET, false);
+        drawBtn(BTN_TOPICS, tbuf, CasioTheme::BTN_TOOLBAR_GHOST, true);
     } else {
-        drawBtn(BTN_TOPICS, L"Temas", CasioTheme::BTN_GHOST, false);
+        drawBtn(BTN_TOPICS, L"Temas", CasioTheme::BTN_TOOLBAR_GHOST, false);
     }
 
-    drawBtn(BTN_PREV, L"<", CasioTheme::BTN_SECONDARY, false);
-    drawBtn(BTN_NEXT, L">", CasioTheme::BTN_SECONDARY, false);
+    drawBtn(BTN_PREV, L"<", CasioTheme::BTN_TOOLBAR_GHOST, false);
+    drawBtn(BTN_NEXT, L">", CasioTheme::BTN_TOOLBAR_GHOST, false);
 
     // Chrome alrededor del cuadro editable de pagina.
     CasioTheme::FillRoundRectAA(
         memDc, st->editBoxChromeRc,
-        static_cast<float>(CasioTheme::UiToDevice(6, sc)),
+        static_cast<float>(CasioTheme::UiToDevice(7, sc)),
         CasioTheme::StudioInputBg(),
         CasioTheme::StudioBorderStrong(),
         1.0f);
@@ -2040,15 +2050,15 @@ inline void PaintPdfToolbar(PdfViewerState* st, HDC hdc, const RECT& cli) {
     HGDIOBJ oldF = SelectObject(memDc, fSmall);
     DrawTextW(memDc, totalBuf, -1, &st->pageTotalRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-    drawBtn(BTN_ZOOM_OUT, L"-", CasioTheme::BTN_SECONDARY, false);
+    drawBtn(BTN_ZOOM_OUT, L"-", CasioTheme::BTN_TOOLBAR_GHOST, false);
     if (st->fitWidth) {
-        drawBtn(BTN_FIT, L"Ajustar", CasioTheme::BTN_PRIMARY, true);
+        drawBtn(BTN_FIT, L"Ajustar", CasioTheme::BTN_TOOLBAR_GHOST, true);
     } else {
         wchar_t zbuf[32]{};
         swprintf_s(zbuf, L"%d%%", static_cast<int>(std::lround(st->zoomFactor * 100.0f)));
-        drawBtn(BTN_FIT, zbuf, CasioTheme::BTN_SECONDARY, false);
+        drawBtn(BTN_FIT, zbuf, CasioTheme::BTN_TOOLBAR_GHOST, false);
     }
-    drawBtn(BTN_ZOOM_IN, L"+", CasioTheme::BTN_SECONDARY, false);
+    drawBtn(BTN_ZOOM_IN, L"+", CasioTheme::BTN_TOOLBAR_GHOST, false);
     drawBtn(BTN_STUDIO, L"Estudio PDF", CasioTheme::BTN_PRIMARY, false);
 
     if (st->titleBadgeRc.right - st->titleBadgeRc.left > CasioTheme::UiToDevice(80, sc)) {

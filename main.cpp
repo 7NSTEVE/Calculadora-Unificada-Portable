@@ -123,10 +123,22 @@ enum CtrlId : UINT_PTR {
     ID_CMD_CLOSE_APRENDER    = 1067,
     ID_CMD_TOGGLE_THEME      = 1068,
     ID_CMD_OPEN_DOC_STUDIO   = 1069,
+    ID_CMD_SEND_TO_DOC_STUDIO = 1070,
+    ID_CMD_APPEAR_LIGHT      = 1071,
+    ID_CMD_APPEAR_DARK       = 1072,
+    ID_CMD_APPEAR_HC         = 1073,
+    ID_CMD_GLASS_DESIGN      = 1074,
+    ID_CMD_GLASS_BALANCED    = 1075,
+    ID_CMD_GLASS_FROSTED     = 1076,
+    ID_CMD_GLASS_REDUCE_TRANS = 1077,
     ID_CMD_PDF_BASE      = 1100,
     ID_TIMER_TICK      = 2001,
-    ID_TIMER_CAPTURE_OP = 2002
+    ID_TIMER_CAPTURE_OP = 2002,
+    ID_TIMER_AUTO_SHOT  = 2003
 };
+
+static std::wstring g_cliScreenshotOutPath;
+static int g_cliScreenshotTargetKind = 0; // 0=Main, 1=Help, 2=Studio, 3=Settings, 4=Exporter, 5=PdfViewer
 
 enum ViewMode {
     VIEW_ALL_THREE = 0,
@@ -474,6 +486,7 @@ inline void OpenExplorerForIndicator(int calcIdx, int spriteIndex, bool isLit, b
 inline void ShowCalculatorContextMenu(HWND hwndOwner, int clientX, int clientY, int calcIdx, int keyId, int indSpriteIdx, bool indLit, bool isLcdBody, int timelineStepIdx);
 inline void OpenLearningStudioWindow(int initialTab, int calcIdx, int focusKeyId, const std::wstring& searchQuery);
 inline void SyncSecondaryWindowsTheme();
+inline HWND ResolveSecondaryScreenshotTarget(int targetKind);
 inline void ClearTimelineSnapshots();
 inline void RecordTimelineStep(int calcIdx, int keyId);
 inline bool GetTimelinePlayerActiveKey(int calcIdx, int& outKeyId, int& outStepOneBased);
@@ -697,6 +710,19 @@ static void ShowSpanishStudioMenuPopup(HWND hWndOwner, POINT screenPt)
     AppendMenuW(hView, chkFlag(!g_compactSingleMode && IsCompareViewMode(g_viewMode)),  ID_CMD_WORKSPACE_COMPARE, L"Espacio: Comparar modelos");
     AppendMenuW(hView, chkFlag(!g_compactSingleMode && g_learningDrawerOpen),          ID_CMD_TOGGLE_APRENDER, L"Panel lateral: Historial");
     AppendMenuW(hView, chkFlag(CasioTheme::g_studioDarkTheme),                         ID_CMD_TOGGLE_THEME,    L"Tema oscuro (Grafito)");
+    {
+        const auto& gs = CasioTheme::GetActiveGlassSettings();
+        HMENU hAppear = CreatePopupMenu();
+        AppendMenuW(hAppear, chkFlag(gs.mode == UiGlass::AppearanceMode::Light),        ID_CMD_APPEAR_LIGHT,       L"Claro (Apple HIG predeterminado)");
+        AppendMenuW(hAppear, chkFlag(gs.mode == UiGlass::AppearanceMode::Dark),         ID_CMD_APPEAR_DARK,        L"Oscuro (macOS 27 Golden Gate)");
+        AppendMenuW(hAppear, chkFlag(gs.mode == UiGlass::AppearanceMode::HighContrast), ID_CMD_APPEAR_HC,          L"Alto Contraste (WCAG AAA \u00B7 1 px)");
+        AppendMenuW(hAppear, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(hAppear, chkFlag(!gs.reduceTransparency && gs.userOpacitySlider <= 0.20f), ID_CMD_GLASS_DESIGN,      L"Liquid Glass: Design (10% Ultra-Clear)");
+        AppendMenuW(hAppear, chkFlag(!gs.reduceTransparency && gs.userOpacitySlider > 0.20f && gs.userOpacitySlider < 0.70f), ID_CMD_GLASS_BALANCED, L"Liquid Glass: Equilibrado (36%)");
+        AppendMenuW(hAppear, chkFlag(!gs.reduceTransparency && gs.userOpacitySlider >= 0.70f), ID_CMD_GLASS_FROSTED,     L"Liquid Glass: Escarchado (85%)");
+        AppendMenuW(hAppear, chkFlag(gs.reduceTransparency),                                   ID_CMD_GLASS_REDUCE_TRANS,L"Reducir transparencia (Accesibilidad)");
+        AppendMenuW(hView, MF_POPUP, (UINT_PTR)hAppear, L"Apariencia y Liquid Glass 2.0");
+    }
     AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hView, chkFlag(!g_compactSingleMode && g_viewMode == VIEW_ALL_THREE),       ID_BTN_MODE_ALL,   L"Todas las calculadoras (4)\tF6");
     AppendMenuW(hView, chkFlag(!g_compactSingleMode && g_viewMode == VIEW_DUAL_SCIENTIFIC), ID_BTN_MODE_DUAL,  L"Blanca y Gris (2)\tF5");
@@ -756,6 +782,7 @@ static void ShowSpanishStudioMenuPopup(HWND hWndOwner, POINT screenPt)
     AppendMenuW(hStudy, chkFlag(g_shiftAlphaLayerMode), ID_BTN_SHIFT_ALPHA_LAYERS, L"Ver 3 capas (SHIFT / ALPHA) en Inspector\tCtrl+Shift+L");
     AppendMenuW(hStudy, MF_STRING,                      ID_BTN_LEARNING_STUDIO,    L"Centro de estudio CASIO...\tCtrl+Shift+E");
     AppendMenuW(hStudy, MF_STRING,                      ID_CMD_OPEN_DOC_STUDIO,    L"Document Studio (Editor PDF / Lienzo)...");
+    AppendMenuW(hStudy, MF_STRING,                      ID_CMD_SEND_TO_DOC_STUDIO, L"Enviar secuencia actual al Lienzo (Tarjeta CASIO)...");
     AppendMenuW(hStudy, chkFlag(g_teacherHighlightMode), ID_CMD_TEACHER_MODE,      L"Resaltar \u00FAltima tecla pulsada");
     AppendMenuW(hStudy, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hStudy, MF_STRING, ID_CMD_COMPARE_MODELS,    L"Comparador de 3 modelos...");
@@ -835,6 +862,7 @@ static HMENU CreateEmulatorMenuBar()
     AppendMenuW(hTools, MF_STRING, ID_BTN_SHIFT_ALPHA_LAYERS, L"Superponer Capas &SHIFT / ALPHA\tCtrl+Shift+L");
     AppendMenuW(hTools, MF_STRING, ID_BTN_LEARNING_STUDIO,    L"&Centro de Estudio CASIO (6 Pesta\u00F1as)...\tCtrl+Shift+E");
     AppendMenuW(hTools, MF_STRING, ID_CMD_OPEN_DOC_STUDIO,    L"Abrir &Document Studio (Editor PDF / Lienzo)...");
+    AppendMenuW(hTools, MF_STRING, ID_CMD_SEND_TO_DOC_STUDIO, L"Enviar secuencia actual al &Lienzo (Tarjeta CASIO)...");
     AppendMenuW(hTools, MF_STRING, ID_CMD_COMPARE_MODELS,     L"Comparador ClassWiz / ES PLUS / fx-CG50...");
     AppendMenuW(hTools, MF_STRING, ID_CMD_TROUBLESHOOTER,     L"Diagnosticar Pantalla (\u00BFPor qu\u00E9 muestra esto?)...");
     AppendMenuW(hTools, MF_STRING, ID_CMD_CHECKLIST_PRESETS,  L"Checklist Previo, Perfiles y Favoritos...");
@@ -967,6 +995,39 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR lpCmdLine, int nCmdShow)
     UpdateWindow(g_hMainWnd);
 
     std::wstring cmdArgs = lpCmdLine ? lpCmdLine : L"";
+    auto extractCliVal = [&](const std::wstring& prefix) -> std::wstring {
+        const size_t p = cmdArgs.find(prefix);
+        if (p == std::wstring::npos) return L"";
+        size_t s = p + prefix.size();
+        if (s >= cmdArgs.size()) return L"";
+        if (cmdArgs[s] == L'"') {
+            const size_t e = cmdArgs.find(L'"', s + 1);
+            return (e == std::wstring::npos) ? cmdArgs.substr(s + 1) : cmdArgs.substr(s + 1, e - s - 1);
+        }
+        const size_t e = cmdArgs.find(L' ', s);
+        return (e == std::wstring::npos) ? cmdArgs.substr(s) : cmdArgs.substr(s, e - s);
+    };
+
+    const std::wstring cliTheme = extractCliVal(L"--theme=");
+    if (cliTheme == L"dark") {
+        SendMessageW(g_hMainWnd, WM_COMMAND, ID_CMD_APPEAR_DARK, 0);
+    } else if (cliTheme == L"hc" || cliTheme == L"high-contrast") {
+        SendMessageW(g_hMainWnd, WM_COMMAND, ID_CMD_APPEAR_HC, 0);
+    } else if (cliTheme == L"light") {
+        SendMessageW(g_hMainWnd, WM_COMMAND, ID_CMD_APPEAR_LIGHT, 0);
+    }
+
+    const std::wstring cliView = extractCliVal(L"--view=");
+    if (cliView == L"all") SendMessageW(g_hMainWnd, WM_COMMAND, ID_BTN_MODE_ALL, 0);
+    else if (cliView == L"dual") SendMessageW(g_hMainWnd, WM_COMMAND, ID_BTN_MODE_DUAL, 0);
+    else if (cliView == L"white") SendMessageW(g_hMainWnd, WM_COMMAND, ID_BTN_MODE_WHITE, 0);
+    else if (cliView == L"gray") SendMessageW(g_hMainWnd, WM_COMMAND, ID_BTN_MODE_GRAY, 0);
+    else if (cliView == L"cg50") SendMessageW(g_hMainWnd, WM_COMMAND, ID_BTN_MODE_GRAPH, 0);
+    else if (cliView == L"cw2") SendMessageW(g_hMainWnd, WM_COMMAND, ID_BTN_MODE_CW2, 0);
+
+    if (cmdArgs.find(L"--open-history") != std::wstring::npos) {
+        SetLearningDrawerOpen(true);
+    }
     if (cmdArgs.find(L"--compact-gray") != std::wstring::npos) {
         SetCompactVerticalMode(true, 1);
     } else if (cmdArgs.find(L"--compact-cg50") != std::wstring::npos) {
@@ -994,6 +1055,28 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR lpCmdLine, int nCmdShow)
         } else {
             OpenSmartHelpWindow(0);
         }
+    }
+    if (cmdArgs.find(L"--open-help") != std::wstring::npos) {
+        OpenSmartHelpWindow(0);
+        g_cliScreenshotTargetKind = 1;
+    } else if (cmdArgs.find(L"--open-studio") != std::wstring::npos) {
+        OpenLearningStudioWindow(0, -1, -1, L"");
+        g_cliScreenshotTargetKind = 2;
+    } else if (cmdArgs.find(L"--open-settings") != std::wstring::npos) {
+        OpenSettingsWindow();
+        g_cliScreenshotTargetKind = 3;
+    } else if (cmdArgs.find(L"--open-exporter") != std::wstring::npos) {
+        OpenSequenceExporterWindow(true);
+        g_cliScreenshotTargetKind = 4;
+    } else if (cmdArgs.find(L"--open-pdf") != std::wstring::npos) {
+        OpenOfficialPdfManual(g_officialManuals[0].fileName, 1);
+        g_cliScreenshotTargetKind = 5;
+    }
+
+    const std::wstring cliShot = extractCliVal(L"--screenshot-out=");
+    if (!cliShot.empty()) {
+        g_cliScreenshotOutPath = cliShot;
+        SetTimer(g_hMainWnd, ID_TIMER_AUTO_SHOT, 1400, nullptr);
     }
 
     MSG msg = {0};
@@ -1348,6 +1431,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             0, 0, 0, 0, hWnd, nullptr, g_hInst, nullptr);
 
         LoadUnifiedSettingsFromIni();
+        UiGlass::LoadGlassSettings(CasioTheme::g_glassSettings);
+        CasioTheme::g_studioDarkTheme = CasioTheme::g_glassSettings.IsDark();
         SyncStudioThemeBrushes();
         CasioTheme::ApplyDwmDarkTitleBar(hWnd, CasioTheme::g_studioDarkTheme);
         RefreshUiScale(hWnd, true);
@@ -1392,6 +1477,34 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     }
     case WM_TIMER: {
+        if (wParam == ID_TIMER_AUTO_SHOT) {
+            KillTimer(hWnd, ID_TIMER_AUTO_SHOT);
+            HWND targetHwnd = ResolveSecondaryScreenshotTarget(g_cliScreenshotTargetKind);
+            if (!targetHwnd || !IsWindow(targetHwnd)) targetHwnd = hWnd;
+
+            if (!g_cliScreenshotOutPath.empty() && targetHwnd && IsWindow(targetHwnd)) {
+                RedrawWindow(targetHwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+                RECT rc{};
+                GetClientRect(targetHwnd, &rc);
+                const int w = (std::max)(1, static_cast<int>(rc.right - rc.left));
+                const int h = (std::max)(1, static_cast<int>(rc.bottom - rc.top));
+                HDC hdcW = GetDC(targetHwnd);
+                HDC hdcM = CreateCompatibleDC(hdcW);
+                HBITMAP hBmp = CreateCompatibleBitmap(hdcW, w, h);
+                HGDIOBJ oldB = SelectObject(hdcM, hBmp);
+                if (!PrintWindow(targetHwnd, hdcM, PW_CLIENTONLY | PW_RENDERFULLCONTENT)) {
+                    BitBlt(hdcM, 0, 0, w, h, hdcW, 0, 0, SRCCOPY);
+                }
+                GdiFlush();
+                SaveBitmapToPngFile(g_cliScreenshotOutPath.c_str(), hBmp);
+                SelectObject(hdcM, oldB);
+                DeleteObject(hBmp);
+                DeleteDC(hdcM);
+                ReleaseDC(targetHwnd, hdcW);
+            }
+            PostMessageW(hWnd, WM_CLOSE, 0, 0);
+            return 0;
+        }
         if (wParam == ID_TIMER_CAPTURE_OP) {
             KillTimer(hWnd, ID_TIMER_CAPTURE_OP);
             if (g_pendingCaptureCalcIdx >= 0 && g_hCanvasWnd) {
@@ -1536,7 +1649,30 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         if (id == ID_CMD_TOGGLE_THEME) {
-            CasioTheme::g_studioDarkTheme = !CasioTheme::g_studioDarkTheme;
+            CasioTheme::SetStudioAppearanceMode(
+                CasioTheme::g_studioDarkTheme ? UiGlass::AppearanceMode::Light : UiGlass::AppearanceMode::Dark);
+            SyncStudioThemeBrushes();
+            SaveUnifiedSettingsToIni();
+            if (!g_compactSingleMode) {
+                CasioTheme::ApplyDwmDarkTitleBar(hWnd, CasioTheme::g_studioDarkTheme);
+            }
+            InvalidateRect(hWnd, nullptr, TRUE);
+            if (g_hCanvasWnd) InvalidateRect(g_hCanvasWnd, nullptr, TRUE);
+            if (g_hHistoryWnd) InvalidateRect(g_hHistoryWnd, nullptr, TRUE);
+            SyncSecondaryWindowsTheme();
+            return 0;
+        }
+        if (id >= ID_CMD_APPEAR_LIGHT && id <= ID_CMD_GLASS_REDUCE_TRANS) {
+            if (id == ID_CMD_APPEAR_LIGHT) CasioTheme::SetStudioAppearanceMode(UiGlass::AppearanceMode::Light);
+            else if (id == ID_CMD_APPEAR_DARK) CasioTheme::SetStudioAppearanceMode(UiGlass::AppearanceMode::Dark);
+            else if (id == ID_CMD_APPEAR_HC) CasioTheme::SetStudioAppearanceMode(UiGlass::AppearanceMode::HighContrast);
+            else if (id == ID_CMD_GLASS_DESIGN) CasioTheme::SetStudioGlassOpacity(0.10f, false);
+            else if (id == ID_CMD_GLASS_BALANCED) CasioTheme::SetStudioGlassOpacity(0.36f, false);
+            else if (id == ID_CMD_GLASS_FROSTED) CasioTheme::SetStudioGlassOpacity(0.85f, false);
+            else if (id == ID_CMD_GLASS_REDUCE_TRANS) {
+                CasioTheme::SetStudioGlassOpacity(CasioTheme::g_glassSettings.userOpacitySlider,
+                    !CasioTheme::g_glassSettings.reduceTransparency);
+            }
             SyncStudioThemeBrushes();
             SaveUnifiedSettingsToIni();
             if (!g_compactSingleMode) {
@@ -1647,6 +1783,20 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         if (id == ID_CMD_OPEN_DOC_STUDIO) {
             LaunchDocumentStudio(g_hMainWnd);
+            return 0;
+        }
+        if (id == ID_CMD_SEND_TO_DOC_STUDIO) {
+            const wchar_t* modelW = (g_activeCalcIdx == 0) ? L"fx-570LA X"
+                : (g_activeCalcIdx == 1) ? L"fx-570VN PLUS"
+                : (g_activeCalcIdx == 2) ? L"fx-CG50"
+                : L"fx-991CW";
+            std::wstring livePreview = BuildLiveHistoryLatexPreview(g_activeCalcIdx);
+            for (wchar_t& ch : livePreview) {
+                if (ch == L'"' || ch == L'|' || ch == L'\r' || ch == L'\n') ch = L' ';
+            }
+            if (livePreview.empty()) livePreview = L"2 + 3";
+            const std::wstring args = L"--mode canvas --calc-card \"" + std::wstring(modelW) + L"|" + livePreview + L"|" + livePreview + L"\"";
+            LaunchDocumentStudio(g_hMainWnd, args);
             return 0;
         }
         if (id == ID_CMD_COMPARE_MODELS) {
@@ -2502,7 +2652,7 @@ inline StudioToolbarLayout ComputeStudioToolbarLayout(
 
     int minLeft = 12;
     if (!tl.ultraNarrow) {
-        tl.rBrand = { 18, 12, 76, 40 };
+        tl.rBrand = { 16, 12, 96, 40 };
         minLeft = tl.rBrand.right + 12;
     }
 
@@ -3512,7 +3662,6 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
             CasioTheme::DrawStudioAtmosphericBackdrop(hdcMem, rc);
         }
 
-        const int barH = GetCanvasToolbarH();
         const float cScale = g_compactSingleMode ? 1.0f : GetCanvasUiScale(rc.right);
         if (!g_compactSingleMode) CasioTheme::g_canvasUiScale = cScale;
         const RECT rcLogical = CasioTheme::DeviceRectToLogical(rc, cScale);
@@ -3619,35 +3768,38 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                 }
             }
 
-            // 2. Top bar, segmented controls, and stage chrome in logical UI coordinates
+            // 2. Top bar, floating Liquid Glass 2.0 capsules, and stage chrome in logical UI coordinates
             CasioTheme::UiScaleScope scaleScope(hdcMem, cScale);
             SetBkMode(hdcMem, TRANSPARENT);
 
+            // Soft atmospheric Liquid Glass 2.0 header band (ScrollEdgeEffectStyle.soft, no heavy opaque slab)
             RECT rcBar = { 0, 0, rcLogical.right, STUDIO_TOOLBAR_H };
-            HBRUSH brBar = CreateSolidBrush(CasioTheme::StudioSurface());
-            FillRect(hdcMem, &rcBar, brBar);
-            DeleteObject(brBar);
-
-            HPEN penDiv = CreatePen(PS_SOLID, 1, CasioTheme::StudioBorder());
-            HGDIOBJ oldPen = SelectObject(hdcMem, penDiv);
-            MoveToEx(hdcMem, 0, STUDIO_TOOLBAR_H - 1, nullptr);
-            LineTo(hdcMem, rcLogical.right, STUDIO_TOOLBAR_H - 1);
-            SelectObject(hdcMem, oldPen);
-            DeleteObject(penDiv);
+            CasioTheme::DrawLiquidGlassHeaderStrip(hdcMem, rcBar, false);
 
             if (tl.rBrand.right > tl.rBrand.left) {
+                {
+                    Gdiplus::Graphics gOrb(hdcMem);
+                    const auto palB = CasioTheme::ActiveGlassPalette();
+                    UiGlass::DrawAquaVitreousOrb(gOrb,
+                        static_cast<float>(tl.rBrand.left) + 7.0f,
+                        static_cast<float>(tl.rBrand.top + tl.rBrand.bottom) * 0.5f,
+                        5.2f,
+                        UiGlass::ToGdip(palB.accentBlue, 245),
+                        false,
+                        CasioTheme::GetActiveGlassSettings().IsDark());
+                }
                 HFONT hBrandF = CasioTheme::CreateUiFont(15, true);
                 HGDIOBJ oldBF = SelectObject(hdcMem, hBrandF);
                 SetTextColor(hdcMem, CasioTheme::StudioText());
-                DrawTextW(hdcMem, L"CASIO", -1, const_cast<RECT*>(&tl.rBrand),
+                RECT rBrandTxt = { tl.rBrand.left + 18, tl.rBrand.top, tl.rBrand.right, tl.rBrand.bottom };
+                DrawTextW(hdcMem, L"CASIO", -1, &rBrandTxt,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                 SelectObject(hdcMem, oldBF);
                 DeleteObject(hBrandF);
             }
 
-            // Segmented workspace switcher: [ Calculadora | Comparar ]
-            CasioTheme::FillRoundRectAA(hdcMem, tl.rWorkspaceGrp, 8.0f,
-                CasioTheme::StudioTrack(), CasioTheme::StudioBorder(), 1.0f);
+            // Floating Liquid Glass 2.0 Segmented Workspace Switcher: [ Calculadora | Comparar ]
+            CasioTheme::DrawFloatingGlassCapsule(hdcMem, tl.rWorkspaceGrp, cScale, -1.0f, false);
             CasioTheme::DrawStudioSegmentItem(hdcMem, tl.rWorkspacePills[0],
                 tl.ultraNarrow ? L"Calc." : L"Calculadora",
                 !compareMode ? g_fontBold : g_fontSmall,
@@ -3657,25 +3809,33 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                 compareMode ? g_fontBold : g_fontSmall,
                 compareMode, (g_canvasHoverBtnId == ID_CMD_WORKSPACE_COMPARE), true);
 
-            // Restrained right toolbar cluster: [ (% zoom) | Historial | Exportar | Ayuda | ... ]
+            // Floating Liquid Glass 2.0 Right Utility Cluster: [ (% zoom) | Historial | Exportar | Ayuda | ... ]
+            {
+                LONG utilLeft = tl.rAprender.left;
+                if (tl.rZoomReset.right > tl.rZoomReset.left) {
+                    utilLeft = (std::min)(utilLeft, tl.rZoomReset.left);
+                }
+                RECT rUtilCapsule = { utilLeft - 4, 9, tl.rMenu.right + 4, 43 };
+                CasioTheme::DrawFloatingGlassCapsule(hdcMem, rUtilCapsule, cScale, -1.0f, false);
+            }
             if (tl.rZoomReset.right > tl.rZoomReset.left) {
                 const int zPct = static_cast<int>(std::lround(g_userZoomFactor * 100.0));
                 const std::wstring zLbl = std::to_wstring(zPct) + L"% \u00D7";
                 CasioTheme::DrawStudioButton(hdcMem, tl.rZoomReset, zLbl, g_fontSmall,
-                    CasioTheme::BTN_TOOLBAR_GHOST, false, (g_canvasHoverBtnId == ID_BTN_ZOOM_RESET), 7.0f);
+                    CasioTheme::BTN_TOOLBAR_GHOST, false, (g_canvasHoverBtnId == ID_BTN_ZOOM_RESET), 14.0f);
             }
             CasioTheme::DrawStudioButton(hdcMem, tl.rAprender, L"Historial",
                 g_learningDrawerOpen ? g_fontBold : g_fontSmall,
                 CasioTheme::BTN_TOOLBAR_GHOST, g_learningDrawerOpen,
-                (g_canvasHoverBtnId == ID_CMD_TOGGLE_APRENDER), 7.0f);
+                (g_canvasHoverBtnId == ID_CMD_TOGGLE_APRENDER), 14.0f);
             if (tl.rGuia.right > tl.rGuia.left) {
                 CasioTheme::DrawStudioButton(hdcMem, tl.rGuia, L"Exportar", g_fontSmall,
-                    CasioTheme::BTN_TOOLBAR_GHOST, false, (g_canvasHoverBtnId == ID_CMD_EXPORTER), 7.0f);
+                    CasioTheme::BTN_TOOLBAR_GHOST, false, (g_canvasHoverBtnId == ID_CMD_EXPORTER), 14.0f);
             }
             CasioTheme::DrawStudioButton(hdcMem, tl.rHelp, L"Ayuda", g_fontSmall,
-                CasioTheme::BTN_TOOLBAR_GHOST, false, (g_canvasHoverBtnId == ID_BTN_SMART_HELP), 7.0f);
+                CasioTheme::BTN_TOOLBAR_GHOST, false, (g_canvasHoverBtnId == ID_BTN_SMART_HELP), 14.0f);
             CasioTheme::DrawStudioButton(hdcMem, tl.rMenu, L"\u2022\u2022\u2022", g_fontBold,
-                CasioTheme::BTN_TOOLBAR_GHOST, false, (g_canvasHoverBtnId == ID_CMD_STUDIO_MENU), 7.0f);
+                CasioTheme::BTN_TOOLBAR_GHOST, false, (g_canvasHoverBtnId == ID_CMD_STUDIO_MENU), 14.0f);
 
             auto drawQuickPair = [&](int idx, const RECT& rComp, const RECT& rPin) {
                 if (idx < 0 || idx > 3) return;
@@ -3685,13 +3845,13 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                 const bool compHov = (g_canvasHoverBtnId == ID_QUICK_COMPACT_BASE + idx);
                 const bool pinHov  = (g_canvasHoverBtnId == ID_QUICK_PIN_BASE + idx);
 
-                CasioTheme::FillRoundRectAA(hdcMem, rComp, 5.0f,
+                CasioTheme::FillRoundRectAA(hdcMem, rComp, 6.0f,
                     compHov ? CasioTheme::StudioTrack() : CasioTheme::StudioSurface(),
                     compHov ? CasioTheme::StudioAccent() : CasioTheme::StudioBorder(), 1.0f);
                 DrawCompactQuickIconGdi(hdcMem, rComp,
                     compHov ? CasioTheme::StudioAccentText() : CasioTheme::StudioTextSec());
 
-                CasioTheme::FillRoundRectAA(hdcMem, rPin, 5.0f,
+                CasioTheme::FillRoundRectAA(hdcMem, rPin, 6.0f,
                     g_alwaysOnTop ? CasioTheme::StudioAccentSoft()
                         : (pinHov ? CasioTheme::StudioTrack() : CasioTheme::StudioSurface()),
                     (g_alwaysOnTop || pinHov) ? CasioTheme::StudioAccent() : CasioTheme::StudioBorder(), 1.0f);
@@ -3701,8 +3861,8 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
             };
 
             if (compareMode) {
-                CasioTheme::FillRoundRectAA(hdcMem, tl.rSubCompareGrp, 8.0f,
-                    CasioTheme::StudioTrack(), CasioTheme::StudioBorder(), 1.0f);
+                // Floating Liquid Glass 2.0 Compare Sub-Mode Capsule
+                CasioTheme::DrawFloatingGlassCapsule(hdcMem, tl.rSubCompareGrp, cScale, -1.0f, false);
                 CasioTheme::DrawStudioSegmentItem(hdcMem, tl.rSubComparePills[0],
                     L"Blanca + Gris",
                     g_viewMode == VIEW_DUAL_SCIENTIFIC ? g_fontBold : g_fontSmall,
@@ -3756,7 +3916,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 
                     if (act) {
                         CasioTheme::DrawModernPill(hdcMem, rBadge, CasioTheme::StudioAccentSoft(),
-                            CasioTheme::StudioBorderStrong(), CasioTheme::StudioAccentText(), L"Activa", g_fontSmall, 5.0f);
+                            CasioTheme::StudioBorderStrong(), CasioTheme::StudioAccentText(), L"Activa", g_fontSmall, 8.0f);
                     }
                 };
                 for (int i = 0; i < 3; ++i) {
@@ -3766,7 +3926,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                     drawFloatingHeader(3, g_cw2ViewportRect);
                 }
             } else {
-                // Solo Calculadora: clean understated model caption top-left + compact bottom dock
+                // Solo Calculadora: clean understated model caption top-left + floating Liquid Glass bottom dock
                 int soloIdx = IsCw2Visible() ? 3 : (g_nativeCalcs[2].isVisible ? 2 : (g_nativeCalcs[1].isVisible ? 1 : 0));
                 const RECT vpPhys = (soloIdx == 3) ? g_cw2ViewportRect : g_nativeCalcs[soloIdx].viewportRect;
                 const RECT vpLog = CasioTheme::DeviceRectToLogical(vpPhys, cScale);
@@ -3811,8 +3971,7 @@ LRESULT CALLBACK CanvasWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
                 }
 
                 if (tl.rDockOuter.right > tl.rDockOuter.left) {
-                    CasioTheme::FillRoundRectAA(hdcMem, tl.rDockOuter, 8.0f,
-                        CasioTheme::StudioTrack(), CasioTheme::StudioBorder(), 1.0f);
+                    CasioTheme::DrawFloatingGlassCapsule(hdcMem, tl.rDockOuter, cScale, -1.0f, false);
                     static const wchar_t* kDockWide[4]  = { L"fx-991CW", L"fx-570LA X", L"fx-570VN+", L"fx-CG50" };
                     static const wchar_t* kDockShort[4] = { L"991CW", L"Blanca", L"Gris", L"CG50" };
                     const wchar_t** dockLbls = (rcLogical.right < 520) ? kDockShort : kDockWide;
@@ -4965,4 +5124,14 @@ inline void SyncSecondaryWindowsTheme()
         InvalidateRect(g_hStudioWnd, nullptr, TRUE);
     }
     SyncPdfViewerTheme();
+}
+
+inline HWND ResolveSecondaryScreenshotTarget(int targetKind)
+{
+    if (targetKind == 1 && g_hSmartHelpWnd && IsWindow(g_hSmartHelpWnd)) return g_hSmartHelpWnd;
+    if (targetKind == 2 && g_hStudioWnd && IsWindow(g_hStudioWnd)) return g_hStudioWnd;
+    if (targetKind == 3 && g_hwndSettings && IsWindow(g_hwndSettings)) return g_hwndSettings;
+    if (targetKind == 4 && g_hwndExporter && IsWindow(g_hwndExporter)) return g_hwndExporter;
+    if (targetKind == 5 && PdfViewerUi::g_hPdfViewerWnd && IsWindow(PdfViewerUi::g_hPdfViewerWnd)) return PdfViewerUi::g_hPdfViewerWnd;
+    return nullptr;
 }

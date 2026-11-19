@@ -68,12 +68,46 @@ public:
     void RebuildCanvasIndex();
 
     // Text Search across pages (extracted PDF text, OCR text, and TextBox annotations)
-    std::vector<SearchMatch> SearchText(const std::string& queryUtf8, bool caseSensitive = false) const;
+    std::vector<SearchMatch> SearchText(
+        const std::string& queryUtf8,
+        bool caseSensitive = false,
+        bool accentInsensitive = false) const;
 
     // Direct page object helpers
     bool AddPageObject(std::size_t pageIdx, AnnotationObject obj);
     bool RemovePageObject(std::size_t pageIdx, std::uint64_t id, AnnotationObject* outRemoved = nullptr);
     AnnotationObject* FindPageObjectMutable(std::size_t pageIdx, std::uint64_t id);
+
+    // Layer management (shared across Windows & Linux, serialized in .cudoc)
+    const std::vector<LayerModel>& Layers() const noexcept { return layers_; }
+    void SetLayers(std::vector<LayerModel> layers);
+    std::uint64_t ActiveLayerId() const noexcept { return activeLayerId_; }
+    void SetActiveLayerId(std::uint64_t layerId) noexcept { activeLayerId_ = layerId; ++revision_; }
+    std::uint64_t AddLayer(const std::string& nameUtf8);
+    bool RemoveLayer(std::uint64_t layerId);
+    bool SetLayerProperties(std::uint64_t layerId, bool visible, bool locked, bool includeInExport, double opacity);
+    bool MoveLayer(std::size_t fromIdx, std::size_t toIdx);
+    const LayerModel* FindLayer(std::uint64_t layerId) const noexcept;
+    bool IsLayerVisible(std::uint64_t layerId) const noexcept;
+    bool IsLayerLocked(std::uint64_t layerId) const noexcept;
+    bool IsLayerExportable(std::uint64_t layerId) const noexcept;
+
+    // Bidirectional PDF <-> Canvas InkLinks & Pinch-to-Collapse page ranges
+    const std::vector<InkLink>& InkLinks() const noexcept { return inkLinks_; }
+    void SetInkLinks(std::vector<InkLink> links) { inkLinks_ = std::move(links); ++revision_; }
+    std::uint64_t AddInkLink(InkLink link);
+    bool RemoveInkLink(std::uint64_t linkId);
+
+    const std::vector<CollapsedPageRange>& CollapsedRanges() const noexcept { return collapsedRanges_; }
+    void SetCollapsedRanges(std::vector<CollapsedPageRange> ranges) { collapsedRanges_ = std::move(ranges); ++revision_; }
+    void ToggleCollapsedRange(int startPage0, int endPage0);
+    bool IsPageCollapsed(int pageIndex0) const noexcept;
+
+    // Hierarchical Bookmarks / Outlines
+    const std::vector<DocumentBookmark>& Bookmarks() const noexcept { return bookmarks_; }
+    void SetBookmarks(std::vector<DocumentBookmark> bms) { bookmarks_ = std::move(bms); ++revision_; }
+    std::uint64_t AddBookmark(std::string titleUtf8, std::size_t pageIndex, double worldY = 0.0, int level = 0);
+    bool RemoveBookmark(std::uint64_t bookmarkId);
 
 private:
     DocumentMode mode_ = DocumentMode::PaginatedPdf;
@@ -85,9 +119,17 @@ private:
     std::uint64_t nextPageId_ = 0;
     std::uint64_t nextZOrder_ = 0;
     std::uint64_t nextAssetSeq_ = 0;
+    std::uint64_t nextLayerId_ = 1;
+    std::uint64_t nextLinkId_ = 0;
+    std::uint64_t nextBookmarkId_ = 0;
+    std::uint64_t activeLayerId_ = 1;
 
     std::vector<PageModel> pages_;
     PageLayout layout_;
+    std::vector<LayerModel> layers_{ LayerModel{} };
+    std::vector<InkLink> inkLinks_;
+    std::vector<CollapsedPageRange> collapsedRanges_;
+    std::vector<DocumentBookmark> bookmarks_;
 
     PaperPattern canvasBg_ = PaperPattern::Grid;
     std::vector<AnnotationObject> canvasObjects_;
@@ -96,5 +138,8 @@ private:
 
     std::unordered_map<std::string, std::vector<std::uint8_t>> assets_;
 };
+
+// Shared Unicode case-folding + optional Latin accent stripping for Full-Text Vault indexing
+std::string FoldUtf8ForSearch(const std::string& utf8, bool caseSensitive = false, bool accentInsensitive = true);
 
 } // namespace DocStudio

@@ -15,6 +15,7 @@ struct CanvasPdfExportOptions {
     double pageHeightPt = 842.0; // A4 height when paginated
     bool hasCustomRegion = false;
     DocRect customRegionWorld{};
+    std::size_t maxPages = 0;    // 0 = sin tope artificial de 200 paginas
 };
 
 class PdfWriter {

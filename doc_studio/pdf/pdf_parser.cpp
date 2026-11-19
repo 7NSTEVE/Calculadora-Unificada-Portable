@@ -5,10 +5,12 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <sstream>
 #include <unordered_set>
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -17,6 +19,13 @@
 #endif
 #include <windows.h>
 #include <bcrypt.h>
+#else
+#include <openssl/evp.h>
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace DocStudio {
 
@@ -30,6 +39,7 @@ constexpr std::uint8_t kPdfStdPadding[32] = {
 };
 
 bool ComputeMd5(const std::uint8_t* data, std::size_t len, std::uint8_t out16[16]) {
+#ifdef _WIN32
     BCRYPT_ALG_HANDLE hAlg = nullptr;
     BCRYPT_HASH_HANDLE hHash = nullptr;
     bool ok = false;
@@ -45,6 +55,17 @@ bool ComputeMd5(const std::uint8_t* data, std::size_t len, std::uint8_t out16[16
         BCryptCloseAlgorithmProvider(hAlg, 0);
     }
     return ok;
+#else
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) return false;
+    unsigned int outLen = 0;
+    const bool ok = (EVP_DigestInit_ex(ctx, EVP_md5(), nullptr) == 1) &&
+                    (len == 0 || EVP_DigestUpdate(ctx, data, len) == 1) &&
+                    (EVP_DigestFinal_ex(ctx, out16, &outLen) == 1) &&
+                    (outLen == 16);
+    EVP_MD_CTX_free(ctx);
+    return ok;
+#endif
 }
 
 bool Rc4Crypt(const std::uint8_t* key, std::size_t keyLen,
@@ -87,6 +108,7 @@ bool Aes128CbcDecrypt(const std::uint8_t* key16,
         return true;
     }
 
+#ifdef _WIN32
     BCRYPT_ALG_HANDLE hAlg = nullptr;
     BCRYPT_KEY_HANDLE hKey = nullptr;
     bool ok = false;
@@ -125,6 +147,23 @@ bool Aes128CbcDecrypt(const std::uint8_t* key16,
         BCryptCloseAlgorithmProvider(hAlg, 0);
     }
     return ok;
+#else
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return false;
+    out.resize((len - 16) + 16);
+    int outLen1 = 0;
+    int outLen2 = 0;
+    const bool ok = (EVP_DecryptInit_ex(ctx, EVP_aes_128_cbc(), nullptr, key16, in) == 1) &&
+                    (EVP_DecryptUpdate(ctx, out.data(), &outLen1, in + 16, static_cast<int>(len - 16)) == 1) &&
+                    (EVP_DecryptFinal_ex(ctx, out.data() + outLen1, &outLen2) == 1);
+    EVP_CIPHER_CTX_free(ctx);
+    if (ok && outLen1 >= 0 && outLen2 >= 0) {
+        out.resize(static_cast<std::size_t>(outLen1 + outLen2));
+        return true;
+    }
+    out.clear();
+    return false;
+#endif
 }
 
 inline bool IsPdfWhitespace(std::uint8_t c) noexcept {
@@ -743,6 +782,7 @@ std::string NormalizeLigaturesUtf8(const std::string& inUtf8) {
 }
 
 bool PdfDocument::LoadFromFile(const std::wstring& path, std::string* outErr) {
+#ifdef _WIN32
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) {
         if (outErr) *outErr = "No se pudo abrir archivo PDF (WinError " + std::to_string(GetLastError()) + ").";
@@ -768,6 +808,40 @@ bool PdfDocument::LoadFromFile(const std::wstring& path, std::string* outErr) {
     }
     CloseHandle(hFile);
     return LoadFromBytes(std::move(bytes), outErr);
+#else
+    const std::string utf8Path = WideToUtf8(path);
+    const int fd = ::open(utf8Path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        if (outErr) *outErr = "No se pudo abrir archivo PDF (errno " + std::to_string(errno) + ").";
+        return false;
+    }
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || st.st_size < 8 || st.st_size > 512ll * 1024ll * 1024ll) {
+        ::close(fd);
+        if (outErr) *outErr = "Tama\xC3\xB1o de archivo PDF inv\xC3\xA1lido.";
+        return false;
+    }
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(st.st_size));
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        const std::size_t chunk = (std::min<std::size_t>)(bytes.size() - offset, 4u * 1024u * 1024u);
+        const ssize_t readNow = ::read(fd, bytes.data() + offset, chunk);
+        if (readNow < 0) {
+            if (errno == EINTR) continue;
+            ::close(fd);
+            if (outErr) *outErr = "Error leyendo archivo PDF.";
+            return false;
+        }
+        if (readNow == 0) {
+            ::close(fd);
+            if (outErr) *outErr = "Error leyendo archivo PDF (EOF inesperado).";
+            return false;
+        }
+        offset += static_cast<std::size_t>(readNow);
+    }
+    ::close(fd);
+    return LoadFromBytes(std::move(bytes), outErr);
+#endif
 }
 
 bool PdfDocument::LoadFromBytes(std::vector<std::uint8_t> bytes, std::string* outErr) {
@@ -1432,6 +1506,21 @@ bool PdfDocument::PopulateDocumentModel(
     doc.ResetToBlank(DocumentMode::PaginatedPdf);
     doc.MutablePages().clear();
 
+    std::string sourceAssetKey;
+    if (!data_.empty()) {
+        std::uint64_t h = 14695981039346656037ull;
+        for (std::uint8_t b : data_) {
+            h ^= b;
+            h *= 1099511628211ull;
+        }
+        char hex[32]{};
+        std::snprintf(hex, sizeof(hex), "src_pdf_%016llx", static_cast<unsigned long long>(h));
+        sourceAssetKey = hex;
+        if (!doc.FindAsset(sourceAssetKey)) {
+            doc.SetNamedAsset(sourceAssetKey, data_);
+        }
+    }
+
     for (const auto& pi : pages_) {
         PageModel pm;
         pm.pageId = doc.AllocatePageId();
@@ -1442,6 +1531,7 @@ bool PdfDocument::PopulateDocumentModel(
         pm.background = PaperPattern::Plain;
         pm.hasPdfSource = true;
         pm.sourcePdfPathUtf8 = sourcePathUtf8;
+        pm.sourcePdfAssetKey = sourceAssetKey;
         pm.sourcePageIndex0 = static_cast<int>(pi.pageIndex0);
         pm.extractedTextUtf8 = pi.extractedTextUtf8;
         doc.MutablePages().push_back(std::move(pm));

@@ -1743,18 +1743,9 @@ inline LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         RECT rcOpt[3], rcChk[5], rcTestBtn, rcExpBtn, rcSaveBtn;
         ComputeSettingsLayout(rc.right, rcOpt, rcChk, rcTestBtn, rcExpBtn, rcSaveBtn);
 
-        // Header stage
+        // Header stage Liquid Glass 2.0
         RECT rcHdr = { 0, 0, rc.right, 60 };
-        HBRUSH hHdr = CreateSolidBrush(CasioTheme::StudioStageBg());
-        FillRect(memDC, &rcHdr, hHdr);
-        DeleteObject(hHdr);
-
-        HPEN hHdrDiv = CreatePen(PS_SOLID, 1, CasioTheme::StudioBorder());
-        HGDIOBJ oldPen = SelectObject(memDC, hHdrDiv);
-        MoveToEx(memDC, 0, 59, nullptr);
-        LineTo(memDC, rc.right, 59);
-        SelectObject(memDC, oldPen);
-        DeleteObject(hHdrDiv);
+        CasioTheme::DrawLiquidGlassHeaderStrip(memDC, rcHdr, true);
 
         RECT rcTitle = { 24, 10, rc.right - 24, 52 };
         DrawLatexRichText(
@@ -2030,7 +2021,7 @@ inline ExporterLayout ComputeExporterLayout(int cw, int ch) {
     int annotY1 = dockTop + 14;
     int annotY2 = dockTop + 48;
     int trackLeft = 26;
-    int trackRight = (std::min)(364, w - 650);
+    int trackRight = (std::min)(352, w - 664);
     L.rcAnnotSegTrack = { trackLeft, annotY1, trackRight, annotY2 };
     int aw = (trackRight - trackLeft - 20) / 7;
     for (int i = 0; i < 7; ++i) {
@@ -2043,8 +2034,8 @@ inline ExporterLayout ComputeExporterLayout(int cw, int ch) {
         L.rcInkSwatch[i] = { swX + i * 20, swCy - 9, swX + i * 20 + 18, swCy + 9 };
     }
     int actLeft = swX + 82;
-    L.rcBtnUndoAnnot  = { actLeft, annotY1, actLeft + 62, annotY2 };
-    L.rcBtnClearAnnot = { actLeft + 66, annotY1, actLeft + 116, annotY2 };
+    L.rcBtnUndoAnnot  = { actLeft, annotY1, actLeft + 66, annotY2 };
+    L.rcBtnClearAnnot = { actLeft + 70, annotY1, actLeft + 130, annotY2 };
 
     // Dock Right: Action cluster
     int btnY1 = dockTop + 12;
@@ -2702,17 +2693,9 @@ inline LRESULT CALLBACK SequenceExporterWndProc(HWND hwnd, UINT msg, WPARAM wPar
         ExporterLayout L = ComputeExporterLayout(rc.right, rc.bottom);
         LatexValidationResult latexVal = ValidateLatexRichText(g_expTitleText + L"\n" + g_expNotesText);
 
-        // Header stage
+        // Header stage Liquid Glass 2.0
         RECT rcHdr = { 0, 0, rc.right, 44 };
-        HBRUSH hHdr = CreateSolidBrush(CasioTheme::StudioStageBg());
-        FillRect(memDC, &rcHdr, hHdr);
-        DeleteObject(hHdr);
-        HPEN hHdrDiv = CreatePen(PS_SOLID, 1, CasioTheme::StudioBorder());
-        HGDIOBJ op = SelectObject(memDC, hHdrDiv);
-        MoveToEx(memDC, 0, 43, nullptr);
-        LineTo(memDC, rc.right, 43);
-        SelectObject(memDC, op);
-        DeleteObject(hHdrDiv);
+        CasioTheme::DrawLiquidGlassHeaderStrip(memDC, rcHdr, true);
 
         RECT rcHdrTxt = { 18, 4, rc.right - 220, 40 };
         DrawLatexRichText(
@@ -2796,8 +2779,8 @@ inline LRESULT CALLBACK SequenceExporterWndProc(HWND hwnd, UINT msg, WPARAM wPar
         CasioTheme::DrawStudioButton(memDC, L.rcBtnEquivModel, L"Equiv. Modelo", hMetaF, CasioTheme::BTN_VIOLET,
                                      false, PtInRect(&L.rcBtnEquivModel, g_expHoverPt) != FALSE, 7.0f);
 
-        // Segmented Theme Control (Claro | Oscuro)
-        CasioTheme::FillRoundRectAA(memDC, L.rcThemeSegTrack, 8.0f, CasioTheme::StudioTrack(), CasioTheme::StudioBorder(), 1.0f);
+        // Floating Liquid Glass 2.0 Segmented Theme Control (Claro | Oscuro)
+        CasioTheme::DrawFloatingGlassCapsule(memDC, L.rcThemeSegTrack, s, -1.0f, false);
         const wchar_t* themeLabels[2] = { L"Claro", L"Oscuro" };
         for (int i = 0; i < 2; ++i) {
             bool act = (g_exportSheetLightTheme == (i == 0));
@@ -2805,8 +2788,8 @@ inline LRESULT CALLBACK SequenceExporterWndProc(HWND hwnd, UINT msg, WPARAM wPar
             CasioTheme::DrawStudioSegmentItem(memDC, L.rcThemeSeg[i], themeLabels[i], act ? hMetaF : hSmallF, act, hov, act);
         }
 
-        // Row 2: 4-Segment Format Bar + 5 Granular Toggle Chips
-        CasioTheme::FillRoundRectAA(memDC, L.rcFmtSegTrack, 8.0f, CasioTheme::StudioTrack(), CasioTheme::StudioBorder(), 1.0f);
+        // Row 2: Floating Liquid Glass 2.0 4-Segment Format Bar + 5 Granular Toggle Chips
+        CasioTheme::DrawFloatingGlassCapsule(memDC, L.rcFmtSegTrack, s, -1.0f, false);
         const wchar_t* fmtLabels[4] = {
             L"Explicada",
             L"R\u00E1pida",
@@ -2881,10 +2864,10 @@ inline LRESULT CALLBACK SequenceExporterWndProc(HWND hwnd, UINT msg, WPARAM wPar
             DeleteObject(hSheet);
         }
 
-        // Bottom Dock Card
-        CasioTheme::FillRoundRectAA(memDC, L.rcDockCard, 10.0f, CasioTheme::StudioSurface(), CasioTheme::StudioBorder(), 1.0f);
+        // Bottom Dock Card + Floating Liquid Glass 2.0 Annotator Bar
+        CasioTheme::FillRoundRectAA(memDC, L.rcDockCard, 12.0f, CasioTheme::StudioSurface(), CasioTheme::StudioBorder(), 1.0f);
 
-        CasioTheme::FillRoundRectAA(memDC, L.rcAnnotSegTrack, 8.0f, CasioTheme::StudioTrack(), CasioTheme::StudioBorder(), 1.0f);
+        CasioTheme::DrawFloatingGlassCapsule(memDC, L.rcAnnotSegTrack, s, -1.0f, false);
         const wchar_t* annotShort[7] = { L"Off", L"L\u00E1piz", L"Texto", L"Flecha", L"C\u00EDrc.", L"Marco", L"#N" };
         for (int i = 0; i < 7; ++i) {
             bool act = (g_expAnnotTool == i);
@@ -2894,29 +2877,26 @@ inline LRESULT CALLBACK SequenceExporterWndProc(HWND hwnd, UINT msg, WPARAM wPar
             } else {
                 const COLORREF ink = GetExpAnnotInkColor();
                 const COLORREF pillFill = CasioTheme::g_studioDarkTheme ? RGB(44, 34, 40) : RGB(248, 240, 242);
-                CasioTheme::FillRoundRectAA(memDC, L.rcAnnotSeg[i], 6.0f, pillFill, ink, 1.2f);
+                CasioTheme::FillRoundRectAA(memDC, L.rcAnnotSeg[i], 12.0f, pillFill, ink, 1.2f);
                 SelectObject(memDC, hMetaF);
                 SetTextColor(memDC, CasioTheme::g_studioDarkTheme ? RGB(245, 248, 255) : ink);
                 DrawTextW(memDC, annotShort[i], -1, &L.rcAnnotSeg[i], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
         }
 
-        // 4 Ink Swatches
+        // 4 Aqua 2.0 Vitreous Ink Orbs
         {
             static constexpr COLORREF kInkDots[4] = {
                 RGB(225, 45, 57), RGB(0, 112, 243), RGB(217, 119, 6), RGB(22, 163, 74)
             };
+            Gdiplus::Graphics gSw(memDC);
             for (int i = 0; i < 4; ++i) {
                 const RECT& rs = L.rcInkSwatch[i];
-                const int cx = (rs.left + rs.right) / 2;
-                const int cy = (rs.top + rs.bottom) / 2;
+                const float cx = (rs.left + rs.right) * 0.5f;
+                const float cy = (rs.top + rs.bottom) * 0.5f;
                 const bool sel = (g_expAnnotColorIdx == i);
-                const bool hov = PtInRect(&rs, g_expHoverPt) != FALSE;
-                if (sel || hov) {
-                    CasioTheme::FillRoundRectAA(memDC, rs, 8.0f, CLR_INVALID,
-                        sel ? CasioTheme::StudioText() : CasioTheme::StudioBorderStrong(), sel ? 1.5f : 1.0f);
-                }
-                CasioTheme::DrawDotIndicator(memDC, cx, cy, sel ? 6 : 5, kInkDots[i]);
+                UiGlass::DrawAquaVitreousOrb(gSw, cx, cy, sel ? 6.5f : 5.5f,
+                    CasioTheme::ToGpColor(kInkDots[i], 255), sel, CasioTheme::g_studioDarkTheme);
             }
         }
 

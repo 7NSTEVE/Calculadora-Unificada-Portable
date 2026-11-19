@@ -1,4 +1,6 @@
 #include "pdf_writer.hpp"
+#include "../render/card_render_common.hpp"
+#include "../render/math_box_typesetter.hpp"
 #include "../core/utf_conv.hpp"
 
 #include <zlib.h>
@@ -8,9 +10,11 @@
 #include <cstring>
 #include <iomanip>
 #include <map>
+#include <set>
 #include <sstream>
 #include <unordered_map>
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -18,14 +22,28 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <d2d1.h>
+#include <dwrite.h>
 #include <wincodec.h>
 #include <wrl/client.h>
+#else
+#include <cairo.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
+#include <pango/pangocairo.h>
+#include <cerrno>
+#include <fcntl.h>
+#include <filesystem>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace DocStudio {
 
 namespace {
 
+#ifdef _WIN32
 using Microsoft::WRL::ComPtr;
+#endif
 
 std::string FmtNum(double v) {
     if (std::abs(v) < 1e-6) return "0";
@@ -55,16 +73,345 @@ std::string EscapePdfLiteralString(const std::string& asciiOrWinAnsi) {
     return out;
 }
 
-// Converts UTF-8 to WinAnsi bytes for built-in PDF Helvetica font
-std::string Utf8ToWinAnsi(const std::string& utf8) {
-    const std::wstring wide = Utf8ToWide(utf8);
-    if (wide.empty()) return {};
-    const int n = WideCharToMultiByte(1252, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, "?", nullptr);
-    if (n <= 0) return {};
-    std::string out(static_cast<std::size_t>(n), '\0');
-    WideCharToMultiByte(1252, 0, wide.data(), static_cast<int>(wide.size()), out.data(), n, "?", nullptr);
+// Decodes next UTF-8 codepoint advancing pos safely.
+std::uint32_t DecodeUtf8Next(const std::string& utf8, std::size_t& pos) {
+    if (pos >= utf8.size()) return 0;
+    const std::uint8_t b0 = static_cast<std::uint8_t>(utf8[pos]);
+    if ((b0 & 0x80u) == 0u) {
+        pos += 1;
+        return b0;
+    }
+    if ((b0 & 0xE0u) == 0xC0u && pos + 1 < utf8.size()) {
+        const std::uint8_t b1 = static_cast<std::uint8_t>(utf8[pos + 1]);
+        if ((b1 & 0xC0u) == 0x80u) {
+            pos += 2;
+            return ((b0 & 0x1Fu) << 6) | (b1 & 0x3Fu);
+        }
+    }
+    if ((b0 & 0xF0u) == 0xE0u && pos + 2 < utf8.size()) {
+        const std::uint8_t b1 = static_cast<std::uint8_t>(utf8[pos + 1]);
+        const std::uint8_t b2 = static_cast<std::uint8_t>(utf8[pos + 2]);
+        if ((b1 & 0xC0u) == 0x80u && (b2 & 0xC0u) == 0x80u) {
+            pos += 3;
+            return ((b0 & 0x0Fu) << 12) | ((b1 & 0x3Fu) << 6) | (b2 & 0x3Fu);
+        }
+    }
+    if ((b0 & 0xF8u) == 0xF0u && pos + 3 < utf8.size()) {
+        const std::uint8_t b1 = static_cast<std::uint8_t>(utf8[pos + 1]);
+        const std::uint8_t b2 = static_cast<std::uint8_t>(utf8[pos + 2]);
+        const std::uint8_t b3 = static_cast<std::uint8_t>(utf8[pos + 3]);
+        if ((b1 & 0xC0u) == 0x80u && (b2 & 0xC0u) == 0x80u && (b3 & 0xC0u) == 0x80u) {
+            pos += 4;
+            return ((b0 & 0x07u) << 18) | ((b1 & 0x3Fu) << 12) | ((b2 & 0x3Fu) << 6) | (b3 & 0x3Fu);
+        }
+    }
+    pos += 1;
+    return '?';
+}
+
+bool TryEncodeWinAnsiCodepoint(std::uint32_t cp, std::uint8_t& outByte) noexcept {
+    if (cp >= 0x20u && cp <= 0x7Eu) {
+        outByte = static_cast<std::uint8_t>(cp);
+        return true;
+    }
+    if (cp >= 0xA0u && cp <= 0xFFu) {
+        outByte = static_cast<std::uint8_t>(cp);
+        return true;
+    }
+    switch (cp) {
+        case 0x20ACu: outByte = 0x80u; return true;
+        case 0x201Au: outByte = 0x82u; return true;
+        case 0x0192u: outByte = 0x83u; return true;
+        case 0x201Eu: outByte = 0x84u; return true;
+        case 0x2026u: outByte = 0x85u; return true;
+        case 0x2020u: outByte = 0x86u; return true;
+        case 0x2021u: outByte = 0x87u; return true;
+        case 0x02C6u: outByte = 0x88u; return true;
+        case 0x2030u: outByte = 0x89u; return true;
+        case 0x0160u: outByte = 0x8Au; return true;
+        case 0x2039u: outByte = 0x8Bu; return true;
+        case 0x0152u: outByte = 0x8Cu; return true;
+        case 0x017Du: outByte = 0x8Eu; return true;
+        case 0x2018u: outByte = 0x91u; return true;
+        case 0x2019u: outByte = 0x92u; return true;
+        case 0x201Cu: outByte = 0x93u; return true;
+        case 0x201Du: outByte = 0x94u; return true;
+        case 0x2022u: outByte = 0x95u; return true;
+        case 0x2013u: outByte = 0x96u; return true;
+        case 0x2014u: outByte = 0x97u; return true;
+        case 0x02DCu: outByte = 0x98u; return true;
+        case 0x2122u: outByte = 0x99u; return true;
+        case 0x0161u: outByte = 0x9Au; return true;
+        case 0x203Au: outByte = 0x9Bu; return true;
+        case 0x0153u: outByte = 0x9Cu; return true;
+        case 0x017Eu: outByte = 0x9Eu; return true;
+        case 0x0178u: outByte = 0x9Fu; return true;
+        default: return false;
+    }
+}
+
+bool IsPureWinAnsiUtf8(const std::string& utf8, std::string& outWinAnsi) {
+    outWinAnsi.clear();
+    outWinAnsi.reserve(utf8.size());
+    std::size_t pos = 0;
+    while (pos < utf8.size()) {
+        const std::uint32_t cp = DecodeUtf8Next(utf8, pos);
+        if (cp == '\t' || cp == '\r') {
+            outWinAnsi.push_back(' ');
+            continue;
+        }
+        std::uint8_t b = 0;
+        if (!TryEncodeWinAnsiCodepoint(cp, b)) return false;
+        outWinAnsi.push_back(static_cast<char>(b));
+    }
+    return true;
+}
+
+double HelvWidth1000(std::uint8_t ch, bool bold) noexcept {
+    static constexpr int kHelvRegAscii[96] = {
+        278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,
+        556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,
+        1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,
+        667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,
+        333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,
+        556,556,333,500,278,556,500,722,500,500,500,334,260,334,584,278
+    };
+    static constexpr int kHelvBoldAscii[96] = {
+        278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,
+        556,556,556,556,556,556,556,556,556,556,333,333,584,584,584,611,
+        975,722,722,722,722,667,611,778,722,278,556,722,611,833,722,778,
+        667,778,722,667,611,722,667,944,667,667,611,333,278,333,584,556,
+        333,556,611,556,611,556,333,611,611,278,278,556,278,889,611,611,
+        611,611,389,556,333,611,556,778,556,556,500,389,280,389,584,278
+    };
+    if (ch >= 0x20u && ch <= 0x7Fu) {
+        return static_cast<double>(bold ? kHelvBoldAscii[ch - 0x20u] : kHelvRegAscii[ch - 0x20u]);
+    }
+    return 580.0;
+}
+
+std::string EncodeCpUtf8(std::uint32_t cp) {
+    std::string out;
+    if (cp <= 0x7Fu) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp <= 0x7FFu) {
+        out.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else if (cp <= 0xFFFFu) {
+        out.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else {
+        out.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    }
     return out;
 }
+
+std::string FormatUtf16BeHex(std::uint32_t cp) {
+    char buf[16]{};
+    if (cp <= 0xFFFFu) {
+        std::snprintf(buf, sizeof(buf), "%04X", static_cast<unsigned>(cp));
+    } else {
+        const std::uint32_t u = cp - 0x10000u;
+        const std::uint16_t hi = static_cast<std::uint16_t>(0xD800u | (u >> 10));
+        const std::uint16_t lo = static_cast<std::uint16_t>(0xDC00u | (u & 0x3FFu));
+        std::snprintf(buf, sizeof(buf), "%04X%04X", hi, lo);
+    }
+    return std::string(buf);
+}
+
+// Converts UTF-8 to WinAnsi bytes for built-in PDF Helvetica font
+std::string Utf8ToWinAnsi(const std::string& utf8) {
+    std::string out;
+    out.reserve(utf8.size());
+    std::size_t pos = 0;
+    while (pos < utf8.size()) {
+        const std::uint32_t cp = DecodeUtf8Next(utf8, pos);
+        std::uint8_t b = 0;
+        if (TryEncodeWinAnsiCodepoint(cp, b)) {
+            out.push_back(static_cast<char>(b));
+        } else {
+            out.push_back('?');
+        }
+    }
+    return out;
+}
+
+struct ExtractedGlyphOutline {
+    double advance1000 = 600.0;
+    std::string charProcOps;
+};
+
+#ifdef _WIN32
+class PdfDWriteGeometrySink final : public ID2D1SimplifiedGeometrySink {
+public:
+    explicit PdfDWriteGeometrySink(std::ostringstream& ss) : ss_(ss) {}
+    IFACEMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(ID2D1SimplifiedGeometrySink)) {
+            *ppv = static_cast<ID2D1SimplifiedGeometrySink*>(this);
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    IFACEMETHODIMP_(ULONG) AddRef() override { return 1; }
+    IFACEMETHODIMP_(ULONG) Release() override { return 1; }
+    IFACEMETHODIMP_(void) SetFillMode(D2D1_FILL_MODE) override {}
+    IFACEMETHODIMP_(void) SetSegmentFlags(D2D1_PATH_SEGMENT) override {}
+    IFACEMETHODIMP_(void) BeginFigure(D2D1_POINT_2F startPoint, D2D1_FIGURE_BEGIN) override {
+        ss_ << FmtNum(startPoint.x) << ' ' << FmtNum(-startPoint.y) << " m\n";
+    }
+    IFACEMETHODIMP_(void) AddLines(const D2D1_POINT_2F* points, UINT32 pointsCount) override {
+        for (UINT32 i = 0; i < pointsCount; ++i) {
+            ss_ << FmtNum(points[i].x) << ' ' << FmtNum(-points[i].y) << " l\n";
+        }
+    }
+    IFACEMETHODIMP_(void) AddBeziers(const D2D1_BEZIER_SEGMENT* beziers, UINT32 beziersCount) override {
+        for (UINT32 i = 0; i < beziersCount; ++i) {
+            ss_ << FmtNum(beziers[i].point1.x) << ' ' << FmtNum(-beziers[i].point1.y) << ' '
+                << FmtNum(beziers[i].point2.x) << ' ' << FmtNum(-beziers[i].point2.y) << ' '
+                << FmtNum(beziers[i].point3.x) << ' ' << FmtNum(-beziers[i].point3.y) << " c\n";
+        }
+    }
+    IFACEMETHODIMP_(void) EndFigure(D2D1_FIGURE_END figureEnd) override {
+        if (figureEnd == D2D1_FIGURE_END_CLOSED) ss_ << "h\n";
+    }
+    IFACEMETHODIMP Close() override { return S_OK; }
+
+private:
+    std::ostringstream& ss_;
+};
+
+bool ExtractGlyphOutlineNative(std::uint32_t cp, bool bold, ExtractedGlyphOutline& out) {
+    out = {};
+    ComPtr<IDWriteFactory> dwrite;
+    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(dwrite.GetAddressOf()))) || !dwrite) {
+        return false;
+    }
+    ComPtr<IDWriteFontCollection> coll;
+    if (FAILED(dwrite->GetSystemFontCollection(&coll, FALSE)) || !coll) {
+        return false;
+    }
+
+    auto tryFamily = [&](ComPtr<IDWriteFontFamily> fam) -> bool {
+        if (!fam) return false;
+        ComPtr<IDWriteFont> font;
+        if (FAILED(fam->GetFirstMatchingFont(
+                bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                &font)) || !font) {
+            return false;
+        }
+        BOOL exists = FALSE;
+        if (FAILED(font->HasCharacter(cp, &exists)) || !exists) return false;
+        ComPtr<IDWriteFontFace> face;
+        if (FAILED(font->CreateFontFace(&face)) || !face) return false;
+        UINT16 gid = 0;
+        if (FAILED(face->GetGlyphIndices(&cp, 1, &gid)) || gid == 0) return false;
+
+        DWRITE_FONT_METRICS fm{};
+        face->GetMetrics(&fm);
+        DWRITE_GLYPH_METRICS gm{};
+        if (FAILED(face->GetDesignGlyphMetrics(&gid, 1, &gm, FALSE)) || fm.designUnitsPerEm == 0) return false;
+
+        out.advance1000 = static_cast<double>(gm.advanceWidth) * 1000.0 / static_cast<double>(fm.designUnitsPerEm);
+        std::ostringstream pathOps;
+        PdfDWriteGeometrySink sink(pathOps);
+        if (FAILED(face->GetGlyphRunOutline(1000.0f, &gid, nullptr, nullptr, 1, FALSE, FALSE, &sink))) {
+            return false;
+        }
+        std::ostringstream cpOps;
+        cpOps << FmtNum(out.advance1000) << " 0 d0\n";
+        const std::string p = pathOps.str();
+        if (!p.empty()) cpOps << p << "f\n";
+        out.charProcOps = cpOps.str();
+        return true;
+    };
+
+    static constexpr const wchar_t* kPreferred[] = {
+        L"Cambria Math", L"Segoe UI Symbol", L"Segoe UI", L"Arial", L"Lucida Sans Unicode", L"DejaVu Sans"
+    };
+    for (const wchar_t* name : kPreferred) {
+        UINT32 idx = 0;
+        BOOL found = FALSE;
+        if (SUCCEEDED(coll->FindFamilyName(name, &idx, &found)) && found) {
+            ComPtr<IDWriteFontFamily> fam;
+            if (SUCCEEDED(coll->GetFontFamily(idx, &fam)) && tryFamily(fam)) return true;
+        }
+    }
+    const UINT32 count = coll->GetFontFamilyCount();
+    for (UINT32 i = 0; i < count; ++i) {
+        ComPtr<IDWriteFontFamily> fam;
+        if (SUCCEEDED(coll->GetFontFamily(i, &fam)) && tryFamily(fam)) return true;
+    }
+    return false;
+}
+#else
+bool ExtractGlyphOutlineNative(std::uint32_t cp, bool bold, ExtractedGlyphOutline& out) {
+    out = {};
+    cairo_surface_t* rec = cairo_recording_surface_create(CAIRO_CONTENT_COLOR, nullptr);
+    if (!rec) return false;
+    cairo_t* cr = cairo_create(rec);
+    PangoLayout* layout = pango_cairo_create_layout(cr);
+    const std::string utf8 = EncodeCpUtf8(cp);
+    PangoFontDescription* desc = pango_font_description_from_string(
+        bold ? "DejaVu Sans Bold, Noto Sans Math Bold, FreeSerif Bold, Sans Bold 100"
+             : "DejaVu Sans, Noto Sans Math, FreeSerif, Sans 100");
+    pango_font_description_set_absolute_size(desc, 1000.0 * PANGO_SCALE);
+    pango_layout_set_font_description(layout, desc);
+    pango_layout_set_text(layout, utf8.c_str(), static_cast<int>(utf8.size()));
+
+    PangoRectangle logical{};
+    pango_layout_get_extents(layout, nullptr, &logical);
+    const double baseline = static_cast<double>(pango_layout_get_baseline(layout)) / static_cast<double>(PANGO_SCALE);
+    out.advance1000 = (std::max)(200.0, static_cast<double>(logical.width) / static_cast<double>(PANGO_SCALE));
+
+    cairo_new_path(cr);
+    pango_cairo_layout_path(cr, layout);
+    cairo_path_t* path = cairo_copy_path(cr);
+
+    std::ostringstream pathOps;
+    if (path) {
+        for (int i = 0; i < path->num_data; i += path->data[i].header.length) {
+            const cairo_path_data_t* d = &path->data[i];
+            switch (d->header.type) {
+                case CAIRO_PATH_MOVE_TO:
+                    pathOps << FmtNum(d[1].point.x) << ' ' << FmtNum(baseline - d[1].point.y) << " m\n";
+                    break;
+                case CAIRO_PATH_LINE_TO:
+                    pathOps << FmtNum(d[1].point.x) << ' ' << FmtNum(baseline - d[1].point.y) << " l\n";
+                    break;
+                case CAIRO_PATH_CURVE_TO:
+                    pathOps << FmtNum(d[1].point.x) << ' ' << FmtNum(baseline - d[1].point.y) << ' '
+                            << FmtNum(d[2].point.x) << ' ' << FmtNum(baseline - d[2].point.y) << ' '
+                            << FmtNum(d[3].point.x) << ' ' << FmtNum(baseline - d[3].point.y) << " c\n";
+                    break;
+                case CAIRO_PATH_CLOSE_PATH:
+                    pathOps << "h\n";
+                    break;
+            }
+        }
+        cairo_path_destroy(path);
+    }
+
+    pango_font_description_free(desc);
+    g_object_unref(layout);
+    cairo_destroy(cr);
+    cairo_surface_destroy(rec);
+
+    std::ostringstream cpOps;
+    cpOps << FmtNum(out.advance1000) << " 0 d0\n";
+    const std::string p = pathOps.str();
+    if (!p.empty()) cpOps << p << "f\n";
+    out.charProcOps = cpOps.str();
+    return true;
+}
+#endif
 
 bool DeflateBytes(const std::uint8_t* src, std::size_t len, std::vector<std::uint8_t>& out) {
     uLongf bound = compressBound(static_cast<uLong>(len));
@@ -77,6 +424,7 @@ bool DeflateBytes(const std::uint8_t* src, std::size_t len, std::vector<std::uin
     return true;
 }
 
+#ifdef _WIN32
 bool DecodeImageBytesViaWic(
     const std::vector<std::uint8_t>& encodedBytes,
     int& outW,
@@ -133,6 +481,87 @@ bool DecodeImageBytesViaWic(
     if (didInit) CoUninitialize();
     return ok;
 }
+#else
+bool DecodeEncodedImageViaGdkPixbuf(
+    const std::vector<std::uint8_t>& encodedBytes,
+    int& outW,
+    int& outH,
+    std::vector<std::uint8_t>& outRgb,
+    std::vector<std::uint8_t>& outAlpha)
+{
+    if (encodedBytes.empty()) return false;
+    GError* err = nullptr;
+    GdkPixbufLoader* loader = gdk_pixbuf_loader_new();
+    if (!loader) return false;
+
+    const gboolean writeOk = gdk_pixbuf_loader_write(
+        loader,
+        reinterpret_cast<const guchar*>(encodedBytes.data()),
+        static_cast<gsize>(encodedBytes.size()),
+        &err);
+    if (!writeOk) {
+        if (err) g_error_free(err);
+        g_object_unref(loader);
+        return false;
+    }
+    if (!gdk_pixbuf_loader_close(loader, &err)) {
+        if (err) g_error_free(err);
+        g_object_unref(loader);
+        return false;
+    }
+
+    GdkPixbuf* pixbuf = gdk_pixbuf_loader_get_pixbuf(loader);
+    if (!pixbuf) {
+        g_object_unref(loader);
+        return false;
+    }
+    g_object_ref(pixbuf);
+    g_object_unref(loader);
+
+    const int w = gdk_pixbuf_get_width(pixbuf);
+    const int h = gdk_pixbuf_get_height(pixbuf);
+    const int nChannels = gdk_pixbuf_get_n_channels(pixbuf);
+    const int bits = gdk_pixbuf_get_bits_per_sample(pixbuf);
+    const gboolean hasAlpha = gdk_pixbuf_get_has_alpha(pixbuf);
+    const int rowstride = gdk_pixbuf_get_rowstride(pixbuf);
+    const guint8* pixels = gdk_pixbuf_get_pixels(pixbuf);
+
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192 ||
+        gdk_pixbuf_get_colorspace(pixbuf) != GDK_COLORSPACE_RGB ||
+        bits != 8 || (nChannels != 3 && nChannels != 4) || !pixels) {
+        g_object_unref(pixbuf);
+        return false;
+    }
+
+    outW = w;
+    outH = h;
+    outRgb.resize(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3u);
+    outAlpha.clear();
+    if (hasAlpha && nChannels == 4) {
+        outAlpha.resize(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
+    }
+
+    bool hasPartialAlpha = false;
+    for (int y = 0; y < h; ++y) {
+        const guint8* row = pixels + static_cast<std::size_t>(y) * static_cast<std::size_t>(rowstride);
+        for (int x = 0; x < w; ++x) {
+            const std::size_t idx = static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x);
+            const guint8* p = row + static_cast<std::size_t>(x) * static_cast<std::size_t>(nChannels);
+            outRgb[idx * 3 + 0] = p[0];
+            outRgb[idx * 3 + 1] = p[1];
+            outRgb[idx * 3 + 2] = p[2];
+            if (hasAlpha && nChannels == 4) {
+                const std::uint8_t a = p[3];
+                outAlpha[idx] = a;
+                if (a != 255) hasPartialAlpha = true;
+            }
+        }
+    }
+    if (!hasPartialAlpha) outAlpha.clear();
+    g_object_unref(pixbuf);
+    return true;
+}
+#endif
 
 struct PdfBuilder {
     struct Entry {
@@ -140,7 +569,17 @@ struct PdfBuilder {
         std::string body; // everything between "<id> 0 obj\n" and "\nendobj"
     };
 
+    struct UnicodeFontBank {
+        std::uint32_t objId = 0;
+        std::string resName;
+        bool bold = false;
+        std::vector<std::uint32_t> codepoints; // slot (code - 1) -> codepoint
+        std::vector<ExtractedGlyphOutline> glyphs;
+        std::unordered_map<std::uint32_t, std::uint8_t> cpToCode;
+    };
+
     std::vector<Entry> objects;
+    std::vector<UnicodeFontBank> unicodeBanks;
 
     std::uint32_t AllocId() {
         objects.push_back({ static_cast<std::uint32_t>(objects.size() + 1), {} });
@@ -188,10 +627,118 @@ struct PdfBuilder {
         return AddObject("<</Type /ExtGState /ca " + FmtNum(alpha) + " /CA " + FmtNum(alpha) + ">>");
     }
 
+    struct UnicodeGlyphRef {
+        std::string fontResName;
+        std::uint32_t fontObjId = 0;
+        std::uint8_t code = 1;
+        double advance1000 = 600.0;
+    };
+
+    UnicodeGlyphRef EnsureUnicodeGlyph(std::uint32_t cp, bool bold) {
+        for (const auto& bank : unicodeBanks) {
+            if (bank.bold != bold) continue;
+            auto it = bank.cpToCode.find(cp);
+            if (it != bank.cpToCode.end()) {
+                const std::uint8_t c = it->second;
+                return { bank.resName, bank.objId, c, bank.glyphs[static_cast<std::size_t>(c - 1)].advance1000 };
+            }
+        }
+        UnicodeFontBank* target = nullptr;
+        for (auto& bank : unicodeBanks) {
+            if (bank.bold == bold && bank.codepoints.size() < 254u) {
+                target = &bank;
+                break;
+            }
+        }
+        if (!target) {
+            UnicodeFontBank nb;
+            nb.objId = AllocId();
+            nb.resName = "FU" + std::to_string(unicodeBanks.size() + 1);
+            nb.bold = bold;
+            unicodeBanks.push_back(std::move(nb));
+            target = &unicodeBanks.back();
+        }
+        ExtractedGlyphOutline outline;
+        if (!ExtractGlyphOutlineNative(cp, bold, outline)) {
+            outline.advance1000 = 600.0;
+            outline.charProcOps = "600 0 d0\n100 100 400 700 re S\n";
+        }
+        const std::uint8_t code = static_cast<std::uint8_t>(target->codepoints.size() + 1u);
+        target->codepoints.push_back(cp);
+        target->glyphs.push_back(std::move(outline));
+        target->cpToCode[cp] = code;
+        return { target->resName, target->objId, code, target->glyphs.back().advance1000 };
+    }
+
+    void FinalizeUnicodeFonts() {
+        for (const auto& bank : unicodeBanks) {
+            if (bank.codepoints.empty()) continue;
+
+            std::vector<std::uint32_t> procIds;
+            procIds.reserve(bank.codepoints.size());
+            for (const auto& g : bank.glyphs) {
+                const std::vector<std::uint8_t> raw(g.charProcOps.begin(), g.charProcOps.end());
+                procIds.push_back(AddStream("", raw, true));
+            }
+
+            std::ostringstream cmap;
+            cmap << "/CIDInit /ProcSet findresource begin\n"
+                 << "12 dict begin\n"
+                 << "begincmap\n"
+                 << "/CIDSystemInfo <</Registry (Adobe) /Ordering (UCS) /Supplement 0>> def\n"
+                 << "/CMapName /DocStudio-Uni-" << bank.resName << " def\n"
+                 << "/CMapType 2 def\n"
+                 << "1 begincodespacerange\n"
+                 << "<01> <FF>\n"
+                 << "endcodespacerange\n";
+            const std::size_t n = bank.codepoints.size();
+            for (std::size_t base = 0; base < n; base += 100u) {
+                const std::size_t chunk = (std::min<std::size_t>)(100u, n - base);
+                cmap << chunk << " beginbfchar\n";
+                for (std::size_t k = 0; k < chunk; ++k) {
+                    char codeHex[8]{};
+                    std::snprintf(codeHex, sizeof(codeHex), "%02X", static_cast<unsigned>(base + k + 1u));
+                    cmap << "<" << codeHex << "> <" << FormatUtf16BeHex(bank.codepoints[base + k]) << ">\n";
+                }
+                cmap << "endbfchar\n";
+            }
+            cmap << "endcmap\n"
+                 << "CMapName currentdict /CMap defineresource pop\n"
+                 << "end\nend\n";
+            const std::string cmapStr = cmap.str();
+            const std::uint32_t cmapId = AddStream("", std::vector<std::uint8_t>(cmapStr.begin(), cmapStr.end()), true);
+
+            std::ostringstream fBody;
+            fBody << "<</Type /Font /Subtype /Type3 "
+                  << "/FontBBox [-600 -500 1800 1400] "
+                  << "/FontMatrix [0.001 0 0 0.001 0 0] "
+                  << "/FirstChar 1 /LastChar " << n << " "
+                  << "/Widths [";
+            for (std::size_t i = 0; i < n; ++i) {
+                if (i > 0) fBody << ' ';
+                fBody << FmtNum(bank.glyphs[i].advance1000);
+            }
+            fBody << "] /Encoding <</Type /Encoding /Differences [1";
+            for (std::size_t i = 0; i < n; ++i) {
+                fBody << " /g" << (i + 1);
+            }
+            fBody << "]>> /CharProcs <<";
+            for (std::size_t i = 0; i < n; ++i) {
+                fBody << " /g" << (i + 1) << ' ' << procIds[i] << " 0 R";
+            }
+            fBody << ">> /ToUnicode " << cmapId << " 0 R>>";
+            SetObject(bank.objId, fBody.str());
+        }
+    }
+
     std::uint32_t AddImageXObject(const std::vector<std::uint8_t>& encodedBytes) {
         int w = 0, h = 0;
         std::vector<std::uint8_t> rgb, alpha;
+#ifdef _WIN32
         if (!DecodeImageBytesViaWic(encodedBytes, w, h, rgb, alpha)) return 0;
+#else
+        if (!DecodeEncodedImageViaGdkPixbuf(encodedBytes, w, h, rgb, alpha)) return 0;
+#endif
 
         std::uint32_t smaskId = 0;
         if (!alpha.empty()) {
@@ -334,16 +881,221 @@ void EmitRgbFillColor(std::ostringstream& ss, DocColor c) {
     ss << FmtNum(c.r / 255.0) << ' ' << FmtNum(c.g / 255.0) << ' ' << FmtNum(c.b / 255.0) << " rg ";
 }
 
+void EmitUnicodeAwareTextLine(
+    std::ostringstream& ss,
+    const std::string& lineUtf8,
+    double startX,
+    double baselineY,
+    double fontSizePt,
+    bool bold,
+    bool flipTextYInCurrentCtm,
+    PdfBuilder& builder,
+    std::map<std::string, std::uint32_t>& extraFonts,
+    bool italic = false)
+{
+    const char* helvRes = bold ? "/F2" : "/F1";
+    const double yFlipSign = flipTextYInCurrentCtm ? -1.0 : 1.0;
+    const double slantC = italic ? 0.21 : 0.0;
+
+    std::string pureWinAnsi;
+    if (IsPureWinAnsiUtf8(lineUtf8, pureWinAnsi)) {
+        ss << "BT " << helvRes << ' ' << FmtNum(fontSizePt) << " Tf "
+           << "1 0 " << FmtNum(slantC) << ' ' << FmtNum(yFlipSign) << ' ' << FmtNum(startX) << ' ' << FmtNum(baselineY) << " Tm "
+           << EscapePdfLiteralString(pureWinAnsi) << " Tj ET\n";
+        return;
+    }
+
+    double curX = startX;
+    std::size_t pos = 0;
+    std::string waRun;
+    auto flushWinAnsiRun = [&]() {
+        if (waRun.empty()) return;
+        ss << "BT " << helvRes << ' ' << FmtNum(fontSizePt) << " Tf "
+           << "1 0 " << FmtNum(slantC) << ' ' << FmtNum(yFlipSign) << ' ' << FmtNum(curX) << ' ' << FmtNum(baselineY) << " Tm "
+           << EscapePdfLiteralString(waRun) << " Tj ET\n";
+        double adv1000 = 0.0;
+        for (unsigned char ch : waRun) {
+            adv1000 += HelvWidth1000(ch, bold);
+        }
+        curX += adv1000 * fontSizePt / 1000.0;
+        waRun.clear();
+    };
+
+    while (pos < lineUtf8.size()) {
+        const std::uint32_t cp = DecodeUtf8Next(lineUtf8, pos);
+        if (cp == '\r') continue;
+        if (cp == '\t') {
+            waRun.push_back(' ');
+            continue;
+        }
+        std::uint8_t waByte = 0;
+        if (TryEncodeWinAnsiCodepoint(cp, waByte)) {
+            waRun.push_back(static_cast<char>(waByte));
+        } else {
+            flushWinAnsiRun();
+            const auto gr = builder.EnsureUnicodeGlyph(cp, bold);
+            extraFonts[gr.fontResName] = gr.fontObjId;
+            char hex[8]{};
+            std::snprintf(hex, sizeof(hex), "%02X", static_cast<unsigned>(gr.code));
+            ss << "BT /" << gr.fontResName << ' ' << FmtNum(fontSizePt) << " Tf "
+               << "1 0 " << FmtNum(slantC) << ' ' << FmtNum(yFlipSign) << ' ' << FmtNum(curX) << ' ' << FmtNum(baselineY) << " Tm "
+               << '<' << hex << "> Tj ET\n";
+            curX += gr.advance1000 * fontSizePt / 1000.0;
+        }
+    }
+    flushWinAnsiRun();
+}
+
+void EmitRoundedRectPath(
+    std::ostringstream& ss,
+    double x, double y, double w, double h, double radius)
+{
+    const double r = std::clamp(radius, 0.0, (std::min)(w, h) * 0.5);
+    if (r <= 0.1) {
+        ss << FmtNum(x) << ' ' << FmtNum(y) << ' ' << FmtNum(w) << ' ' << FmtNum(h) << " re ";
+        return;
+    }
+    const double k = r * 0.55228475;
+    const double x0 = x, x1 = x + w;
+    const double y0 = y, y1 = y + h;
+    ss << FmtNum(x0 + r) << ' ' << FmtNum(y0) << " m "
+       << FmtNum(x1 - r) << ' ' << FmtNum(y0) << " l "
+       << FmtNum(x1 - r + k) << ' ' << FmtNum(y0) << ' ' << FmtNum(x1) << ' ' << FmtNum(y0 + r - k) << ' ' << FmtNum(x1) << ' ' << FmtNum(y0 + r) << " c "
+       << FmtNum(x1) << ' ' << FmtNum(y1 - r) << " l "
+       << FmtNum(x1) << ' ' << FmtNum(y1 - r + k) << ' ' << FmtNum(x1 - r + k) << ' ' << FmtNum(y1) << ' ' << FmtNum(x1 - r) << ' ' << FmtNum(y1) << " c "
+       << FmtNum(x0 + r) << ' ' << FmtNum(y1) << " l "
+       << FmtNum(x0 + r - k) << ' ' << FmtNum(y1) << ' ' << FmtNum(x0) << ' ' << FmtNum(y1 - r + k) << ' ' << FmtNum(x0) << ' ' << FmtNum(y1 - r) << " c "
+       << FmtNum(x0) << ' ' << FmtNum(y0 + r) << " l "
+       << FmtNum(x0) << ' ' << FmtNum(y0 + r - k) << ' ' << FmtNum(x0 + r - k) << ' ' << FmtNum(y0) << ' ' << FmtNum(x0 + r) << ' ' << FmtNum(y0) << " c h ";
+}
+
+class PdfMathBackend final : public MathTypeset::IMathDrawBackend {
+public:
+    PdfMathBackend(
+        std::ostringstream& ss,
+        PdfBuilder& builder,
+        std::map<std::string, std::uint32_t>& extraFonts,
+        const DocRect& box,
+        bool flipTextYInCurrentCtm)
+        : ss_(ss), builder_(builder), extraFonts_(extraFonts),
+          box_(box), flip_(flipTextYInCurrentCtm) {}
+
+    MathTypeset::TextMetrics2D MeasureText(
+        const std::string& utf8,
+        double fontSizePx,
+        MathTypeset::FontStyleRole role) override
+    {
+        const double fs = (std::max)(4.0, fontSizePx);
+        const bool bold = (role == MathTypeset::FontStyleRole::UiSemiBold ||
+                           role == MathTypeset::FontStyleRole::MathBold ||
+                           role == MathTypeset::FontStyleRole::KeycapLabel);
+        double adv1000 = 0.0;
+        std::size_t pos = 0;
+        while (pos < utf8.size()) {
+            const std::uint32_t cp = DecodeUtf8Next(utf8, pos);
+            if (cp == '\r') continue;
+            if (cp == '\t') {
+                adv1000 += HelvWidth1000(' ', bold);
+                continue;
+            }
+            std::uint8_t waByte = 0;
+            if (TryEncodeWinAnsiCodepoint(cp, waByte)) {
+                adv1000 += HelvWidth1000(waByte, bold);
+            } else {
+                const auto gr = builder_.EnsureUnicodeGlyph(cp, bold);
+                extraFonts_[gr.fontResName] = gr.fontObjId;
+                adv1000 += gr.advance1000;
+            }
+        }
+        MathTypeset::TextMetrics2D m;
+        m.width = adv1000 * fs / 1000.0;
+        m.ascent = fs * 0.78;
+        m.descent = fs * 0.24;
+        return m;
+    }
+
+    void DrawTextRun(
+        double x,
+        double baselineY,
+        const std::string& utf8,
+        double fontSizePx,
+        MathTypeset::FontStyleRole role,
+        DocColor color) override
+    {
+        if (utf8.empty()) return;
+        const bool bold = (role == MathTypeset::FontStyleRole::UiSemiBold ||
+                           role == MathTypeset::FontStyleRole::MathBold ||
+                           role == MathTypeset::FontStyleRole::KeycapLabel);
+        const bool italic = (role == MathTypeset::FontStyleRole::MathItalic);
+        EmitRgbFillColor(ss_, color);
+        EmitUnicodeAwareTextLine(
+            ss_, utf8, x, MapY(baselineY), (std::max)(4.0, fontSizePx),
+            bold, flip_, builder_, extraFonts_, italic);
+    }
+
+    void DrawLine(
+        double x0, double y0,
+        double x1, double y1,
+        double thickness,
+        DocColor color) override
+    {
+        EmitRgbStrokeColor(ss_, color);
+        ss_ << FmtNum((std::max)(0.4, thickness)) << " w 1 J "
+            << FmtNum(x0) << ' ' << FmtNum(MapY(y0)) << " m "
+            << FmtNum(x1) << ' ' << FmtNum(MapY(y1)) << " l S\n";
+    }
+
+    void DrawRoundedPill(
+        double x, double y, double w, double h,
+        double radius,
+        DocColor fill,
+        DocColor stroke,
+        double strokeWidth) override
+    {
+        const double py = flip_ ? y : (MapY(y + h));
+        if (fill.a > 0 && stroke.a > 0 && strokeWidth > 0.0) {
+            EmitRgbFillColor(ss_, fill);
+            EmitRgbStrokeColor(ss_, stroke);
+            ss_ << FmtNum(strokeWidth) << " w ";
+            EmitRoundedRectPath(ss_, x, py, w, h, radius);
+            ss_ << "B\n";
+        } else if (fill.a > 0) {
+            EmitRgbFillColor(ss_, fill);
+            EmitRoundedRectPath(ss_, x, py, w, h, radius);
+            ss_ << "f\n";
+        } else if (stroke.a > 0 && strokeWidth > 0.0) {
+            EmitRgbStrokeColor(ss_, stroke);
+            ss_ << FmtNum(strokeWidth) << " w ";
+            EmitRoundedRectPath(ss_, x, py, w, h, radius);
+            ss_ << "S\n";
+        }
+    }
+
+private:
+    double MapY(double tdY) const noexcept {
+        return flip_ ? tdY : (2.0 * box_.y + box_.h - tdY);
+    }
+
+    std::ostringstream& ss_;
+    PdfBuilder& builder_;
+    std::map<std::string, std::uint32_t>& extraFonts_;
+    DocRect box_;
+    bool flip_ = true;
+};
+
 void EmitAnnotationObjectOps(
     std::ostringstream& ss,
     const AnnotationObject& obj,
     const DocumentModel& doc,
     PdfBuilder& builder,
     std::map<std::string, std::uint32_t>& imageXObjects,
+    std::map<std::string, std::uint32_t>& extraFonts,
     double offsetX,
     double offsetY,
     bool flipTextYInCurrentCtm)
 {
+    if (!doc.IsLayerExportable(obj.layerId)) return;
+
     auto tx = [&](double x) { return x + offsetX; };
     auto ty = [&](double y) { return y + offsetY; };
 
@@ -388,15 +1140,9 @@ void EmitAnnotationObjectOps(
             }
             if (obj.shapeKind == ShapeKind::SignatureStamp && !obj.textUtf8.empty()) {
                 EmitRgbFillColor(ss, obj.strokeColor);
-                const std::string txt = EscapePdfLiteralString(Utf8ToWinAnsi(obj.textUtf8));
                 const double fs = (std::max)(8.0, obj.fontSizePt > 0.0 ? obj.fontSizePt : 10.0);
-                ss << "BT /F2 " << FmtNum(fs) << " Tf ";
-                if (flipTextYInCurrentCtm) {
-                    ss << "1 0 0 -1 " << FmtNum(r.x + 6.0) << ' ' << FmtNum(r.y + fs + 4.0) << " Tm ";
-                } else {
-                    ss << "1 0 0 1 " << FmtNum(r.x + 6.0) << ' ' << FmtNum(r.y + r.h * 0.5) << " Tm ";
-                }
-                ss << txt << " Tj ET\n";
+                const double baseY = flipTextYInCurrentCtm ? (r.y + fs + 4.0) : (r.y + r.h * 0.5);
+                EmitUnicodeAwareTextLine(ss, obj.textUtf8, r.x + 6.0, baseY, fs, true, flipTextYInCurrentCtm, builder, extraFonts);
             }
         } else if (obj.shapeKind == ShapeKind::Ellipse) {
             // 4-segment cubic Bezier approximation for ellipse
@@ -442,24 +1188,33 @@ void EmitAnnotationObjectOps(
             EmitRgbFillColor(ss, obj.fillColor);
             ss << FmtNum(r.x) << ' ' << FmtNum(r.y) << ' ' << FmtNum(r.w) << ' ' << FmtNum(r.h) << " re f\n";
         }
-        EmitRgbFillColor(ss, obj.strokeColor);
         const double fs = (std::max)(6.0, obj.fontSizePt);
-        const char* fontRes = obj.bold ? "/F2" : "/F1";
-        // Split lines on '\n'
-        std::istringstream iss(obj.textUtf8);
-        std::string line;
-        int lineIdx = 0;
-        while (std::getline(iss, line)) {
-            const std::string lit = EscapePdfLiteralString(Utf8ToWinAnsi(line));
-            const double baselineOffset = fs * 0.9 + static_cast<double>(lineIdx) * (fs * 1.25);
-            ss << "BT " << fontRes << ' ' << FmtNum(fs) << " Tf ";
-            if (flipTextYInCurrentCtm) {
-                ss << "1 0 0 -1 " << FmtNum(r.x + 2.0) << ' ' << FmtNum(r.y + baselineOffset) << " Tm ";
-            } else {
-                ss << "1 0 0 1 " << FmtNum(r.x + 2.0) << ' ' << FmtNum(r.y + r.h - baselineOffset) << " Tm ";
+        const bool hasMathMarkup = (obj.textUtf8.find('\\') != std::string::npos ||
+                                    obj.textUtf8.find('$') != std::string::npos ||
+                                    obj.textUtf8.find('^') != std::string::npos);
+        if (hasMathMarkup) {
+            PdfMathBackend mathBackend(ss, builder, extraFonts, r, flipTextYInCurrentCtm);
+            std::istringstream iss(obj.textUtf8);
+            std::string line;
+            double curY = r.y + 3.0;
+            while (std::getline(iss, line)) {
+                if (curY > r.y + r.h) break;
+                const double consumed = MathTypeset::DrawRichMathLine(
+                    mathBackend, line, r.x + 2.0, curY, (std::max)(12.0, r.w - 4.0),
+                    fs, obj.strokeColor, false);
+                curY += (std::max)(fs * 1.25, consumed + 2.0);
             }
-            ss << lit << " Tj ET\n";
-            ++lineIdx;
+        } else {
+            EmitRgbFillColor(ss, obj.strokeColor);
+            std::istringstream iss(obj.textUtf8);
+            std::string line;
+            int lineIdx = 0;
+            while (std::getline(iss, line)) {
+                const double baselineOffset = fs * 0.9 + static_cast<double>(lineIdx) * (fs * 1.25);
+                const double baseY = flipTextYInCurrentCtm ? (r.y + baselineOffset) : (r.y + r.h - baselineOffset);
+                EmitUnicodeAwareTextLine(ss, line, r.x + 2.0, baseY, fs, obj.bold, flipTextYInCurrentCtm, builder, extraFonts);
+                ++lineIdx;
+            }
         }
     } else if (obj.kind == ObjectKind::Image) {
         const std::vector<std::uint8_t>* bytesPtr = !obj.pngBytes.empty() ? &obj.pngBytes : doc.FindAsset(obj.assetKey);
@@ -472,6 +1227,74 @@ void EmitAnnotationObjectOps(
                 ss << "q " << FmtNum(r.w) << " 0 0 " << FmtNum(-r.h) << ' ' << FmtNum(r.x) << ' ' << FmtNum(r.y + r.h)
                    << " cm /" << resName << " Do Q\n";
             }
+        }
+    } else if (obj.kind == ObjectKind::StudyTape ||
+               obj.kind == ObjectKind::MathBlock ||
+               obj.kind == ObjectKind::CircuitBlock ||
+               obj.kind == ObjectKind::CalcSessionCard ||
+               obj.kind == ObjectKind::PlotBlock) {
+        const DocRect r = { tx(obj.bounds.x), ty(obj.bounds.y), (std::max)(48.0, obj.bounds.w), (std::max)(24.0, obj.bounds.h) };
+        const auto card = RenderCommon::BuildStemCardLayout(obj);
+        EmitRgbFillColor(ss, card.bg);
+        EmitRgbStrokeColor(ss, card.border);
+        ss << "1.2 w ";
+        EmitRoundedRectPath(ss, r.x, r.y, r.w, r.h, 8.0);
+        ss << "B\n";
+
+        const bool hasThumb = (obj.kind == ObjectKind::CalcSessionCard && !obj.pngBytes.empty());
+        DocRect textRect = r;
+        if (hasThumb) {
+            textRect.w = (std::max)(48.0, r.w - (std::min)(r.w * 0.40, 120.0) - 10.0);
+        }
+        PdfMathBackend mathBackend(ss, builder, extraFonts, r, flipTextYInCurrentCtm);
+        MathTypeset::DrawStemCardContent(
+            mathBackend, obj, textRect, 0.85,
+            card.titleColor, card.bodyColor, card.headerUtf8, card.bodyUtf8);
+
+        if (hasThumb) {
+            const std::uint32_t xobjId = builder.AddImageXObject(obj.pngBytes);
+            if (xobjId != 0) {
+                const std::string resName = "Im" + std::to_string(imageXObjects.size() + 1);
+                imageXObjects[resName] = xobjId;
+                const double iw = (std::min)(r.w * 0.40, 120.0);
+                const double ih = (std::min)(r.h * 0.58, iw * 0.55);
+                const double ix = r.x + r.w - iw - 6.0;
+                const double iy = r.y + 20.0;
+                ss << "q " << FmtNum(iw) << " 0 0 " << FmtNum(-ih) << ' ' << FmtNum(ix) << ' ' << FmtNum(iy + ih)
+                   << " cm /" << resName << " Do Q\n";
+            }
+        } else if (obj.kind == ObjectKind::PlotBlock) {
+            const auto plot = RenderCommon::BuildPlotRenderData(obj);
+            const double px0 = r.x + 8.0;
+            const double py0 = r.y + 24.0;
+            const double pw = (std::max)(16.0, r.w - 16.0);
+            const double ph = (std::max)(16.0, r.h - 42.0);
+            ss << "q 1 1 1 rg " << FmtNum(px0) << ' ' << FmtNum(py0) << ' ' << FmtNum(pw) << ' ' << FmtNum(ph) << " re f\n";
+            ss << "0.58 0.64 0.72 RG 0.8 w " << FmtNum(px0) << ' ' << FmtNum(py0) << ' ' << FmtNum(pw) << ' ' << FmtNum(ph) << " re S\n";
+            auto mapPt = [&](double wx, double wy) -> DocPoint {
+                const double nx = std::clamp((wx - plot.xMin) / (std::max)(1e-9, plot.xMax - plot.xMin), 0.0, 1.0);
+                const double ny = std::clamp((wy - plot.yMin) / (std::max)(1e-9, plot.yMax - plot.yMin), 0.0, 1.0);
+                const double sy = flipTextYInCurrentCtm ? (py0 + ph - ny * ph) : (py0 + ny * ph);
+                return { px0 + nx * pw, sy };
+            };
+            if (plot.is3D && !plot.surface3DSegments.empty()) {
+                ss << "0.95 w\n";
+                for (const auto& seg : plot.surface3DSegments) {
+                    EmitRgbStrokeColor(ss, seg.color);
+                    const DocPoint pa = mapPt(seg.a.x, seg.a.y);
+                    const DocPoint pb = mapPt(seg.b.x, seg.b.y);
+                    ss << FmtNum(pa.x) << ' ' << FmtNum(pa.y) << " m " << FmtNum(pb.x) << ' ' << FmtNum(pb.y) << " l S\n";
+                }
+            } else if (plot.curvePoints.size() >= 2) {
+                const DocPoint p0 = mapPt(plot.curvePoints[0].x, plot.curvePoints[0].y);
+                ss << "0.31 0.27 0.90 RG 1.4 w " << FmtNum(p0.x) << ' ' << FmtNum(p0.y) << " m\n";
+                for (std::size_t i = 1; i < plot.curvePoints.size(); ++i) {
+                    const DocPoint pi = mapPt(plot.curvePoints[i].x, plot.curvePoints[i].y);
+                    ss << FmtNum(pi.x) << ' ' << FmtNum(pi.y) << " l\n";
+                }
+                ss << "S\n";
+            }
+            ss << "Q\n";
         }
     }
 
@@ -495,6 +1318,7 @@ std::string BuildPageOverlayCtm(double L, double B, double R, double T, int rotD
 }
 
 bool WriteAllBytesToFile(const std::wstring& path, const std::vector<std::uint8_t>& bytes, std::string* outErr) {
+#ifdef _WIN32
     const std::wstring tmpPath = path + L".tmp";
     HANDLE hFile = CreateFileW(tmpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) {
@@ -521,6 +1345,119 @@ bool WriteAllBytesToFile(const std::wstring& path, const std::vector<std::uint8_
         return false;
     }
     return true;
+#else
+    const std::string utf8Path = WideToUtf8(path);
+    if (utf8Path.empty()) {
+        if (outErr) *outErr = "Ruta de archivo PDF vacia o invalida.";
+        return false;
+    }
+    const std::string tmpPath = utf8Path + ".tmp";
+    const int fd = ::open(tmpPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        if (outErr) *outErr = "No se pudo crear archivo PDF destino (errno " + std::to_string(errno) + ").";
+        return false;
+    }
+    std::size_t off = 0;
+    while (off < bytes.size()) {
+        const std::size_t chunk = (std::min<std::size_t>)(bytes.size() - off, 4u * 1024u * 1024u);
+        const ssize_t wr = ::write(fd, bytes.data() + off, chunk);
+        if (wr < 0) {
+            if (errno == EINTR) continue;
+            ::close(fd);
+            ::unlink(tmpPath.c_str());
+            if (outErr) *outErr = "Error escribiendo PDF (errno " + std::to_string(errno) + ").";
+            return false;
+        }
+        if (wr == 0) {
+            ::close(fd);
+            ::unlink(tmpPath.c_str());
+            if (outErr) *outErr = "Error escribiendo PDF (write=0).";
+            return false;
+        }
+        off += static_cast<std::size_t>(wr);
+    }
+    (void)::fsync(fd);
+    ::close(fd);
+    if (std::rename(tmpPath.c_str(), utf8Path.c_str()) != 0) {
+        const int errCode = errno;
+        ::unlink(tmpPath.c_str());
+        if (outErr) *outErr = "No se pudo finalizar archivo PDF (errno " + std::to_string(errCode) + ").";
+        return false;
+    }
+    const std::filesystem::path parentDir = std::filesystem::path(utf8Path).parent_path();
+    if (!parentDir.empty()) {
+        const int dfd = ::open(parentDir.c_str(), O_RDONLY);
+        if (dfd >= 0) {
+            (void)::fsync(dfd);
+            ::close(dfd);
+        }
+    }
+    return true;
+#endif
+}
+
+std::shared_ptr<PdfDocument> ResolvePdfSourceCached(
+    const DocumentModel& doc,
+    const std::string& pathUtf8,
+    const std::string& assetKey,
+    std::unordered_map<std::string, std::shared_ptr<PdfDocument>>& cache)
+{
+    const std::string cacheKey = pathUtf8 + "\n" + assetKey;
+    auto it = cache.find(cacheKey);
+    if (it != cache.end()) return it->second;
+
+    auto loaded = std::make_shared<PdfDocument>();
+    std::string dummyErr;
+    bool ok = false;
+    if (!pathUtf8.empty()) {
+        ok = loaded->LoadFromFile(Utf8ToWide(pathUtf8), &dummyErr);
+    }
+    if (!ok && !assetKey.empty()) {
+        if (const auto* bytes = doc.FindAsset(assetKey)) {
+            ok = loaded->LoadFromBytes(*bytes, &dummyErr);
+        }
+    }
+    if (!ok) loaded.reset();
+    cache[cacheKey] = loaded;
+    return loaded;
+}
+
+bool TryBuildPdfPageFormXObject(
+    const PdfDocument& srcDoc,
+    std::size_t pageIdx0,
+    PdfBuilder& builder,
+    std::unordered_map<std::uint32_t, std::uint32_t>& remap,
+    std::uint32_t& outFormId,
+    DocRect& outBox,
+    int& outRotDeg)
+{
+    outFormId = 0;
+    if (pageIdx0 >= srcDoc.PageCount()) return false;
+    const auto& pi = srcDoc.PageAt(pageIdx0);
+    outBox = pi.hasCropBox ? pi.cropBox : pi.mediaBox;
+    if (outBox.w < 1.0 || outBox.h < 1.0) return false;
+    outRotDeg = ((pi.rotationDeg % 360) + 360) % 360;
+
+    const std::vector<std::uint8_t> contentBytes = srcDoc.GetPageContentBytes(pageIdx0);
+    const PdfValue pageVal = srcDoc.LookupObject(pi.pageRef.obj);
+
+    PdfValue resRewritten;
+    if (const PdfValue* resVal = srcDoc.Resolve(pageVal.DictGet("Resources"))) {
+        if (resVal->IsDict()) {
+            resRewritten = builder.RewriteValueRefs(srcDoc, *resVal, remap, 1);
+        }
+    }
+
+    std::ostringstream dict;
+    dict << "/Type /XObject /Subtype /Form /FormType 1 "
+         << "/BBox [" << FmtNum(outBox.x) << ' ' << FmtNum(outBox.y) << ' '
+         << FmtNum(outBox.Right()) << ' ' << FmtNum(outBox.Bottom()) << "] "
+         << "/Matrix [1 0 0 1 0 0] ";
+    if (resRewritten.IsDict()) {
+        dict << "/Resources " << PdfDocument::SerializeValue(resRewritten) << ' ';
+    }
+    outFormId = builder.AddStream(dict.str(), contentBytes, true);
+    return outFormId != 0;
 }
 
 } // namespace
@@ -546,34 +1483,29 @@ bool PdfWriter::ExportDocumentToBytes(
     const std::uint32_t pagesRootId = builder.AllocId();
     std::vector<std::uint32_t> pageIds;
 
-    for (const auto& pg : doc.Pages()) {
+    for (std::size_t pageOrdinal = 0; pageOrdinal < doc.Pages().size(); ++pageOrdinal) {
+        const auto& pg = doc.Pages()[pageOrdinal];
         std::shared_ptr<PdfDocument> srcDoc;
-        if (pg.hasPdfSource && !pg.sourcePdfPathUtf8.empty()) {
-            auto sit = loadedSources.find(pg.sourcePdfPathUtf8);
-            if (sit == loadedSources.end()) {
-                auto loaded = std::make_shared<PdfDocument>();
-                std::string dummyErr;
-                if (loaded->LoadFromFile(Utf8ToWide(pg.sourcePdfPathUtf8), &dummyErr)) {
-                    loadedSources[pg.sourcePdfPathUtf8] = loaded;
-                    srcDoc = loaded;
-                } else {
-                    loadedSources[pg.sourcePdfPathUtf8] = nullptr;
+        if (pg.hasPdfSource) {
+            srcDoc = ResolvePdfSourceCached(doc, pg.sourcePdfPathUtf8, pg.sourcePdfAssetKey, loadedSources);
+            if (!srcDoc || pg.sourcePageIndex0 < 0 ||
+                static_cast<std::size_t>(pg.sourcePageIndex0) >= srcDoc->PageCount()) {
+                if (outErr) {
+                    *outErr = "Falta la fuente PDF original o p\xC3\xA1gina inv\xC3\xA1lida al exportar p\xC3\xA1gina " +
+                              std::to_string(pageOrdinal + 1) +
+                              (pg.sourcePdfPathUtf8.empty() ? "" : (": " + pg.sourcePdfPathUtf8));
                 }
-            } else {
-                srcDoc = sit->second;
+                return false;
             }
         }
 
-        const bool hasValidSourcePage = srcDoc && pg.sourcePageIndex0 >= 0 &&
-            static_cast<std::size_t>(pg.sourcePageIndex0) < srcDoc->PageCount();
-
-        if (hasValidSourcePage) {
+        if (pg.hasPdfSource && srcDoc) {
             const auto& srcPageInfo = srcDoc->PageAt(static_cast<std::size_t>(pg.sourcePageIndex0));
             const PdfValue srcPageVal = srcDoc->LookupObject(srcPageInfo.pageRef.obj);
-            auto& remap = sourceRemaps[pg.sourcePdfPathUtf8];
+            const std::string remapKey = pg.sourcePdfPathUtf8 + "\n" + pg.sourcePdfAssetKey;
+            auto& remap = sourceRemaps[remapKey];
 
             const DocRect baseBox = srcPageInfo.hasCropBox ? srcPageInfo.cropBox : srcPageInfo.mediaBox;
-            // Apply NormalizedCropRect in unrotated user space
             const double cropL = baseBox.x + baseBox.w * pg.crop.left;
             const double cropR = baseBox.x + baseBox.w * pg.crop.right;
             const double cropT = baseBox.Bottom() - baseBox.h * pg.crop.top;
@@ -581,7 +1513,6 @@ bool PdfWriter::ExportDocumentToBytes(
             const DocRect finalCrop = DocRect::FromMinMax((std::min)(cropL, cropR), (std::min)(cropB, cropT),
                                                           (std::max)(cropL, cropR), (std::max)(cropB, cropT));
 
-            // Clone existing contents and resources
             std::vector<std::uint32_t> clonedContentIds;
             const PdfValue* contents = srcPageVal.DictGet("Contents");
             if (contents) {
@@ -605,7 +1536,6 @@ bool PdfWriter::ExportDocumentToBytes(
                 }
             }
 
-            // Clone page Resources dict carefully
             PdfDict mergedResDict;
             if (const PdfValue* resVal = srcDoc->Resolve(srcPageVal.DictGet("Resources"))) {
                 if (resVal->IsDict()) {
@@ -614,14 +1544,14 @@ bool PdfWriter::ExportDocumentToBytes(
                 }
             }
 
-            // If there are annotations or non-plain paper overlay, wrap old contents in q/Q and append overlay stream
             std::map<std::string, std::uint32_t> overlayImages;
+            std::map<std::string, std::uint32_t> overlayExtraFonts;
             if (!pg.objects.empty()) {
                 std::ostringstream overlay;
                 overlay << "q\n";
                 overlay << BuildPageOverlayCtm(finalCrop.x, finalCrop.y, finalCrop.Right(), finalCrop.Bottom(), pg.rotationDeg);
                 for (const auto& obj : pg.objects) {
-                    EmitAnnotationObjectOps(overlay, obj, doc, builder, overlayImages, 0.0, 0.0, true);
+                    EmitAnnotationObjectOps(overlay, obj, doc, builder, overlayImages, overlayExtraFonts, 0.0, 0.0, true);
                 }
                 overlay << "Q\n";
 
@@ -639,9 +1569,6 @@ bool PdfWriter::ExportDocumentToBytes(
                 finalContents.push_back(ovId);
                 clonedContentIds = std::move(finalContents);
 
-                // Ensure overlay fonts, ExtGState, and XObjects exist cleanly in mergedResDict without clobbering existing F1/F2
-                // Use unique resource names /FDocR1 /FDocR2 /GSDocAlpha and patch content stream or check collisions
-                // Actually check: we used /F1 /F2 /GSAlpha in EmitAnnotationObjectOps - let's add them if missing, or rename cleanly!
                 auto ensureSubDict = [&](const std::string& name) -> PdfDict& {
                     auto it = mergedResDict.find(name);
                     if (it == mergedResDict.end() || !it->second.IsDict()) {
@@ -660,6 +1587,9 @@ bool PdfWriter::ExportDocumentToBytes(
                 PdfDict& fd = ensureSubDict("Font");
                 if (fd.find("F1") == fd.end()) fd["F1"] = makeRef(f1);
                 if (fd.find("F2") == fd.end()) fd["F2"] = makeRef(f2);
+                for (const auto& fkv : overlayExtraFonts) {
+                    fd[fkv.first] = makeRef(fkv.second);
+                }
                 PdfDict& gd = ensureSubDict("ExtGState");
                 if (gd.find("GSAlpha") == gd.end()) gd["GSAlpha"] = makeRef(gsAlpha);
                 if (!overlayImages.empty()) {
@@ -696,16 +1626,16 @@ bool PdfWriter::ExportDocumentToBytes(
             builder.SetObject(pageId, pgBody.str());
             pageIds.push_back(pageId);
         } else {
-            // Standalone note/blank page with paper pattern + vector annotations
             const double w = (std::max)(36.0, pg.widthPt * (pg.crop.right - pg.crop.left));
             const double h = (std::max)(36.0, pg.heightPt * (pg.crop.bottom - pg.crop.top));
             std::map<std::string, std::uint32_t> pageImages;
+            std::map<std::string, std::uint32_t> pageExtraFonts;
             std::ostringstream stream;
             EmitPaperPatternOps(stream, w, h, pg.background);
             if (!pg.objects.empty()) {
                 stream << "q 1 0 0 -1 0 " << FmtNum(h) << " cm\n";
                 for (const auto& obj : pg.objects) {
-                    EmitAnnotationObjectOps(stream, obj, doc, builder, pageImages,
+                    EmitAnnotationObjectOps(stream, obj, doc, builder, pageImages, pageExtraFonts,
                         -pg.widthPt * pg.crop.left, -pg.heightPt * pg.crop.top, true);
                 }
                 stream << "Q\n";
@@ -718,8 +1648,11 @@ bool PdfWriter::ExportDocumentToBytes(
             pgBody << "<</Type /Page /Parent " << pagesRootId << " 0 R "
                    << "/MediaBox [0 0 " << FmtNum(w) << ' ' << FmtNum(h) << "] "
                    << "/Rotate " << (((pg.rotationDeg % 360) + 360) % 360) << " "
-                   << "/Resources <</Font <</F1 " << f1 << " 0 R /F2 " << f2 << " 0 R>> "
-                   << "/ExtGState <</GSAlpha " << gsAlpha << " 0 R>>";
+                   << "/Resources <</Font <</F1 " << f1 << " 0 R /F2 " << f2 << " 0 R";
+            for (const auto& fkv : pageExtraFonts) {
+                pgBody << " /" << fkv.first << ' ' << fkv.second << " 0 R";
+            }
+            pgBody << ">> /ExtGState <</GSAlpha " << gsAlpha << " 0 R>>";
             if (!pageImages.empty()) {
                 pgBody << " /XObject <<";
                 for (const auto& ikv : pageImages) {
@@ -742,6 +1675,7 @@ bool PdfWriter::ExportDocumentToBytes(
     pagesDict << "]>>";
     builder.SetObject(pagesRootId, pagesDict.str());
 
+    builder.FinalizeUnicodeFonts();
     const std::uint32_t catalogId = builder.AddObject("<</Type /Catalog /Pages " + std::to_string(pagesRootId) + " 0 R>>");
     outPdfBytes = builder.Finalize(catalogId);
     return true;
@@ -795,10 +1729,16 @@ bool PdfWriter::ExportInfiniteCanvasToBytes(
     const std::uint32_t pagesRootId = builder.AllocId();
     std::vector<std::uint32_t> pageIds;
 
+    std::unordered_map<std::string, std::shared_ptr<PdfDocument>> cardSources;
+    std::unordered_map<std::string, std::unordered_map<std::uint32_t, std::uint32_t>> cardRemaps;
+    std::unordered_map<std::string, std::uint32_t> builtCardForms;
+    std::unordered_map<std::string, std::pair<DocRect, int>> builtCardGeom;
+
     auto emitSlicePage = [&](const DocRect& sliceRect) {
         const double pw = (std::max)(72.0, sliceRect.w);
         const double ph = (std::max)(72.0, sliceRect.h);
-        std::map<std::string, std::uint32_t> imgs;
+        std::map<std::string, std::uint32_t> xobjects;
+        std::map<std::string, std::uint32_t> pageExtraFonts;
         std::ostringstream ss;
         EmitPaperPatternOps(ss, pw, ph, doc.CanvasBackground());
         ss << "q 1 0 0 -1 0 " << FmtNum(ph) << " cm\n";
@@ -814,16 +1754,90 @@ bool PdfWriter::ExportInfiniteCanvasToBytes(
         });
 
         for (const AnnotationObject* o : visible) {
+            if (!doc.IsLayerExportable(o->layerId)) continue;
             if (o->kind == ObjectKind::PdfCard) {
-                // Draw PdfCard placeholder frame + label
-                ss << "0.88 0.90 0.94 rg 0.25 0.30 0.40 RG 1 w "
-                   << FmtNum(o->bounds.x - sliceRect.x) << ' ' << FmtNum(o->bounds.y - sliceRect.y)
-                   << ' ' << FmtNum(o->bounds.w) << ' ' << FmtNum(o->bounds.h) << " re B\n";
-                ss << "0.1 0.1 0.15 rg BT /F2 11 Tf 1 0 0 -1 "
-                   << FmtNum(o->bounds.x - sliceRect.x + 10.0) << ' ' << FmtNum(o->bounds.y - sliceRect.y + 20.0)
-                   << " Tm " << EscapePdfLiteralString(Utf8ToWinAnsi("PDF p." + std::to_string(o->pdfSourcePageIndex0 + 1))) << " Tj ET\n";
+                const double cx = o->bounds.x - sliceRect.x;
+                const double cy = o->bounds.y - sliceRect.y;
+                const double cw = (std::max)(24.0, o->bounds.w);
+                const double ch = (std::max)(24.0, o->bounds.h);
+
+                // Card paper fill
+                ss << "q 1 1 1 rg " << FmtNum(cx) << ' ' << FmtNum(cy) << ' ' << FmtNum(cw) << ' ' << FmtNum(ch) << " re f\n";
+
+                bool renderedCardContent = false;
+                if (o->pdfSourcePageIndex0 >= 0 && (!o->pdfSourcePathUtf8.empty() || !o->pdfSourceAssetKey.empty())) {
+                    const std::string cKey = o->pdfSourcePathUtf8 + "\n" + o->pdfSourceAssetKey + "#" + std::to_string(o->pdfSourcePageIndex0);
+                    std::uint32_t formId = 0;
+                    DocRect srcBox{};
+                    int rotDeg = 0;
+                    auto fit = builtCardForms.find(cKey);
+                    if (fit != builtCardForms.end()) {
+                        formId = fit->second;
+                        srcBox = builtCardGeom[cKey].first;
+                        rotDeg = builtCardGeom[cKey].second;
+                    } else if (auto srcDoc = ResolvePdfSourceCached(doc, o->pdfSourcePathUtf8, o->pdfSourceAssetKey, cardSources)) {
+                        const std::string rKey = o->pdfSourcePathUtf8 + "\n" + o->pdfSourceAssetKey;
+                        if (TryBuildPdfPageFormXObject(*srcDoc, static_cast<std::size_t>(o->pdfSourcePageIndex0), builder, cardRemaps[rKey], formId, srcBox, rotDeg)) {
+                            builtCardForms[cKey] = formId;
+                            builtCardGeom[cKey] = { srcBox, rotDeg };
+                        }
+                    }
+
+                    if (formId != 0 && srcBox.w > 0.5 && srcBox.h > 0.5) {
+                        const std::string resName = "Fm" + std::to_string(xobjects.size() + 1);
+                        xobjects[resName] = formId;
+                        const double bw = srcBox.w;
+                        const double bh = srcBox.h;
+                        double a = 0.0, b = 0.0, c = 0.0, d = 0.0, e = 0.0, f = 0.0;
+                        if (rotDeg == 90) {
+                            c = cw / bh; e = cx - c * srcBox.y;
+                            b = ch / bw; f = cy - b * srcBox.x;
+                        } else if (rotDeg == 180) {
+                            a = -cw / bw; e = cx + cw - a * srcBox.x;
+                            d = ch / bh;  f = cy - d * srcBox.y;
+                        } else if (rotDeg == 270) {
+                            c = -cw / bh; e = cx + cw - c * srcBox.y;
+                            b = -ch / bw; f = cy + ch - b * srcBox.x;
+                        } else {
+                            a = cw / bw;  e = cx - a * srcBox.x;
+                            d = -ch / bh; f = cy + ch - d * srcBox.y;
+                        }
+                        ss << "q " << FmtNum(cx) << ' ' << FmtNum(cy) << ' ' << FmtNum(cw) << ' ' << FmtNum(ch) << " re W n "
+                           << FmtNum(a) << ' ' << FmtNum(b) << ' ' << FmtNum(c) << ' ' << FmtNum(d) << ' ' << FmtNum(e) << ' ' << FmtNum(f)
+                           << " cm /" << resName << " Do Q\n";
+                        renderedCardContent = true;
+                    }
+                }
+
+                if (!renderedCardContent) {
+                    const std::vector<std::uint8_t>* imgBytes = !o->pngBytes.empty() ? &o->pngBytes : doc.FindAsset(o->assetKey);
+                    if (imgBytes && !imgBytes->empty()) {
+                        const std::uint32_t imgId = builder.AddImageXObject(*imgBytes);
+                        if (imgId != 0) {
+                            const std::string resName = "Im" + std::to_string(xobjects.size() + 1);
+                            xobjects[resName] = imgId;
+                            ss << "q " << FmtNum(cw) << " 0 0 " << FmtNum(-ch) << ' ' << FmtNum(cx) << ' ' << FmtNum(cy + ch)
+                               << " cm /" << resName << " Do Q\n";
+                            renderedCardContent = true;
+                        }
+                    }
+                }
+
+                // Crisp border + top corner PDF page pill badge
+                ss << "0.22 0.30 0.42 RG 0.9 w " << FmtNum(cx) << ' ' << FmtNum(cy) << ' ' << FmtNum(cw) << ' ' << FmtNum(ch) << " re S\n";
+                const std::string badge = renderedCardContent
+                    ? ("PDF p." + std::to_string(o->pdfSourcePageIndex0 + 1))
+                    : ("PDF p." + std::to_string(o->pdfSourcePageIndex0 + 1) + " (sin fuente)");
+                ss << "0.14 0.38 0.72 rg " << FmtNum(cx) << ' ' << FmtNum(cy) << ' ' << FmtNum((std::min)(cw, 96.0)) << " 16 re f\n";
+                ss << "1 1 1 rg ";
+                EmitUnicodeAwareTextLine(ss, badge, cx + 6.0, cy + 12.0, 9.5, true, true, builder, pageExtraFonts);
+                if (!o->captionUtf8.empty()) {
+                    ss << "0.1 0.1 0.15 rg ";
+                    EmitUnicodeAwareTextLine(ss, o->captionUtf8, cx + 6.0, cy + ch + 13.0, 9.5, false, true, builder, pageExtraFonts);
+                }
+                ss << "Q\n";
             } else {
-                EmitAnnotationObjectOps(ss, *o, doc, builder, imgs, -sliceRect.x, -sliceRect.y, true);
+                EmitAnnotationObjectOps(ss, *o, doc, builder, xobjects, pageExtraFonts, -sliceRect.x, -sliceRect.y, true);
             }
         }
         ss << "Q\n";
@@ -833,10 +1847,14 @@ bool PdfWriter::ExportInfiniteCanvasToBytes(
         const std::uint32_t pageId = builder.AllocId();
         std::ostringstream pg;
         pg << "<</Type /Page /Parent " << pagesRootId << " 0 R /MediaBox [0 0 " << FmtNum(pw) << ' ' << FmtNum(ph) << "] "
-           << "/Resources <</Font <</F1 " << f1 << " 0 R /F2 " << f2 << " 0 R>> /ExtGState <</GSAlpha " << gsAlpha << " 0 R>>";
-        if (!imgs.empty()) {
+           << "/Resources <</Font <</F1 " << f1 << " 0 R /F2 " << f2 << " 0 R";
+        for (const auto& fkv : pageExtraFonts) {
+            pg << " /" << fkv.first << ' ' << fkv.second << " 0 R";
+        }
+        pg << ">> /ExtGState <</GSAlpha " << gsAlpha << " 0 R>>";
+        if (!xobjects.empty()) {
             pg << " /XObject <<";
-            for (const auto& ikv : imgs) pg << '/' << ikv.first << ' ' << ikv.second << " 0 R ";
+            for (const auto& ikv : xobjects) pg << '/' << ikv.first << ' ' << ikv.second << " 0 R ";
             pg << ">>";
         }
         pg << ">> /Contents " << cid << " 0 R>>";
@@ -849,15 +1867,28 @@ bool PdfWriter::ExportInfiniteCanvasToBytes(
     } else {
         const double pw = (std::max)(144.0, opts.pageWidthPt);
         const double ph = (std::max)(144.0, opts.pageHeightPt);
-        const int cols = (std::max)(1, static_cast<int>(std::ceil(region.w / pw)));
-        const int rows = (std::max)(1, static_cast<int>(std::ceil(region.h / ph)));
-        for (int r = 0; r < rows && pageIds.size() < 200; ++r) {
-            for (int c = 0; c < cols && pageIds.size() < 200; ++c) {
-                const DocRect tile{ region.x + c * pw, region.y + r * ph, pw, ph };
-                if (r == 0 && c == 0 || !doc.QueryCanvasRect(tile).empty()) {
-                    emitSlicePage(tile);
+        const std::size_t safetyCap = (opts.maxPages > 0) ? opts.maxPages : 10000u;
+
+        std::set<std::pair<int, int>> occupiedTiles;
+        for (const auto& obj : doc.CanvasObjects()) {
+            if (!obj.bounds.Intersects(region)) continue;
+            const int c0 = (std::max)(0, static_cast<int>(std::floor((obj.bounds.x - region.x) / pw)));
+            const int c1 = (std::max)(c0, static_cast<int>(std::floor(((std::max)(obj.bounds.x, obj.bounds.Right() - 1e-4) - region.x) / pw)));
+            const int r0 = (std::max)(0, static_cast<int>(std::floor((obj.bounds.y - region.y) / ph)));
+            const int r1 = (std::max)(r0, static_cast<int>(std::floor(((std::max)(obj.bounds.y, obj.bounds.Bottom() - 1e-4) - region.y) / ph)));
+            for (int rr = r0; rr <= r1; ++rr) {
+                for (int cc = c0; cc <= c1; ++cc) {
+                    occupiedTiles.insert({ rr, cc });
                 }
             }
+        }
+        if (occupiedTiles.empty()) {
+            occupiedTiles.insert({ 0, 0 });
+        }
+        for (const auto& rc : occupiedTiles) {
+            if (pageIds.size() >= safetyCap) break;
+            const DocRect tile{ region.x + rc.second * pw, region.y + rc.first * ph, pw, ph };
+            emitSlicePage(tile);
         }
     }
 
@@ -874,6 +1905,7 @@ bool PdfWriter::ExportInfiniteCanvasToBytes(
     }
     pagesDict << "]>>";
     builder.SetObject(pagesRootId, pagesDict.str());
+    builder.FinalizeUnicodeFonts();
     const std::uint32_t catalogId = builder.AddObject("<</Type /Catalog /Pages " + std::to_string(pagesRootId) + " 0 R>>");
     outPdfBytes = builder.Finalize(catalogId);
     return true;
@@ -981,11 +2013,18 @@ bool PdfWriter::TryDirectReplaceTextInPdfBytes(
     const std::string oldLit = EscapePdfLiteralString(Utf8ToWinAnsi(oldTextUtf8));
     const std::string newLit = EscapePdfLiteralString(Utf8ToWinAnsi(newTextUtf8));
 
-    // Rewrite PDF cleanly replacing matching page's decompressed content stream with updated stream
+    // Rewrite PDF cleanly replacing matching page's decompressed content stream while preserving Catalog metadata & Outlines
     PdfBuilder builder;
     std::unordered_map<std::uint32_t, std::uint32_t> remap;
     const std::uint32_t pagesRootId = builder.AllocId();
     std::vector<std::uint32_t> pageIds;
+    pageIds.reserve(doc.PageCount());
+
+    for (std::size_t i = 0; i < doc.PageCount(); ++i) {
+        const std::uint32_t newPageId = builder.AllocId();
+        pageIds.push_back(newPageId);
+        remap[doc.PageAt(i).pageRef.obj] = newPageId;
+    }
 
     for (std::size_t i = 0; i < doc.PageCount(); ++i) {
         const auto& pi = doc.PageAt(i);
@@ -1022,7 +2061,7 @@ bool PdfWriter::TryDirectReplaceTextInPdfBytes(
         PdfValue dictV;
         dictV.kind = PdfValue::Kind::Dict;
         dictV.dictVal = std::move(d);
-        pageIds.push_back(builder.AddObject(PdfDocument::SerializeValue(dictV)));
+        builder.SetObject(pageIds[i], PdfDocument::SerializeValue(dictV));
     }
 
     std::ostringstream pagesDict;
@@ -1033,7 +2072,32 @@ bool PdfWriter::TryDirectReplaceTextInPdfBytes(
     }
     pagesDict << "]>>";
     builder.SetObject(pagesRootId, pagesDict.str());
-    const std::uint32_t catId = builder.AddObject("<</Type /Catalog /Pages " + std::to_string(pagesRootId) + " 0 R>>");
+
+    std::uint32_t catId = 0;
+    if (doc.CatalogRef().obj != 0) {
+        const PdfValue origCat = doc.LookupObject(doc.CatalogRef().obj);
+        if (origCat.IsDict()) {
+            catId = builder.AllocId();
+            remap[doc.CatalogRef().obj] = catId;
+            PdfValue rewrittenCat = builder.RewriteValueRefs(doc, origCat, remap, 1);
+            PdfDict cd = std::move(rewrittenCat.dictVal);
+            PdfValue typeName;
+            typeName.kind = PdfValue::Kind::Name;
+            typeName.strVal = "Catalog";
+            cd["Type"] = typeName;
+            PdfValue pagesRef;
+            pagesRef.kind = PdfValue::Kind::Ref;
+            pagesRef.refVal = { pagesRootId, 0 };
+            cd["Pages"] = pagesRef;
+            PdfValue catV;
+            catV.kind = PdfValue::Kind::Dict;
+            catV.dictVal = std::move(cd);
+            builder.SetObject(catId, PdfDocument::SerializeValue(catV));
+        }
+    }
+    if (catId == 0) {
+        catId = builder.AddObject("<</Type /Catalog /Pages " + std::to_string(pagesRootId) + " 0 R>>");
+    }
     outPdfBytes = builder.Finalize(catId);
     return true;
 }

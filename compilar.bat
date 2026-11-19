@@ -32,6 +32,7 @@ echo [3/3] Listo!
 copy /Y "build-verify\Release\CalculadoraUnificada.exe" "%~dp0CalculadoraUnificada.exe" >nul
 echo.
 echo Ejecutable produccion: CalculadoraUnificada.exe (y build-verify\Release\CalculadoraUnificada.exe)
+echo (build\, build-win32\ y build32\ antiguos se conservan como evidencia; no usar)
 echo Las DLL de GCal se buscan junto al exe y en runtime\
 echo.
 pause
