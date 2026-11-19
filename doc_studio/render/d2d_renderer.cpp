@@ -1379,6 +1379,13 @@ struct D2DRenderer::Impl {
                     }
                 }
             }
+            if (overlay && overlay->hasCropPreview) {
+                const D2D1_RECT_F sr = ToD2DRect(cam.WorldRectToScreen(overlay->cropPreviewPageLocal));
+                brush->SetColor(ToD2DColor(DocColor::RGBA(37, 99, 235, 36)));
+                rt->FillRectangle(sr, brush.Get());
+                brush->SetColor(ToD2DColor(DocColor::RGBA(37, 99, 235, 255)));
+                rt->DrawRectangle(sr, brush.Get(), 2.0f, dashStroke.Get());
+            }
             if (overlay && overlay->laserPointer.active) {
                 const auto& lp = overlay->laserPointer;
                 if (lp.trail.size() >= 2) {

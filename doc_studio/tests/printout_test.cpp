@@ -5,6 +5,7 @@
 #include "../core/notebook_vault.hpp"
 #include "../core/utf_conv.hpp"
 #include "../interop/printout_engine.hpp"
+#include "../app/canvas_manipulation.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -529,6 +530,50 @@ int main(int argc, char** argv) {
         EXPECT(!multiDoc.SearchText("Celda_Fourier_42", false, true).empty());       // From Word DOCX
         EXPECT(!multiDoc.SearchText("Diapositiva_Maxwell_04", false, true).empty()); // From PowerPoint PPTX
         EXPECT(!multiDoc.SearchText("ResonanciaFourier", false, true).empty());      // From Excel/CSV
+    }
+
+    // =========================================================================
+    // Test 18: Region Snip (Circular/Lasso Polygon Mask & Rectangular Cutout)
+    //          copied as Image and pasted onto another canvas/page location
+    // =========================================================================
+    {
+        RasterImageBgra32 snipImg;
+        snipImg.width = 160;
+        snipImg.height = 120;
+        snipImg.pixels.resize(static_cast<std::size_t>(160 * 120 * 4), 255u);
+
+        const DocRect worldRect{ 100.0, 200.0, 160.0, 120.0 };
+        std::vector<DocPoint> circlePoly;
+        for (int k = 0; k < 32; ++k) {
+            const double a = (2.0 * 3.14159265358979323846 * k) / 32.0;
+            circlePoly.push_back({ 180.0 + 55.0 * std::cos(a), 260.0 + 45.0 * std::sin(a) });
+        }
+        CanvasManip::ApplyPolygonMaskToBgra32(snipImg, worldRect, circlePoly);
+
+        // Center pixel (80, 60) must be opaque inside the circle; corner pixel (0, 0) must be transparent (alpha=0)
+        const std::uint8_t centerAlpha = snipImg.pixels[(60u * 160u + 80u) * 4u + 3u];
+        const std::uint8_t cornerAlpha = snipImg.pixels[3u];
+        EXPECT(centerAlpha == 255u);
+        EXPECT(cornerAlpha == 0u);
+
+        std::vector<std::uint8_t> snipPng;
+        EXPECT(WinRtPdfRenderer::EncodeBgra32ToPngBytes(snipImg, snipPng));
+        EXPECT(!snipPng.empty());
+
+        DocumentModel snipDoc;
+        snipDoc.ResetToBlank(DocumentMode::InfiniteCanvas);
+        CommandStack snipStack;
+        AnnotationObject pastedImg{};
+        pastedImg.kind = ObjectKind::Image;
+        pastedImg.bounds = { 800.0, 120.0, 160.0, 120.0 };
+        pastedImg.pngBytes = std::move(snipPng);
+        pastedImg.imagePixelW = snipImg.width;
+        pastedImg.imagePixelH = snipImg.height;
+        pastedImg.captionUtf8 = "Recorte Lazo/Circular";
+        EXPECT(snipStack.Execute(snipDoc, std::make_unique<AddObjectCommand>(ObjectTarget{ true, 0 }, std::move(pastedImg))));
+        EXPECT(snipDoc.CanvasObjects().size() == 1);
+        EXPECT(snipDoc.CanvasObjects()[0].kind == ObjectKind::Image);
+        EXPECT(!snipDoc.CanvasObjects()[0].pngBytes.empty());
     }
 
     std::cout << "PrintoutTest: " << gPassed << " passed, " << gFailed << " failed." << std::endl;

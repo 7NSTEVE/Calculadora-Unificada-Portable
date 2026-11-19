@@ -7,6 +7,7 @@
 #include "../core/image_processing.hpp"
 #include "../core/ink_engine.hpp"
 #include "../core/utf_conv.hpp"
+#include "../pdf/winrt_adapters.hpp"
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -334,6 +335,96 @@ inline std::string ExtractPdfTextInRect(
 }
 
 #ifdef _WIN32
+// Masks a BGRA32 raster image against a freehand or circular polygon in world coordinates,
+// making pixels outside the loop transparent and drawing a subtle 1.5px anti-aliased border.
+inline void ApplyPolygonMaskToBgra32(
+    RasterImageBgra32& img,
+    const DocRect& worldRect,
+    const std::vector<DocPoint>& polyWorld)
+{
+    if (!img.Valid() || polyWorld.size() < 3 || worldRect.w <= 1.0 || worldRect.h <= 1.0) return;
+    const int w = img.width;
+    const int h = img.height;
+    const double sx = static_cast<double>(w) / worldRect.w;
+    const double sy = static_cast<double>(h) / worldRect.h;
+
+    std::vector<DocPoint> polyPx;
+    polyPx.reserve(polyWorld.size());
+    for (const auto& p : polyWorld) {
+        polyPx.push_back({ (p.x - worldRect.x) * sx, (p.y - worldRect.y) * sy });
+    }
+    const std::size_t n = polyPx.size();
+
+    for (int y = 0; y < h; ++y) {
+        const double py = static_cast<double>(y) + 0.5;
+        for (int x = 0; x < w; ++x) {
+            const double px = static_cast<double>(x) + 0.5;
+            bool inside = false;
+            double minEdgeDistSq = 1e18;
+            for (std::size_t i = 0, j = n - 1; i < n; j = i++) {
+                const double xi = polyPx[i].x, yi = polyPx[i].y;
+                const double xj = polyPx[j].x, yj = polyPx[j].y;
+                if (((yi > py) != (yj > py)) &&
+                    (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi)) {
+                    inside = !inside;
+                }
+                const double vx = xj - xi, vy = yj - yi;
+                const double lenSq = vx * vx + vy * vy;
+                double t = (lenSq > 1e-9) ? (((px - xi) * vx + (py - yi) * vy) / lenSq) : 0.0;
+                t = std::clamp(t, 0.0, 1.0);
+                const double dx = px - (xi + t * vx);
+                const double dy = py - (yi + t * vy);
+                const double dSq = dx * dx + dy * dy;
+                if (dSq < minEdgeDistSq) minEdgeDistSq = dSq;
+            }
+            std::uint8_t* p = &img.pixels[(static_cast<std::size_t>(y) * w + x) * 4u];
+            if (!inside) {
+                p[0] = 0; p[1] = 0; p[2] = 0; p[3] = 0;
+            } else if (minEdgeDistSq <= 3.2) {
+                // Subtle accent border along the circular/freehand cutout rim
+                p[0] = 235; p[1] = 115; p[2] = 26; p[3] = 255;
+            }
+        }
+    }
+}
+
+inline bool CopyBgra32ToClipboardWin32(HWND owner, const RasterImageBgra32& img) {
+    if (!img.Valid()) return false;
+    if (!OpenClipboard(owner)) return false;
+    EmptyClipboard();
+    const std::size_t pixelBytes = static_cast<std::size_t>(img.width) * static_cast<std::size_t>(img.height) * 4u;
+    const std::size_t totalBytes = sizeof(BITMAPINFOHEADER) + pixelBytes;
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, totalBytes);
+    if (hMem) {
+        auto* dst = static_cast<std::uint8_t*>(GlobalLock(hMem));
+        if (dst) {
+            BITMAPINFOHEADER bmi{};
+            bmi.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.biWidth = img.width;
+            bmi.biHeight = img.height; // bottom-up standard CF_DIB for maximum app compatibility
+            bmi.biPlanes = 1;
+            bmi.biBitCount = 32;
+            bmi.biCompression = BI_RGB;
+            bmi.biSizeImage = static_cast<DWORD>(pixelBytes);
+            std::memcpy(dst, &bmi, sizeof(bmi));
+            std::uint8_t* outPixels = dst + sizeof(bmi);
+            const std::size_t rowBytes = static_cast<std::size_t>(img.width) * 4u;
+            for (int y = 0; y < img.height; ++y) {
+                const std::uint8_t* srcRow = img.pixels.data() + static_cast<std::size_t>(img.height - 1 - y) * rowBytes;
+                std::memcpy(outPixels + static_cast<std::size_t>(y) * rowBytes, srcRow, rowBytes);
+            }
+            GlobalUnlock(hMem);
+            if (!SetClipboardData(CF_DIB, hMem)) {
+                GlobalFree(hMem);
+            }
+        } else {
+            GlobalFree(hMem);
+        }
+    }
+    CloseClipboard();
+    return true;
+}
+
 inline bool CopyTextToClipboardWin32(HWND owner, const std::string& utf8) {
     if (utf8.empty()) return false;
     const std::wstring w = Utf8ToWide(utf8);

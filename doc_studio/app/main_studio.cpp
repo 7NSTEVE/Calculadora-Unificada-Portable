@@ -284,6 +284,7 @@ enum CmdId : WORD {
     CMD_ADJUST_SHEET_SPACING,
     CMD_INSERT_VERTICAL_SPACE,
     CMD_EDIT_SHEET_CONTENT,
+    CMD_SNIP_REGION_AS_IMAGE,
     CMD_INLINE_EDIT_CTRL = 2599
 };
 
@@ -360,6 +361,9 @@ struct StudioAppState {
     std::vector<AnnotationObject> objectClipboard;
     DocPoint lastContextWorldPt{ 80.0, 80.0 };
     bool hasLastContextWorldPt = false;
+    DocRect lastSnipRectWorld{};
+    std::vector<DocPoint> lastSnipPolyWorld;
+    bool hasLastSnipRegion = false;
 
     std::wstring currentDocPath;
     std::string activePdfSourcePathUtf8;
@@ -1561,6 +1565,60 @@ void PollCasioIpcInbox(StudioAppState* st) {
         UpdateWindowTitle(st);
         InvalidateViews(st);
     }
+}
+
+bool SnipWorldRegionAsImage(
+    StudioAppState* st,
+    const DocRect& worldRect,
+    const std::vector<DocPoint>* optionalPolyWorld = nullptr)
+{
+    if (!st || worldRect.w < 12.0 || worldRect.h < 12.0) return false;
+    const double maxDim = (std::max)(worldRect.w, worldRect.h);
+    const double scale = std::clamp(1100.0 / maxDim, 1.5, 2.75);
+    const int pxW = std::clamp(static_cast<int>(std::lround(worldRect.w * scale)), 24, 2800);
+    const int pxH = std::clamp(static_cast<int>(std::lround(worldRect.h * scale)), 24, 2800);
+
+    Camera2D snipCam{};
+    snipCam.panX = worldRect.x;
+    snipCam.panY = worldRect.y;
+    snipCam.zoom = static_cast<double>(pxW) / worldRect.w;
+
+    ViewportOverlayState snipOv{};
+    snipOv.showSelectionHandles = false;
+    snipOv.darkTheme = false;
+    snipOv.highContrast = false;
+
+    RasterImageBgra32 bgra;
+    if (!st->renderer.RenderHwndViewportToOffscreen(st->doc, snipCam, pxW, pxH, &st->pageCache, bgra, &snipOv) ||
+        !bgra.Valid()) {
+        return false;
+    }
+
+    const bool hasPolyMask = (optionalPolyWorld && optionalPolyWorld->size() >= 3);
+    if (hasPolyMask) {
+        CanvasManip::ApplyPolygonMaskToBgra32(bgra, worldRect, *optionalPolyWorld);
+    }
+
+    std::vector<std::uint8_t> pngBytes;
+    if (!WinRtPdfRenderer::EncodeBgra32ToPngBytes(bgra, pngBytes) || pngBytes.empty()) {
+        return false;
+    }
+
+    AnnotationObject snipObj{};
+    snipObj.kind = ObjectKind::Image;
+    snipObj.layerId = st->doc.ActiveLayerId();
+    snipObj.bounds = worldRect;
+    snipObj.pngBytes = std::move(pngBytes);
+    snipObj.imagePixelW = bgra.width;
+    snipObj.imagePixelH = bgra.height;
+    snipObj.captionUtf8 = hasPolyMask ? "Recorte Lazo/Circular" : "Recorte Rectangular";
+
+    st->objectClipboard = { snipObj };
+    CanvasManip::CopyBgra32ToClipboardWin32(st->hwndMain, bgra);
+    st->statusBannerUtf8 = std::string(hasPolyMask ? "Recorte circular/lazo" : "Recorte rectangular") +
+        " copiado como imagen (" + std::to_string(bgra.width) + "x" + std::to_string(bgra.height) +
+        " px) \xE2\x80\x94 Presione Ctrl+V o clic derecho -> Pegar en cualquier hoja o lienzo";
+    return true;
 }
 
 bool OpenDocumentFile(StudioAppState* st, const std::wstring& path, std::string* outErr = nullptr) {
@@ -3379,6 +3437,38 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         }
         break;
     }
+    case CMD_SNIP_REGION_AS_IMAGE: {
+        DocRect worldRect = st->lastSnipRectWorld;
+        const std::vector<DocPoint>* polyPtr = (st->lastSnipPolyWorld.size() >= 3) ? &st->lastSnipPolyWorld : nullptr;
+        if (!st->hasLastSnipRegion || worldRect.w < 12.0 || worldRect.h < 12.0) {
+            // Fall back to currently selected object(s) bounding box in world coordinates
+            std::vector<std::uint64_t> ids = st->lassoSelectedIds;
+            if (ids.empty() && st->selectedObjectId != 0) ids.push_back(st->selectedObjectId);
+            const ObjectTarget tgt = CurrentTarget(st);
+            double ox = 0.0, oy = 0.0;
+            if (!tgt.isCanvas) {
+                if (const auto* pl = st->doc.Layout().PlacementAt(tgt.pageIndex)) {
+                    ox = pl->WorldRect().x;
+                    oy = pl->WorldRect().y;
+                }
+            }
+            bool any = false;
+            for (std::uint64_t oid : ids) {
+                if (const auto* o = CanvasManip::FindObjectConst(st->doc, tgt, oid)) {
+                    const DocRect wb{ ox + o->bounds.x, oy + o->bounds.y, o->bounds.w, o->bounds.h };
+                    worldRect = any ? DocRect::FromMinMax(
+                        (std::min)(worldRect.x, wb.x), (std::min)(worldRect.y, wb.y),
+                        (std::max)(worldRect.Right(), wb.Right()), (std::max)(worldRect.Bottom(), wb.Bottom())) : wb;
+                    any = true;
+                }
+            }
+            polyPtr = nullptr;
+        }
+        if (!SnipWorldRegionAsImage(st, worldRect, polyPtr)) {
+            st->statusBannerUtf8 = "Encierre primero una regi\xC3\xB3n con Lazo (c\xC3\xADrculo) o Recorte (rect\xC3\xA1ngulo) para copiarla como imagen";
+        }
+        break;
+    }
     case CMD_SEARCH_IN_THIS_SHEET: {
         std::wstring qW;
         if (!ShowTextPrompt(st->hwndMain, L"Buscar en esta hoja", L"Palabra o frase:", qW) || qW.empty()) break;
@@ -4267,6 +4357,9 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     AppendMenuW(cm, MF_STRING, CMD_CLIPBOARD_CUT,   L"Cortar (Ctrl+X)");
                     AppendMenuW(cm, MF_STRING, CMD_CLIPBOARD_COPY,  L"Copiar (Ctrl+C)");
                 }
+                if (st->hasLastSnipRegion || st->selectedObjectId != 0 || !st->lassoSelectedIds.empty()) {
+                    AppendMenuW(cm, MF_STRING, CMD_SNIP_REGION_AS_IMAGE, L"Copiar recorte de regi\u00F3n como imagen (Ctrl+Shift+C)");
+                }
                 AppendMenuW(cm, MF_STRING, CMD_CLIPBOARD_PASTE, L"Pegar (Ctrl+V)");
                 AppendMenuW(cm, MF_STRING, CMD_INSERT_PRINTOUT, L"Insertar copia impresa (PDF / Word / PowerPoint / Excel)...");
                 if (isCanvas) {
@@ -4730,7 +4823,7 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             st->draftObj.shapeKind = ShapeKind::Arrow;
             st->draftObj.shapeStart = { lx, ly };
             st->draftObj.shapeEnd = { lx, ly };
-        } else if (st->activeTool == ToolKind::Crop && !isCanvas) {
+        } else if (st->activeTool == ToolKind::Crop) {
             st->hasDraftCrop = true;
             st->draftCropPageLocal = { lx, ly, 1.0, 1.0 };
         }
@@ -5126,19 +5219,41 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
 
-        if (st->hasDraftCrop && !st->draftIsCanvas && st->draftPageIdx < st->doc.Pages().size()) {
-            const auto& pg = st->doc.Pages()[st->draftPageIdx];
-            const double pw = (std::max)(1.0, pg.EffectiveWidthPt());
-            const double ph = (std::max)(1.0, pg.EffectiveHeightPt());
-            if (st->draftCropPageLocal.w >= 24.0 && st->draftCropPageLocal.h >= 24.0) {
-                NormalizedCropRect nc{
-                    pg.crop.left + (st->draftCropPageLocal.x / pw) * (pg.crop.right - pg.crop.left),
-                    pg.crop.top + (st->draftCropPageLocal.y / ph) * (pg.crop.bottom - pg.crop.top),
-                    pg.crop.left + (st->draftCropPageLocal.Right() / pw) * (pg.crop.right - pg.crop.left),
-                    pg.crop.top + (st->draftCropPageLocal.Bottom() / ph) * (pg.crop.bottom - pg.crop.top)
+        if (st->hasDraftCrop) {
+            const bool shiftHeld = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            if (!st->draftIsCanvas && shiftHeld && st->draftPageIdx < st->doc.Pages().size()) {
+                // Shift + Crop on paginated page: legacy full-page margin crop
+                const auto& pg = st->doc.Pages()[st->draftPageIdx];
+                const double pw = (std::max)(1.0, pg.EffectiveWidthPt());
+                const double ph = (std::max)(1.0, pg.EffectiveHeightPt());
+                if (st->draftCropPageLocal.w >= 24.0 && st->draftCropPageLocal.h >= 24.0) {
+                    NormalizedCropRect nc{
+                        pg.crop.left + (st->draftCropPageLocal.x / pw) * (pg.crop.right - pg.crop.left),
+                        pg.crop.top + (st->draftCropPageLocal.y / ph) * (pg.crop.bottom - pg.crop.top),
+                        pg.crop.left + (st->draftCropPageLocal.Right() / pw) * (pg.crop.right - pg.crop.left),
+                        pg.crop.top + (st->draftCropPageLocal.Bottom() / ph) * (pg.crop.bottom - pg.crop.top)
+                    };
+                    nc.Clamp();
+                    st->cmdStack.Execute(st->doc, std::make_unique<CropPageCommand>(st->draftPageIdx, nc));
+                }
+            } else if (st->draftCropPageLocal.w >= 14.0 && st->draftCropPageLocal.h >= 14.0) {
+                double ox = 0.0, oy = 0.0;
+                if (!st->draftIsCanvas) {
+                    if (const auto* pl = st->doc.Layout().PlacementAt(st->draftPageIdx)) {
+                        ox = pl->WorldRect().x;
+                        oy = pl->WorldRect().y;
+                    }
+                }
+                const DocRect worldRect{
+                    ox + st->draftCropPageLocal.x,
+                    oy + st->draftCropPageLocal.y,
+                    st->draftCropPageLocal.w,
+                    st->draftCropPageLocal.h
                 };
-                nc.Clamp();
-                st->cmdStack.Execute(st->doc, std::make_unique<CropPageCommand>(st->draftPageIdx, nc));
+                st->lastSnipRectWorld = worldRect;
+                st->lastSnipPolyWorld.clear();
+                st->hasLastSnipRegion = true;
+                SnipWorldRegionAsImage(st, worldRect, nullptr);
             }
             st->hasDraftCrop = false;
         } else if (st->draftObj.kind == ObjectKind::InkStroke) {
@@ -5146,12 +5261,36 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 st->draftObj.inkPoints.pop_back();
                 st->hasPredictedTip = false;
             }
+            const bool isLasso = (st->activeTool == ToolKind::Lasso);
+            std::vector<DocPoint> lassoPolyWorld;
+            DocRect lassoWorldRect{};
+            if (isLasso && st->draftObj.inkPoints.size() >= 3) {
+                double ox = 0.0, oy = 0.0;
+                if (!st->draftIsCanvas) {
+                    if (const auto* pl = st->doc.Layout().PlacementAt(st->draftPageIdx)) {
+                        ox = pl->WorldRect().x;
+                        oy = pl->WorldRect().y;
+                    }
+                }
+                double minX = 1e18, minY = 1e18, maxX = -1e18, maxY = -1e18;
+                lassoPolyWorld.reserve(st->draftObj.inkPoints.size());
+                for (const auto& pt : st->draftObj.inkPoints) {
+                    const double wx = ox + pt.x;
+                    const double wy = oy + pt.y;
+                    lassoPolyWorld.push_back({ wx, wy });
+                    minX = (std::min)(minX, wx);
+                    minY = (std::min)(minY, wy);
+                    maxX = (std::max)(maxX, wx);
+                    maxY = (std::max)(maxY, wy);
+                }
+                lassoWorldRect = DocRect::FromMinMax(minX, minY, maxX, maxY);
+            }
             AppActions::HandleStrokeCompletedAction(
                 st->doc,
                 st->cmdStack,
                 ObjectTarget{ st->draftIsCanvas, st->draftPageIdx },
                 st->draftObj,
-                (st->activeTool == ToolKind::Lasso),
+                isLasso,
                 st->snapShapes,
                 st->penStabilization,
                 st->lassoSelectedIds,
@@ -5159,6 +5298,16 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 st->statusBannerUtf8);
             st->selectedIsCanvas = st->draftIsCanvas;
             st->selectedPageIndex = st->draftPageIdx;
+            if (isLasso && lassoWorldRect.w >= 14.0 && lassoWorldRect.h >= 14.0) {
+                st->lastSnipRectWorld = lassoWorldRect;
+                st->lastSnipPolyWorld = std::move(lassoPolyWorld);
+                st->hasLastSnipRegion = true;
+                // When user circles part of a printed document where no separate unlocked objects were enclosed
+                // (or holds Shift while lassoing), automatically copy the circular/freehand cutout as an image!
+                if (st->lassoSelectedIds.empty() || ((GetKeyState(VK_SHIFT) & 0x8000) != 0)) {
+                    SnipWorldRegionAsImage(st, st->lastSnipRectWorld, &st->lastSnipPolyWorld);
+                }
+            }
             AppendWalMutation(st, "add_ink");
         } else {
             st->draftObj.RecomputeBounds();
@@ -6250,7 +6399,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'V') { ExecuteToolbarCommand(st, CMD_CLIPBOARD_PASTE); return 0; }
         if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'X') { ExecuteToolbarCommand(st, CMD_CLIPBOARD_CUT); return 0; }
         if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'C') {
-            ExecuteToolbarCommand(st, CMD_CLIPBOARD_COPY);
+            if (shift || (st->selectedObjectId == 0 && st->lassoSelectedIds.empty() && st->hasLastSnipRegion)) {
+                ExecuteToolbarCommand(st, CMD_SNIP_REGION_AS_IMAGE);
+            } else {
+                ExecuteToolbarCommand(st, CMD_CLIPBOARD_COPY);
+            }
             return 0;
         }
         if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'G') { ExecuteToolbarCommand(st, shift ? CMD_UNGROUP_OBJECTS : CMD_GROUP_OBJECTS); return 0; }
@@ -6673,15 +6826,38 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
                 ink.RecomputeBounds();
                 st->doc.AddCanvasObject(std::move(ink));
 
-                // 2D Natural Math margin note next to the printed page
+                // 2D Natural Math margin note + live circular/lasso cutout snippet pasted next to the printed page
                 if (const auto* card = st->doc.FindCanvasObject(m.objectId)) {
                     AppActions::AddFormulaNodeAction(
                         st->doc, st->cmdStack, ObjectTarget{ true, 0 },
-                        card->bounds.Right() + 14.0, m.worldBox.y - 10.0,
+                        card->bounds.Right() + 14.0, m.worldBox.y - 36.0,
                         "dy_dt = 45 * (3 - 2)^8 / (2*3 + 1)^4", "", st->statusBannerUtf8);
+
+                    const DocRect snipRect{
+                        m.worldBox.x - 12.0,
+                        m.worldBox.y - 6.0,
+                        236.0,
+                        78.0
+                    };
+                    std::vector<DocPoint> circlePoly;
+                    circlePoly.reserve(36);
+                    const double cx = snipRect.x + snipRect.w * 0.5;
+                    const double cy = snipRect.y + snipRect.h * 0.5;
+                    const double rx = snipRect.w * 0.48;
+                    const double ry = snipRect.h * 0.47;
+                    for (int k = 0; k < 36; ++k) {
+                        const double a = (2.0 * 3.14159265358979323846 * k) / 36.0;
+                        circlePoly.push_back({ cx + rx * std::cos(a), cy + ry * std::sin(a) });
+                    }
+                    if (SnipWorldRegionAsImage(st.get(), snipRect, &circlePoly)) {
+                        st->lastContextWorldPt = { card->bounds.Right() + 14.0, m.worldBox.y + 72.0 };
+                        st->hasLastContextWorldPt = true;
+                        ExecuteToolbarCommand(st.get(), CMD_CLIPBOARD_PASTE);
+                    }
+
                     st->statusBannerUtf8 = "Coincidencia " + std::to_string(st->activeSearchIdx + 1) + "/" +
                         std::to_string(st->searchMatches.size()) +
-                        " en Lienzo Infinito \xC2\xB7 \"" + cliOpts.searchQueryUtf8 + "\"";
+                        " en Lienzo Infinito \xC2\xB7 \"" + cliOpts.searchQueryUtf8 + "\" + Recorte circular pegado";
                 }
             }
         }
