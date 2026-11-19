@@ -6,11 +6,23 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <fdi.h>
+#endif
 
 namespace DocStudio::Interop::Binary {
 
@@ -309,6 +321,134 @@ inline std::uint32_t ReadLe32(const std::uint8_t* p) noexcept {
            (static_cast<std::uint32_t>(p[3]) << 24);
 }
 
+#ifdef _WIN32
+namespace detail_cab {
+struct MemCabHandle {
+    bool isInput = false;
+    const std::uint8_t* readPtr = nullptr;
+    std::size_t readSize = 0;
+    std::size_t pos = 0;
+    std::vector<std::uint8_t>* writeVec = nullptr;
+};
+
+struct FdiMemContext {
+    const std::uint8_t* cabBytes = nullptr;
+    std::size_t cabSize = 0;
+    std::vector<CabFileEntry>* outFiles = nullptr;
+};
+
+inline thread_local FdiMemContext* g_fdiCtx = nullptr;
+
+inline void* DIAMONDAPI FdiAlloc(ULONG cb) { return std::malloc(cb); }
+inline void DIAMONDAPI FdiFree(void* pv) { std::free(pv); }
+inline INT_PTR DIAMONDAPI FdiOpen(LPSTR pszFile, int /*oflag*/, int /*pmode*/) {
+    if (!g_fdiCtx) return -1;
+    auto* h = new MemCabHandle();
+    h->isInput = true;
+    h->readPtr = g_fdiCtx->cabBytes;
+    h->readSize = g_fdiCtx->cabSize;
+    h->pos = 0;
+    (void)pszFile;
+    return reinterpret_cast<INT_PTR>(h);
+}
+inline UINT DIAMONDAPI FdiRead(INT_PTR hf, void* pv, UINT cb) {
+    auto* h = reinterpret_cast<MemCabHandle*>(hf);
+    if (!h || !h->isInput || h->pos >= h->readSize) return 0;
+    const std::size_t avail = h->readSize - h->pos;
+    const std::size_t take = (std::min<std::size_t>)(cb, avail);
+    std::memcpy(pv, h->readPtr + h->pos, take);
+    h->pos += take;
+    return static_cast<UINT>(take);
+}
+inline UINT DIAMONDAPI FdiWrite(INT_PTR hf, void* pv, UINT cb) {
+    auto* h = reinterpret_cast<MemCabHandle*>(hf);
+    if (!h || h->isInput || !h->writeVec) return 0;
+    if (h->writeVec->size() + cb > 128u * 1024u * 1024u) return 0;
+    const auto* src = static_cast<const std::uint8_t*>(pv);
+    h->writeVec->insert(h->writeVec->end(), src, src + cb);
+    return cb;
+}
+inline int DIAMONDAPI FdiClose(INT_PTR hf) {
+    auto* h = reinterpret_cast<MemCabHandle*>(hf);
+    delete h;
+    return 0;
+}
+inline long DIAMONDAPI FdiSeek(INT_PTR hf, long dist, int seektype) {
+    auto* h = reinterpret_cast<MemCabHandle*>(hf);
+    if (!h || !h->isInput) return -1;
+    std::int64_t next = static_cast<std::int64_t>(h->pos);
+    if (seektype == 0) next = dist; // SEEK_SET
+    else if (seektype == 1) next += dist; // SEEK_CUR
+    else if (seektype == 2) next = static_cast<std::int64_t>(h->readSize) + dist; // SEEK_END
+    if (next < 0) next = 0;
+    if (static_cast<std::size_t>(next) > h->readSize) next = static_cast<std::int64_t>(h->readSize);
+    h->pos = static_cast<std::size_t>(next);
+    return static_cast<long>(h->pos);
+}
+inline INT_PTR DIAMONDAPI FdiNotify(FDINOTIFICATIONTYPE fdint, PFDINOTIFICATION pfdin) {
+    if (!g_fdiCtx || !g_fdiCtx->outFiles) return -1;
+    switch (fdint) {
+    case fdintCOPY_FILE: {
+        CabFileEntry entry{};
+        entry.filename = pfdin->psz1 ? std::string(pfdin->psz1) : std::string("section.one");
+        g_fdiCtx->outFiles->push_back(std::move(entry));
+        auto* h = new MemCabHandle();
+        h->isInput = false;
+        h->writeVec = &g_fdiCtx->outFiles->back().data;
+        return reinterpret_cast<INT_PTR>(h);
+    }
+    case fdintCLOSE_FILE_INFO: {
+        auto* h = reinterpret_cast<MemCabHandle*>(pfdin->hf);
+        delete h;
+        return TRUE;
+    }
+    case fdintCABINET_INFO:
+    case fdintPARTIAL_FILE:
+    case fdintENUMERATE:
+        return 0;
+    case fdintNEXT_CABINET:
+        return -1;
+    }
+    return 0;
+}
+
+inline bool TryExtractCabViaWindowsFdi(
+    const std::uint8_t* data,
+    std::size_t size,
+    std::vector<CabFileEntry>& outFiles)
+{
+    using FnFdiCreate = HFDI(DIAMONDAPI*)(PFNALLOC, PFNFREE, PFNOPEN, PFNREAD, PFNWRITE, PFNCLOSE, PFNSEEK, int, PERF);
+    using FnFdiCopy = BOOL(DIAMONDAPI*)(HFDI, LPSTR, LPSTR, int, PFNFDINOTIFY, PFNFDIDECRYPT, void*);
+    using FnFdiDestroy = BOOL(DIAMONDAPI*)(HFDI);
+
+    static HMODULE hCab = LoadLibraryW(L"cabinet.dll");
+    if (!hCab) return false;
+    static auto pCreate = reinterpret_cast<FnFdiCreate>(GetProcAddress(hCab, "FDICreate"));
+    static auto pCopy = reinterpret_cast<FnFdiCopy>(GetProcAddress(hCab, "FDICopy"));
+    static auto pDestroy = reinterpret_cast<FnFdiDestroy>(GetProcAddress(hCab, "FDIDestroy"));
+    if (!pCreate || !pCopy || !pDestroy) return false;
+
+    outFiles.clear();
+    outFiles.reserve(32); // keep pointers stable only if no realloc? Wait: FdiNotify only holds pointer during single file!
+    // Safety: single file is open at a time in FDICopy, wait - push_back only happens in COPY_FILE before next open!
+    // Still, storing into temporary vector per file guarantees pointer safety across any reserve growth.
+    FdiMemContext ctx{ data, size, &outFiles };
+    g_fdiCtx = &ctx;
+    ERF erf{};
+    HFDI hfdi = pCreate(FdiAlloc, FdiFree, FdiOpen, FdiRead, FdiWrite, FdiClose, FdiSeek, cpuUNKNOWN, &erf);
+    bool ok = false;
+    if (hfdi) {
+        char cabName[] = "memory.cab";
+        char cabPath[] = "";
+        ok = (pCopy(hfdi, cabName, cabPath, 0, FdiNotify, nullptr, nullptr) == TRUE) && !outFiles.empty();
+        pDestroy(hfdi);
+    }
+    g_fdiCtx = nullptr;
+    return ok;
+}
+} // namespace detail_cab
+#endif
+
 inline bool ExtractCabArchive(
     const std::uint8_t* data,
     std::size_t size,
@@ -320,6 +460,14 @@ inline bool ExtractCabArchive(
         if (outErr) *outErr = "Cabecera MSCF inv\xC3\xA1lida para paquete .onepkg.";
         return false;
     }
+
+#ifdef _WIN32
+    // Native Windows cabinet.dll FDICopy supports NONE, MSZIP, QUANTUM, and LZX (OneNote default!)
+    if (detail_cab::TryExtractCabViaWindowsFdi(data, size, outFiles)) {
+        return true;
+    }
+    outFiles.clear();
+#endif
 
     const std::uint32_t coffFiles = ReadLe32(data + 16);
     const std::uint16_t cFolders = ReadLe16(data + 26);

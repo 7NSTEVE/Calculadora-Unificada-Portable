@@ -268,7 +268,9 @@ json ObjectToJson(
         j["evaluatedResult"] = obj.evaluatedResultUtf8;
         j["caption"] = obj.captionUtf8;
     } else if (obj.kind == ObjectKind::AudioClip) {
-        j["audioAssetKey"] = obj.audioAssetKey;
+        const std::string effKey = !obj.audioAssetKey.empty() ? obj.audioAssetKey : obj.assetKey;
+        j["audioAssetKey"] = effKey;
+        j["assetKey"] = effKey;
         j["caption"] = obj.captionUtf8;
         j["text"] = obj.textUtf8;
     }
@@ -431,6 +433,9 @@ bool JsonToObject(const json& j, const ZipArchive& zip, AnnotationObject& out, s
         out.captionUtf8 = j.value("caption", "");
     } else if (out.kind == ObjectKind::AudioClip) {
         out.audioAssetKey = j.value("audioAssetKey", "");
+        out.assetKey = j.value("assetKey", "");
+        if (out.audioAssetKey.empty()) out.audioAssetKey = out.assetKey;
+        if (out.assetKey.empty()) out.assetKey = out.audioAssetKey;
         out.captionUtf8 = j.value("caption", "");
         out.textUtf8 = j.value("text", "");
     }

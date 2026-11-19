@@ -127,28 +127,38 @@ bool PageLayout::ComputeVisibleRange(
     if (placements_.empty()) return false;
     if (viewBottomWorld < viewTopWorld) std::swap(viewTopWorld, viewBottomWorld);
 
-    // Binary search first placement whose bottom >= viewTopWorld
-    auto itFirst = std::lower_bound(
-        placements_.begin(), placements_.end(), viewTopWorld,
-        [](const PagePlacement& p, double y) {
-            return (p.topWorld + p.heightWorld) < y;
-        });
-
-    std::size_t first = (itFirst == placements_.end())
-        ? (placements_.size() - 1)
-        : static_cast<std::size_t>(itFirst - placements_.begin());
-
-    // Binary search first placement whose top > viewBottomWorld
+    // Note: topWorld is guaranteed monotonically non-decreasing even for double-page spreads
+    // with differing page heights and collapsed ranges (whereas topWorld + heightWorld is NOT).
     auto itPast = std::upper_bound(
-        placements_.begin() + static_cast<std::ptrdiff_t>(first), placements_.end(), viewBottomWorld,
+        placements_.begin(), placements_.end(), viewBottomWorld,
         [](double y, const PagePlacement& p) {
             return y < p.topWorld;
         });
-
-    std::size_t last = (itPast == placements_.begin())
+    const std::size_t last = (itPast == placements_.begin())
         ? 0
         : static_cast<std::size_t>((itPast - placements_.begin()) - 1);
-    if (last < first) last = first;
+
+    // Find earliest placement in [0..last] whose vertical span reaches viewTopWorld
+    auto itTop = std::lower_bound(
+        placements_.begin(), placements_.begin() + static_cast<std::ptrdiff_t>(last + 1), viewTopWorld,
+        [](const PagePlacement& p, double y) {
+            return p.topWorld < y;
+        });
+    std::size_t first = (itTop == placements_.end())
+        ? last
+        : static_cast<std::size_t>(itTop - placements_.begin());
+    // Step backward across any earlier rows whose height still overlaps viewTopWorld
+    while (first > 0) {
+        const auto& prev = placements_[first - 1];
+        const bool prevPairOverlap = (first >= 2 &&
+            placements_[first - 2].topWorld == prev.topWorld &&
+            (placements_[first - 2].topWorld + placements_[first - 2].heightWorld) >= viewTopWorld);
+        if ((prev.topWorld + prev.heightWorld) >= viewTopWorld || prevPairOverlap || prev.collapsed) {
+            --first;
+        } else {
+            break;
+        }
+    }
 
     outFirst = (first > prefetchMargin) ? (first - prefetchMargin) : 0;
     outLast = (std::min)(placements_.size() - 1, last + prefetchMargin);
@@ -163,26 +173,32 @@ bool PageLayout::HitTestWorldPoint(
     double& outLocalY) const noexcept
 {
     if (placements_.empty()) return false;
-    auto it = std::lower_bound(
+    // topWorld is strictly non-decreasing; upper_bound gives first placement with topWorld > wy.
+    auto itPast = std::upper_bound(
         placements_.begin(), placements_.end(), wy,
-        [](const PagePlacement& p, double y) {
-            return (p.topWorld + p.heightWorld) < y;
+        [](double y, const PagePlacement& p) {
+            return y < p.topWorld;
         });
-    if (it == placements_.end()) return false;
-    // Check both pages in a potential double-page row starting around it
-    std::size_t startIdx = static_cast<std::size_t>(it - placements_.begin());
-    if (startIdx > 0) --startIdx;
-    const std::size_t endIdx = (std::min)(placements_.size(), startIdx + 4);
-    for (std::size_t idx = startIdx; idx < endIdx; ++idx) {
+    if (itPast == placements_.begin()) return false;
+
+    std::size_t idx = static_cast<std::size_t>((itPast - placements_.begin()) - 1);
+    // Walk backward across same-row spread pair and any taller overlapping row above
+    std::size_t scannedNonCollapsed = 0;
+    while (true) {
         const auto& pl = placements_[idx];
-        if (pl.widthWorld <= 0.0 || pl.heightWorld <= 0.0) continue;
-        const DocRect r = pl.WorldRect();
-        if (r.Contains(wx, wy, 0.0)) {
-            outPageIndex = pl.pageIndex;
-            outLocalX = wx - r.x;
-            outLocalY = wy - r.y;
-            return true;
+        if (pl.widthWorld > 0.0 && pl.heightWorld > 0.0) {
+            const DocRect r = pl.WorldRect();
+            if (r.Contains(wx, wy, 0.0)) {
+                outPageIndex = pl.pageIndex;
+                outLocalX = wx - r.x;
+                outLocalY = wy - r.y;
+                return true;
+            }
+            ++scannedNonCollapsed;
+            if ((pl.topWorld + pl.heightWorld) < wy && scannedNonCollapsed >= 4) break;
         }
+        if (idx == 0) break;
+        --idx;
     }
     return false;
 }

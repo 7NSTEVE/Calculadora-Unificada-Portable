@@ -13,7 +13,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <unordered_map>
 
 namespace DocStudio {
 
@@ -41,6 +46,71 @@ D2D1_RECT_F ToD2DRect(const DocRect& r) noexcept {
         static_cast<FLOAT>(r.y),
         static_cast<FLOAT>(r.Right()),
         static_cast<FLOAT>(r.Bottom()));
+}
+
+std::uint64_t HashBytesFnv1a64(const std::vector<std::uint8_t>& bytes) noexcept {
+    std::uint64_t h = 14695981039346656037ull;
+    const std::size_t n = bytes.size();
+    const std::size_t step = (n > 8192u) ? (n / 4096u) : 1u;
+    for (std::size_t i = 0; i < n; i += step) {
+        h ^= static_cast<std::uint64_t>(bytes[i]);
+        h *= 1099511628211ull;
+    }
+    h ^= static_cast<std::uint64_t>(n);
+    h *= 1099511628211ull;
+    return h;
+}
+
+// Materializes embedded PDF asset bytes (from migrated .goodnotes / .note / portable .cudoc)
+// into a deterministic %TEMP%\CuadernU\pdf_cache\<key>.pdf file so WinRT PDF rendering works
+// even when sourcePdfPathUtf8 is empty or originated on another device.
+std::string ResolvePdfSourcePathForRender(const DocumentModel& doc, const PageModel& pg) {
+    if (!pg.sourcePdfPathUtf8.empty()) {
+        std::error_code ec;
+        if (std::filesystem::exists(std::filesystem::path(Utf8ToWide(pg.sourcePdfPathUtf8)), ec)) {
+            return pg.sourcePdfPathUtf8;
+        }
+    }
+    if (pg.sourcePdfAssetKey.empty()) return pg.sourcePdfPathUtf8;
+    const auto* bytes = doc.FindAsset(pg.sourcePdfAssetKey);
+    if (!bytes || bytes->empty()) return pg.sourcePdfPathUtf8;
+
+    static std::mutex sCacheMtx;
+    static std::unordered_map<std::string, std::string> sMaterialized;
+    const std::string cacheKey = pg.sourcePdfAssetKey + "#" + std::to_string(bytes->size()) + "#" + std::to_string(HashBytesFnv1a64(*bytes));
+    {
+        std::lock_guard<std::mutex> lk(sCacheMtx);
+        auto it = sMaterialized.find(cacheKey);
+        if (it != sMaterialized.end()) {
+            std::error_code ec;
+            if (std::filesystem::exists(std::filesystem::path(Utf8ToWide(it->second)), ec)) {
+                return it->second;
+            }
+        }
+    }
+
+    wchar_t tmpRoot[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, tmpRoot);
+    const std::filesystem::path dir = std::filesystem::path(tmpRoot) / L"CuadernU" / L"pdf_cache";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+
+    char hexName[64]{};
+    std::snprintf(hexName, sizeof(hexName), "pdf_%016llx_%zu.pdf",
+        static_cast<unsigned long long>(HashBytesFnv1a64(*bytes)), bytes->size());
+    const std::filesystem::path outPath = dir / hexName;
+    if (!std::filesystem::exists(outPath, ec) || std::filesystem::file_size(outPath, ec) != bytes->size()) {
+        std::ofstream ofs(outPath, std::ios::binary | std::ios::trunc);
+        if (ofs.is_open()) {
+            ofs.write(reinterpret_cast<const char*>(bytes->data()), static_cast<std::streamsize>(bytes->size()));
+        }
+    }
+    const std::string utf8Out = WideToUtf8(outPath.wstring());
+    {
+        std::lock_guard<std::mutex> lk(sCacheMtx);
+        sMaterialized[cacheKey] = utf8Out;
+    }
+    return utf8Out;
 }
 
 class D2DMathBackend final : public MathTypeset::IMathDrawBackend {
@@ -857,7 +927,8 @@ struct D2DRenderer::Impl {
             const std::vector<std::uint8_t>* bytesPtr = !obj.pngBytes.empty() ? &obj.pngBytes : doc.FindAsset(obj.assetKey);
             const D2D1_RECT_F sr = rectToScreen(obj.bounds);
             if (bytesPtr && !bytesPtr->empty()) {
-                const std::string tag = !obj.assetKey.empty() ? obj.assetKey : ("inline_" + std::to_string(obj.id));
+                const std::string baseTag = !obj.assetKey.empty() ? obj.assetKey : ("inline_" + std::to_string(obj.id));
+                const std::string tag = baseTag + "#" + std::to_string(bytesPtr->size()) + "#" + std::to_string(HashBytesFnv1a64(*bytesPtr));
                 ComPtr<ID2D1Bitmap> bmp = AcquireGpuBitmapForEncodedAsset(rt, tag, *bytesPtr, cacheGpuAssets);
                 if (bmp) {
                     const D2D1_SIZE_F bsz = bmp->GetSize();
@@ -1288,9 +1359,12 @@ struct D2DRenderer::Impl {
             rt->DrawRectangle(pageScreen, brush.Get(), isHc ? 1.25f : 0.8f);
 
             const auto& pg = pages[p];
-            if (pg.hasPdfSource && !pg.sourcePdfPathUtf8.empty()) {
+            if (pg.hasPdfSource && (!pg.sourcePdfPathUtf8.empty() || !pg.sourcePdfAssetKey.empty())) {
+                const std::string resolvedPdfPath = ResolvePdfSourcePathForRender(doc, pg);
+                if (!resolvedPdfPath.empty()) {
                 const int targetW = static_cast<int>(std::lround((std::max)(80.0, static_cast<double>(pageScreen.right - pageScreen.left))));
-                const PageCacheKey key = PageRenderCache::MakeKey(pg, targetW);
+                PageCacheKey key = PageRenderCache::MakeKey(pg, targetW);
+                key.sourcePdfPath = resolvedPdfPath;
 
                 RasterImageBgra32 img;
                 bool haveRaster = pageCache && pageCache->TryGet(key, img);
@@ -1298,7 +1372,7 @@ struct D2DRenderer::Impl {
                     NormalizedCropRect c = pg.crop;
                     c.Clamp();
                     haveRaster = WinRtPdfRenderer::RenderPageToBgra32(
-                        Utf8ToWide(pg.sourcePdfPathUtf8), pg.sourcePageIndex0,
+                        Utf8ToWide(resolvedPdfPath), pg.sourcePageIndex0,
                         key.widthBucketPx, key.rotationDeg, c, img);
                     if (haveRaster && pageCache) pageCache->PutDirect(key, img);
                 }
@@ -1334,6 +1408,7 @@ struct D2DRenderer::Impl {
                                 D2D1::RectF(pageScreen.left + 16.0f, pageScreen.top + 16.0f, pageScreen.right - 16.0f, pageScreen.bottom - 16.0f), brush.Get());
                         }
                     }
+                }
                 }
             }
 

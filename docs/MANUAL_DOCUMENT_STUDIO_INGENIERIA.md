@@ -1,6 +1,6 @@
-# Manual de Usuario — Document Studio (Lienzo Infinito y PDF Científico)
+# Manual de Usuario — CuadernU (Cuaderno Digital, Lienzo Infinito y PDF Científico)
 
-**Document Studio** es el entorno de documentos técnicos, cuaderno digital de baja latencia, visor/editor nativo de PDF y laboratorio interactivo de ingeniería integrado con **Calculadora Unificada** en Windows y Linux.
+**CuadernU** (`CuadernU.exe`, con alias de compatibilidad `DocumentStudio.exe`) es el entorno de documentos técnicos, cuaderno digital de baja latencia, visor/editor nativo de PDF, motor de migración multiformato y laboratorio interactivo de ingeniería integrado con **Calculadora Unificada** en Windows.
 
 ---
 
@@ -76,7 +76,7 @@ Cada bloque matemático puede alternar entre tres modos de presentación:
 
 ## 4. Simulador de Circuitos MNA, Osciloscopio Transitorio y Laplace (`s`)
 
-Document Studio resuelve netlists tipo SPICE mediante **Análisis Nodal Modificado (MNA)** tanto en régimen permanente como en el dominio del tiempo y de Laplace.
+CuadernU resuelve netlists tipo SPICE mediante **Análisis Nodal Modificado (MNA)** tanto en régimen permanente como en el dominio del tiempo y de Laplace.
 
 ### 4.1 Componentes Soportados (Nodo `0` = Tierra / Referencia)
 
@@ -101,8 +101,8 @@ Document Studio resuelve netlists tipo SPICE mediante **Análisis Nodal Modifica
 
 ## 5. Puente Bidireccional con Calculadoras Oficiales CASIO y Memoria de Cálculo
 
-- **Emulador → Lienzo (`Enviar -> Lienzo`)**:
-  - Desde `CalculadoraUnificada`, transfiere el modelo activo (`fx-991CW`, `fx-991LA X`, `fx-570VN PLUS`, `fx-CG50`), la secuencia auditada de pulsaciones, la expresión en LaTeX y la captura de pantalla LCD hacia una **Tarjeta CASIO Interactiva** en el lienzo.
+- **Emulador → Lienzo (`Enviar a CuadernU`)**:
+  - Desde `CalculadoraUnificada.exe`, transfiere en vivo el modelo activo (`fx-991CW`, `fx-991LA X`, `fx-570VN PLUS`, `fx-CG50`), la secuencia auditada de pulsaciones, la expresión matemática en notación 2D natural y la captura de pantalla LCD hacia una **Tarjeta CASIO Interactiva** en el lienzo.
 - **Lienzo → Teclas CASIO (`Traducir Ecuación/Matriz/Fasor -> Teclas CASIO`)**:
   - Convierte expresiones con prefijos de ingeniería, sistemas de ecuaciones simultáneas (`SEL`), matrices (`det`, `inv`, multiplicación) o fasores complejos en la macro exacta de botones físicos para `fx-991CW` (`[HOME] -> Equation / Matrix / Complex`) o `fx-991LA X` (`[MENU] -> [A] / [4] / [2]`).
 - **Exportación de Memoria de Cálculo / Informe de Laboratorio (`.html` / `.md`)**:
@@ -119,8 +119,9 @@ Document Studio resuelve netlists tipo SPICE mediante **Análisis Nodal Modifica
 - **Enlaces Bidireccionales `PDF ↔ Lienzo` (*InkLinks*) y Colapso de Páginas**: navegación cruzada entre páginas de manuales PDF y nodos del Lienzo Infinito, más plegado temporal de rangos de páginas.
 - **Persistencia Atómica `.cudoc`, WAL y Fusión sin Pérdida**:
   - Guardado transaccional ZIP/JSON con respaldo automático, registro *Write-Ahead Log* (`WAL`), fronteras seguras de Deshacer (`Undo Boundary`), historial de instantáneas por página y resolución de ediciones offline concurrentes mediante páginas de conflicto lado a lado.
-- **Interoperabilidad Office y PDF Nativo**:
-  - Importación y exportación de `.pdf`, `.docx`, `.pptx`, `.xlsx` y `.csv`, combinación/división de archivos PDF y firma criptográfica estándar PKCS#7 detached (`SHA-256`).
+- **Motor de Interoperabilidad, Migración e Importación Multiformato de Alta Fidelidad**:
+  - Migración nativa con informe previo de compatibilidad en 3 niveles (**Visual**, **Estructural** y **Editable**) desde **Goodnotes 6 (`.goodnotes`)**, **Notability (`.note`)**, **Microsoft OneNote (`.one` / `.onepkg` con descompresión nativa CAB `NONE`/`MSZIP`/`LZX`)**, **CuadernU Clásico (`.tinta`)**, **Microsoft Word (`.docx` con encabezados, tablas, imágenes y ecuaciones OMML)**, **Microsoft PowerPoint (`.pptx` con diapositivas, formas, tablas, imágenes y tinta vectorial)** y **PDF (`.pdf` con `/Outlines`, enlaces, formularios AcroForm, adjuntos y censura permanente)**.
+  - Exportación bidireccional a `.cudoc` (y cifrado AES-256-GCM), `.pdf` (vectorial o firmado PKCS#7 SHA-256), `.docx`, `.pptx`, `.csv`, tutorial sincronizado `.html` y paquetes de examen LMS `.zip`.
 - **Apariencia Liquid Glass 2.0 y Accesibilidad WCAG AAA**:
   - Popover de apariencia en vivo con modos **Claro**, **Oscuro** y **Alto Contraste** (bordes nítidos de `1 px`), deslizador continuo de opacidad del material vítreo (`Diseño` / `Equilibrado` / `Esmerilado`) y conmutador de *Reducir Transparencia*.
 - **Módulos Académicos Universitarios (Solo Lectura + HorariosTEC)**:
@@ -128,15 +129,18 @@ Document Studio resuelve netlists tipo SPICE mediante **Análisis Nodal Modifica
 
 ---
 
-## 7. Línea de Comandos (`DocumentStudio` / `document-studio`)
+## 7. Línea de Comandos (`CuadernU.exe`)
 
 ```bash
 # Abrir un documento PDF o proyecto .cudoc en una página específica
-DocumentStudio --open manuales/fx-570_991LA_X_ES.pdf --page 5
+CuadernU.exe --open manuales/fx-570_991LA_X_ES.pdf --page 5
+
+# Migrar un cuaderno de Goodnotes 6, Notability, OneNote, Word, PowerPoint o .tinta
+CuadernU.exe --migrate apuntes.goodnotes --out-cudoc apuntes.cudoc --out-report reporte.json
 
 # Iniciar directamente en Lienzo Infinito con una tarjeta CASIO evaluada
-DocumentStudio --mode canvas --calc-card "fx-991CW|4.7 kOhm * 2 mA|V_out = 4.7 kOhm * 2 mA | V"
+CuadernU.exe --mode canvas --calc-card "fx-991CW|4.7 kOhm * 2 mA|V_out = 4.7 kOhm * 2 mA | V"
 
 # Cargar escena de demostración STEM completa (3D CVD, MNA Transitorio, #varsub, Regla y Minimapa)
-DocumentStudio --showcase-stem
+CuadernU.exe --showcase-stem
 ```

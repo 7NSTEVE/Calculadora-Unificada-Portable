@@ -419,6 +419,38 @@ bool CudocWal::RecoverDocument(
                 } else {
                     if (outDoc.RemovePageObject(pageIdx, oid)) ++replayed;
                 }
+            } else if (rec.opTag == "snapshot") {
+                const std::string b64 = pj.value("cudocB64", "");
+                if (!b64.empty()) {
+                    auto b64Val = [](unsigned char c) -> int {
+                        if (c >= 'A' && c <= 'Z') return c - 'A';
+                        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+                        if (c >= '0' && c <= '9') return c - '0' + 52;
+                        if (c == '+') return 62;
+                        if (c == '/') return 63;
+                        return -1;
+                    };
+                    std::vector<std::uint8_t> raw;
+                    raw.reserve((b64.size() * 3) / 4);
+                    std::uint32_t acc = 0;
+                    int bits = 0;
+                    for (unsigned char ch : b64) {
+                        if (ch == '=') break;
+                        const int v = b64Val(ch);
+                        if (v < 0) continue;
+                        acc = (acc << 6) | static_cast<std::uint32_t>(v);
+                        bits += 6;
+                        if (bits >= 8) {
+                            bits -= 8;
+                            raw.push_back(static_cast<std::uint8_t>((acc >> bits) & 0xFFu));
+                        }
+                    }
+                    DocumentModel snapDoc;
+                    if (!raw.empty() && CudocStorage::DeserializeFromBytes(raw.data(), raw.size(), snapDoc, nullptr)) {
+                        outDoc = std::move(snapDoc);
+                        ++replayed;
+                    }
+                }
             }
         } catch (...) {
             // Skip malformed single delta gracefully

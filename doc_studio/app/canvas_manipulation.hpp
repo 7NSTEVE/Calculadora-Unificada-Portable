@@ -13,6 +13,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -352,7 +354,7 @@ inline bool CopyTextToClipboardWin32(HWND owner, const std::string& utf8) {
     return true;
 }
 
-// Paste image (CF_DIB / CF_HDROP image file) or text (CF_UNICODETEXT) from Windows clipboard (F-099)
+// Paste image (CF_HDROP / CF_DIBV5 / CF_DIB) or text (CF_UNICODETEXT) from Windows clipboard (F-099)
 inline bool PasteClipboardIntoDocument(
     HWND owner,
     DocumentModel& doc,
@@ -364,51 +366,128 @@ inline bool PasteClipboardIntoDocument(
 {
     if (!OpenClipboard(owner)) return false;
 
-    // 1. Check bitmap / DIB on clipboard
-    if (IsClipboardFormatAvailable(CF_DIB)) {
-        HANDLE hDib = GetClipboardData(CF_DIB);
+    // 0. Check copied image file path(s) from Windows Explorer (CF_HDROP)
+    if (IsClipboardFormatAvailable(CF_HDROP)) {
+        HDROP hDrop = static_cast<HDROP>(GetClipboardData(CF_HDROP));
+        if (hDrop) {
+            const UINT cnt = DragQueryFileW(hDrop, 0xFFFFFFFFu, nullptr, 0);
+            if (cnt > 0) {
+                wchar_t filePath[MAX_PATH * 2]{};
+                if (DragQueryFileW(hDrop, 0, filePath, static_cast<UINT>(std::size(filePath))) > 0) {
+                    const std::wstring wpath(filePath);
+                    CloseClipboard();
+                    std::ifstream ifs(std::filesystem::path(wpath), std::ios::binary | std::ios::ate);
+                    if (ifs.is_open()) {
+                        const auto fsz = ifs.tellg();
+                        if (fsz > 0 && static_cast<std::uint64_t>(fsz) <= 64ull * 1024ull * 1024ull) {
+                            std::vector<std::uint8_t> rawBytes(static_cast<std::size_t>(fsz));
+                            ifs.seekg(0, std::ios::beg);
+                            if (ifs.read(reinterpret_cast<char*>(rawBytes.data()), fsz)) {
+                                ImageProc::RgbaImage decoded{};
+                                bool okDec = false;
+                                if (wpath.size() >= 4 && _wcsicmp(wpath.c_str() + wpath.size() - 4, L".svg") == 0) {
+                                    okDec = ImageProc::RasterizeSimpleSvgToRgba(std::string(rawBytes.begin(), rawBytes.end()), decoded, 512, 512);
+                                } else {
+                                    okDec = ImageProc::DecodeImageBytesWic(rawBytes.data(), rawBytes.size(), decoded);
+                                }
+                                std::vector<std::uint8_t> png;
+                                if (okDec && ImageProc::EncodeRgbaToPngWic(decoded, png)) {
+                                    AnnotationObject obj{};
+                                    obj.kind = ObjectKind::Image;
+                                    obj.layerId = doc.ActiveLayerId();
+                                    const double dispW = std::clamp(static_cast<double>(decoded.width) * 0.65, 120.0, 420.0);
+                                    const double dispH = dispW * (static_cast<double>(decoded.height) / (std::max)(1, decoded.width));
+                                    obj.bounds = { worldX, worldY, dispW, dispH };
+                                    obj.pngBytes = std::move(png);
+                                    cmdStack.Execute(doc, std::make_unique<AddObjectCommand>(target, std::move(obj)));
+                                    outStatus = "Archivo de imagen pegado (" + std::to_string(decoded.width) + "x" + std::to_string(decoded.height) + ").";
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    return false;
+                }
+            }
+        }
+    }
+
+    // 1. Check bitmap / DIBV5 / DIB on clipboard with safe header offset & real alpha preservation
+    const UINT dibFmt = IsClipboardFormatAvailable(CF_DIBV5) ? CF_DIBV5
+                      : (IsClipboardFormatAvailable(CF_DIB) ? CF_DIB : 0u);
+    if (dibFmt != 0u) {
+        HANDLE hDib = GetClipboardData(dibFmt);
         if (hDib) {
-            const auto* bmi = static_cast<const BITMAPINFOHEADER*>(GlobalLock(hDib));
-            if (bmi && bmi->biWidth > 0 && bmi->biHeight != 0 && (bmi->biBitCount == 24 || bmi->biBitCount == 32)) {
-                const int w = bmi->biWidth;
-                const int h = std::abs(bmi->biHeight);
-                const bool topDown = (bmi->biHeight < 0);
-                const std::uint8_t* bits = reinterpret_cast<const std::uint8_t*>(bmi) + bmi->biSize +
-                    (bmi->biCompression == BI_BITFIELDS ? 12 : 0);
-                const std::size_t stride = ((static_cast<std::size_t>(w) * bmi->biBitCount + 31u) / 32u) * 4u;
-                ImageProc::RgbaImage img{};
-                img.width = w;
-                img.height = h;
-                img.rgba.resize(static_cast<std::size_t>(w) * h * 4u, 255u);
-                for (int y = 0; y < h; ++y) {
-                    const int srcY = topDown ? y : (h - 1 - y);
-                    const std::uint8_t* row = bits + static_cast<std::size_t>(srcY) * stride;
-                    for (int x = 0; x < w; ++x) {
-                        const std::size_t dstIdx = (static_cast<std::size_t>(y) * w + x) * 4u;
-                        const std::size_t srcIdx = static_cast<std::size_t>(x) * (bmi->biBitCount / 8);
-                        img.rgba[dstIdx + 0] = row[srcIdx + 2];
-                        img.rgba[dstIdx + 1] = row[srcIdx + 1];
-                        img.rgba[dstIdx + 2] = row[srcIdx + 0];
-                        img.rgba[dstIdx + 3] = (bmi->biBitCount == 32 && row[srcIdx + 3] > 0) ? row[srcIdx + 3] : 255u;
+            const SIZE_T totalBytes = GlobalSize(hDib);
+            const auto* rawBase = static_cast<const std::uint8_t*>(GlobalLock(hDib));
+            if (rawBase && totalBytes >= sizeof(BITMAPINFOHEADER)) {
+                const auto* bmi = reinterpret_cast<const BITMAPINFOHEADER*>(rawBase);
+                if (bmi->biSize >= sizeof(BITMAPINFOHEADER) &&
+                    bmi->biSize <= totalBytes &&
+                    bmi->biWidth > 0 && bmi->biWidth <= 16384 &&
+                    bmi->biHeight != 0 && std::abs(bmi->biHeight) <= 16384 &&
+                    (bmi->biBitCount == 24 || bmi->biBitCount == 32)) {
+                    const int w = bmi->biWidth;
+                    const int h = std::abs(bmi->biHeight);
+                    const bool topDown = (bmi->biHeight < 0);
+                    // Only BITMAPINFOHEADER (40 bytes) places 12-byte BI_BITFIELDS masks after biSize;
+                    // BITMAPV4HEADER (108) and BITMAPV5HEADER (124) include masks inside biSize.
+                    const std::size_t bitfieldExtra =
+                        (bmi->biSize == sizeof(BITMAPINFOHEADER) && bmi->biCompression == BI_BITFIELDS) ? 12u : 0u;
+                    const std::size_t paletteBytes = static_cast<std::size_t>(bmi->biClrUsed) * 4u;
+                    const std::size_t pixelOffset = static_cast<std::size_t>(bmi->biSize) + bitfieldExtra + paletteBytes;
+                    const std::size_t stride = ((static_cast<std::size_t>(w) * bmi->biBitCount + 31u) / 32u) * 4u;
+                    const std::size_t neededBytes = pixelOffset + stride * static_cast<std::size_t>(h);
+                    if (neededBytes <= totalBytes) {
+                        const std::uint8_t* bits = rawBase + pixelOffset;
+                        bool hasRealAlpha = false;
+                        if (bmi->biBitCount == 32) {
+                            for (int y = 0; y < h && !hasRealAlpha; ++y) {
+                                const std::uint8_t* row = bits + static_cast<std::size_t>(y) * stride;
+                                for (int x = 0; x < w; ++x) {
+                                    if (row[static_cast<std::size_t>(x) * 4u + 3u] != 0u) {
+                                        hasRealAlpha = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        ImageProc::RgbaImage img{};
+                        img.width = w;
+                        img.height = h;
+                        img.rgba.resize(static_cast<std::size_t>(w) * h * 4u, 255u);
+                        for (int y = 0; y < h; ++y) {
+                            const int srcY = topDown ? y : (h - 1 - y);
+                            const std::uint8_t* row = bits + static_cast<std::size_t>(srcY) * stride;
+                            for (int x = 0; x < w; ++x) {
+                                const std::size_t dstIdx = (static_cast<std::size_t>(y) * w + x) * 4u;
+                                const std::size_t srcIdx = static_cast<std::size_t>(x) * (bmi->biBitCount / 8);
+                                img.rgba[dstIdx + 0] = row[srcIdx + 2];
+                                img.rgba[dstIdx + 1] = row[srcIdx + 1];
+                                img.rgba[dstIdx + 2] = row[srcIdx + 0];
+                                img.rgba[dstIdx + 3] = (bmi->biBitCount == 32 && hasRealAlpha) ? row[srcIdx + 3] : 255u;
+                            }
+                        }
+                        GlobalUnlock(hDib);
+                        CloseClipboard();
+
+                        std::vector<std::uint8_t> png;
+                        if (ImageProc::EncodeRgbaToPngWic(img, png)) {
+                            AnnotationObject obj{};
+                            obj.kind = ObjectKind::Image;
+                            obj.layerId = doc.ActiveLayerId();
+                            const double dispW = std::clamp(static_cast<double>(w) * 0.65, 120.0, 420.0);
+                            const double dispH = dispW * (static_cast<double>(h) / (std::max)(1, w));
+                            obj.bounds = { worldX, worldY, dispW, dispH };
+                            obj.pngBytes = std::move(png);
+                            cmdStack.Execute(doc, std::make_unique<AddObjectCommand>(target, std::move(obj)));
+                            outStatus = "Imagen pegada desde el portapapeles (" + std::to_string(w) + "x" + std::to_string(h) + ").";
+                            return true;
+                        }
+                        return false;
                     }
                 }
-                GlobalUnlock(hDib);
-                CloseClipboard();
-
-                std::vector<std::uint8_t> png;
-                if (ImageProc::EncodeRgbaToPngWic(img, png)) {
-                    AnnotationObject obj{};
-                    obj.kind = ObjectKind::Image;
-                    obj.layerId = doc.ActiveLayerId();
-                    const double dispW = std::clamp(static_cast<double>(w) * 0.65, 120.0, 420.0);
-                    const double dispH = dispW * (static_cast<double>(h) / (std::max)(1, w));
-                    obj.bounds = { worldX, worldY, dispW, dispH };
-                    obj.pngBytes = std::move(png);
-                    cmdStack.Execute(doc, std::make_unique<AddObjectCommand>(target, std::move(obj)));
-                    outStatus = "Imagen pegada desde el portapapeles (" + std::to_string(w) + "x" + std::to_string(h) + ").";
-                    return true;
-                }
-                return false;
             }
             GlobalUnlock(hDib);
         }

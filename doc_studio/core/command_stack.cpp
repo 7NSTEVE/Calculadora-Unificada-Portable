@@ -359,51 +359,47 @@ bool CommandStack::SaveSessionHistoryToFile(const std::wstring& historyPath, con
         root["cursor"] = 0;
         nlohmann::json entries = nlohmann::json::array();
 
-        // Save all SnapshotDeltaCommands already in stack, plus synthesize a bounded undo trail
-        // (up to last 16 steps) by replaying backward on a copy of currentDoc so ANY command type persists!
-        bool hadSnapCmds = false;
-        for (const auto& cmd : history_) {
-            if (const auto* sc = dynamic_cast<const SnapshotDeltaCommand*>(cmd.get())) {
-                hadSnapCmds = true;
-                entries.push_back({
-                    {"desc", sc->Description()},
-                    {"before", Base64EncodeHist(sc->BeforeBytes())},
-                    {"after", Base64EncodeHist(sc->AfterBytes())}
-                });
-            }
-        }
-        if (hadSnapCmds) {
-            root["cursor"] = (std::min)(cursor_, entries.size());
-        } else if (cursor_ > undoBoundary_) {
-            // Capture up to last 12 undoable commands as reversible serialized snapshots
-            const std::size_t maxPersist = 12;
+        // Synthesize a contiguous bounded undo chain (up to 16 steps) by replaying backward
+        // from currentDoc across ALL command types (both loaded SnapshotDeltaCommands AND new live edits),
+        // and also preserve any forward redo SnapshotDeltaCommands beyond cursor_.
+        if (cursor_ > undoBoundary_) {
+            const std::size_t maxPersist = 16;
             const std::size_t avail = cursor_ - undoBoundary_;
             const std::size_t take = (std::min)(avail, maxPersist);
             std::vector<std::vector<std::uint8_t>> states(take + 1);
             DocumentModel scratch;
             if (CudocStorage::SerializeToBytes(currentDoc, states[take], nullptr) &&
                 CudocStorage::DeserializeFromBytes(states[take].data(), states[take].size(), scratch, nullptr)) {
-                bool okChain = true;
+                std::size_t built = 0;
                 std::vector<std::string> descs(take);
                 for (std::size_t k = 0; k < take; ++k) {
                     const std::size_t cmdIdx = cursor_ - 1 - k;
                     descs[take - 1 - k] = history_[cmdIdx]->Description();
                     if (!history_[cmdIdx]->Undo(scratch) ||
                         !CudocStorage::SerializeToBytes(scratch, states[take - 1 - k], nullptr)) {
-                        okChain = false;
                         break;
                     }
+                    ++built;
                 }
-                if (okChain) {
-                    for (std::size_t i = 0; i < take; ++i) {
-                        entries.push_back({
-                            {"desc", descs[i]},
-                            {"before", Base64EncodeHist(states[i])},
-                            {"after", Base64EncodeHist(states[i + 1])}
-                        });
-                    }
-                    root["cursor"] = entries.size();
+                const std::size_t startSlot = take - built;
+                for (std::size_t i = startSlot; i < take; ++i) {
+                    entries.push_back({
+                        {"desc", descs[i]},
+                        {"before", Base64EncodeHist(states[i])},
+                        {"after", Base64EncodeHist(states[i + 1])}
+                    });
                 }
+                root["cursor"] = entries.size();
+            }
+        }
+        // Preserve redo trail beyond cursor_ if already stored as SnapshotDeltaCommand
+        for (std::size_t i = cursor_; i < history_.size() && entries.size() < 24; ++i) {
+            if (const auto* sc = dynamic_cast<const SnapshotDeltaCommand*>(history_[i].get())) {
+                entries.push_back({
+                    {"desc", sc->Description()},
+                    {"before", Base64EncodeHist(sc->BeforeBytes())},
+                    {"after", Base64EncodeHist(sc->AfterBytes())}
+                });
             }
         }
         root["entries"] = std::move(entries);

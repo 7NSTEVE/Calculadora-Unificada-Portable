@@ -317,6 +317,82 @@ std::string OmmlToFormulaExpr(const std::string& ommlXml) {
             }
             return self(self, work);
         }
+        // Simultaneous Subscript + Superscript <m:sSubSup><m:e>b</m:e><m:sub>s</m:sub><m:sup>p</m:sup></m:sSubSup>
+        if (frag.find("<m:sSubSup") != std::string::npos) {
+            std::string work = frag;
+            for (const auto& sBlk : ExtractTagBlocks(work, "m:sSubSup")) {
+                const auto es = ExtractTagBlocks(sBlk, "m:e");
+                const auto subs = ExtractTagBlocks(sBlk, "m:sub");
+                const auto sups = ExtractTagBlocks(sBlk, "m:sup");
+                const std::string b = es.empty() ? "" : self(self, es[0]);
+                const std::string sb = subs.empty() ? "" : self(self, subs[0]);
+                const std::string sp = sups.empty() ? "" : self(self, sups[0]);
+                const std::size_t p = work.find(sBlk);
+                if (p != std::string::npos) work.replace(p, sBlk.size(), "<m:t>" + b + "_" + sb + "^(" + sp + ")</m:t>");
+            }
+            return self(self, work);
+        }
+        // N-ary operators <m:nary> (integrals, summations, products with optional limits)
+        if (frag.find("<m:nary") != std::string::npos) {
+            std::string work = frag;
+            for (const auto& nBlk : ExtractTagBlocks(work, "m:nary")) {
+                std::string op = "int";
+                const std::string chr = ExtractXmlAttribute(nBlk, "m:val");
+                if (chr.find("\xE2\x88\x91") != std::string::npos) op = "sum";
+                else if (chr.find("\xE2\x88\x8F") != std::string::npos) op = "prod";
+                const auto subs = ExtractTagBlocks(nBlk, "m:sub");
+                const auto sups = ExtractTagBlocks(nBlk, "m:sup");
+                const auto es = ExtractTagBlocks(nBlk, "m:e");
+                const std::string lo = subs.empty() ? "" : self(self, subs[0]);
+                const std::string hi = sups.empty() ? "" : self(self, sups[0]);
+                const std::string body = es.empty() ? "" : self(self, es[0]);
+                std::string repl = op + "(" + body;
+                if (!lo.empty() || !hi.empty()) repl += ", " + lo + ", " + hi;
+                repl += ")";
+                const std::size_t p = work.find(nBlk);
+                if (p != std::string::npos) work.replace(p, nBlk.size(), "<m:t>" + repl + "</m:t>");
+            }
+            return self(self, work);
+        }
+        // Matrices <m:m><m:mr><m:e>...</m:e></m:mr></m:m> -> [[a,b],[c,d]]
+        if (frag.find("<m:m>") != std::string::npos || frag.find("<m:m ") != std::string::npos) {
+            std::string work = frag;
+            for (const auto& mBlk : ExtractTagBlocks(work, "m:m")) {
+                std::string mat = "[";
+                bool firstRow = true;
+                for (const auto& rBlk : ExtractTagBlocks(mBlk, "m:mr")) {
+                    if (!firstRow) mat += ",";
+                    firstRow = false;
+                    mat += "[";
+                    bool firstCell = true;
+                    for (const auto& cBlk : ExtractTagBlocks(rBlk, "m:e")) {
+                        if (!firstCell) mat += ",";
+                        firstCell = false;
+                        mat += self(self, cBlk);
+                    }
+                    mat += "]";
+                }
+                mat += "]";
+                const std::size_t p = work.find(mBlk);
+                if (p != std::string::npos) work.replace(p, mBlk.size(), "<m:t>" + mat + "</m:t>");
+            }
+            return self(self, work);
+        }
+        // Delimiters <m:d><m:e>...</m:e></m:d> -> (...)
+        if (frag.find("<m:d>") != std::string::npos || frag.find("<m:d ") != std::string::npos) {
+            std::string work = frag;
+            for (const auto& dBlk : ExtractTagBlocks(work, "m:d")) {
+                const auto es = ExtractTagBlocks(dBlk, "m:e");
+                std::string inner;
+                for (std::size_t i = 0; i < es.size(); ++i) {
+                    if (i > 0) inner += ",";
+                    inner += self(self, es[i]);
+                }
+                const std::size_t p = work.find(dBlk);
+                if (p != std::string::npos) work.replace(p, dBlk.size(), "<m:t>(" + inner + ")</m:t>");
+            }
+            return self(self, work);
+        }
         // Subscripts <m:sSub><m:e>base</m:e><m:sub>sub</m:sub></m:sSub>
         if (frag.find("<m:sSub") != std::string::npos) {
             std::string work = frag;
@@ -413,7 +489,8 @@ bool OpenXmlInterop::ExportToDocxBytes(
     body << "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
          << "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" "
          << "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" "
-         << "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\">\n<w:body>\n";
+         << "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" "
+         << "xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\">\n<w:body>\n";
 
     body << "<w:p><w:r><w:rPr><w:b/><w:sz w:val=\"32\"/></w:rPr><w:t xml:space=\"preserve\">"
          << XmlEscape(doc.Title()) << "</w:t></w:r></w:p>\n";
@@ -817,7 +894,7 @@ bool OpenXmlInterop::ExportToPptxBytes(
 
         std::ostringstream slideXml;
         slideXml << "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
-                 << "<p:sld xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\">\n"
+                 << "<p:sld xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\">\n"
                  << "<p:cSld><p:spTree>\n"
                  << "<p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>\n";
 
@@ -907,15 +984,27 @@ bool OpenXmlInterop::ExportToPptxBytes(
                     try {
                         const auto j = nlohmann::json::parse(obj.tableJsonUtf8);
                         if (j.is_object() && j.contains("rows") && j["rows"].is_array() && !j["rows"].empty()) {
+                            std::size_t maxCols = 1;
+                            for (const auto& rj : j["rows"]) {
+                                if (rj.is_array() && rj.size() > maxCols) maxCols = rj.size();
+                            }
+                            const std::int64_t colW = (std::max<std::int64_t>)(457200, ow / static_cast<std::int64_t>(maxCols));
                             slideXml << "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"" << (++shapeId) << "\" name=\"Tabla\"/>"
                                      << "<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>"
                                      << "<p:xfrm><a:off x=\"" << ox << "\" y=\"" << oy << "\"/><a:ext cx=\"" << ow << "\" cy=\"" << oh << "\"/></p:xfrm>"
-                                     << "<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\"><a:tbl><a:tblPr/><a:tblGrid/>";
+                                     << "<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\"><a:tbl><a:tblPr/><a:tblGrid>";
+                            for (std::size_t c = 0; c < maxCols; ++c) {
+                                slideXml << "<a:gridCol w=\"" << colW << "\"/>";
+                            }
+                            slideXml << "</a:tblGrid>";
                             for (const auto& rj : j["rows"]) {
                                 if (!rj.is_array()) continue;
                                 slideXml << "<a:tr h=\"370840\">";
-                                for (const auto& cj : rj) {
-                                    const std::string cellTxt = cj.is_string() ? cj.get<std::string>() : cj.dump();
+                                for (std::size_t c = 0; c < maxCols; ++c) {
+                                    std::string cellTxt;
+                                    if (c < rj.size()) {
+                                        cellTxt = rj[c].is_string() ? rj[c].get<std::string>() : rj[c].dump();
+                                    }
                                     slideXml << "<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>"
                                              << XmlEscape(cellTxt) << "</a:t></a:r></a:p></a:txBody></a:tc>";
                                 }
@@ -972,18 +1061,14 @@ bool OpenXmlInterop::ExportToPptxBytes(
             }
         } else if (i < doc.Pages().size()) {
             const auto& pg = doc.Pages()[i];
-            std::string slideText = !pg.extractedTextUtf8.empty() ? pg.extractedTextUtf8 : pg.ocrTextUtf8;
-            for (const auto& obj : pg.objects) {
-                if (obj.kind == ObjectKind::TextBox && !obj.textUtf8.empty()) {
-                    if (!slideText.empty()) slideText += '\n';
-                    slideText += obj.textUtf8;
-                }
-            }
+            // Only emit extracted/OCR background PDF text as a slide text shape;
+            // positioned TextBox annotations are emitted individually by appendObjectsToSlide (no duplication).
+            const std::string slideText = !pg.extractedTextUtf8.empty() ? pg.extractedTextUtf8 : pg.ocrTextUtf8;
             const std::int64_t tx = hasSnap ? 5200000 : 457200;
             const std::int64_t tw = hasSnap ? 6500000 : 11200000;
             if (!slideText.empty()) {
                 appendTextShape(slideText, tx, 457200, tw, 5800000);
-            } else if (!hasSnap) {
+            } else if (!hasSnap && pg.objects.empty()) {
                 appendTextShape(doc.Title() + " - P\xC3\xA1gina " + std::to_string(i + 1), tx, 457200, tw, 5800000);
             }
             if (!pg.objects.empty()) {

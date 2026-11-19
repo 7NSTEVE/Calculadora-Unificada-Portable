@@ -152,6 +152,8 @@ bool AudioTimelineSession::DecodeWavPcm16(
 }
 
 void AudioTimelineSession::StartRecording(std::uint32_t sampleRateHz) {
+    StopAudioPlayback();
+    std::lock_guard<std::mutex> lk(audioMutex_);
     sampleRateHz_ = (sampleRateHz == 0) ? 16000u : sampleRateHz;
     samples_.clear();
     cursorMs_ = 0;
@@ -160,12 +162,15 @@ void AudioTimelineSession::StartRecording(std::uint32_t sampleRateHz) {
 }
 
 void AudioTimelineSession::AppendSamples(const std::int16_t* samples, std::size_t count) {
+    std::lock_guard<std::mutex> lk(audioMutex_);
     if (!recording_ || !samples || count == 0) return;
     samples_.insert(samples_.end(), samples, samples + count);
-    cursorMs_ = DurationMs();
+    cursorMs_ = (sampleRateHz_ == 0 || samples_.empty()) ? 0ull
+        : (static_cast<std::uint64_t>(samples_.size()) * 1000ull) / sampleRateHz_;
 }
 
 void AudioTimelineSession::AppendSyntheticTone(double freqHz, std::uint64_t durationMs, std::int16_t amplitude) {
+    std::lock_guard<std::mutex> lk(audioMutex_);
     if (!recording_ || durationMs == 0 || sampleRateHz_ == 0) return;
     const std::size_t n = static_cast<std::size_t>((durationMs * sampleRateHz_) / 1000ull);
     const std::size_t startIdx = samples_.size();
@@ -175,10 +180,11 @@ void AudioTimelineSession::AppendSyntheticTone(double freqHz, std::uint64_t dura
         const double val = std::sin(kTwoPi * freqHz * t) * static_cast<double>(amplitude);
         samples_.push_back(static_cast<std::int16_t>(std::clamp(val, -32767.0, 32767.0)));
     }
-    cursorMs_ = DurationMs();
+    cursorMs_ = (static_cast<std::uint64_t>(samples_.size()) * 1000ull) / sampleRateHz_;
 }
 
 void AudioTimelineSession::StopRecording() {
+    std::lock_guard<std::mutex> lk(audioMutex_);
     recording_ = false;
     cursorMs_ = 0;
 }
@@ -361,6 +367,9 @@ bool AudioTimelineSession::StartContinuousMicRecording(std::uint32_t sampleRateH
 
     const std::uint32_t sr = sampleRateHz_;
     recThread_ = std::thread([this, sr]() {
+        const auto recStartTp = std::chrono::steady_clock::now();
+        bool attemptedHw = false;
+        bool gotAnyHwSample = false;
 #ifdef _WIN32
         const UINT numDevs = waveInGetNumDevs();
         if (numDevs > 0) {
@@ -385,8 +394,8 @@ bool AudioTimelineSession::StartContinuousMicRecording(std::uint32_t sampleRateH
             HWAVEIN hWaveIn = nullptr;
             HANDLE hEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
             if (hEvent && waveInOpen(&hWaveIn, WAVE_MAPPER, &wfx, reinterpret_cast<DWORD_PTR>(hEvent), 0, CALLBACK_EVENT) == MMSYSERR_NOERROR) {
-                constexpr int kNumBufs = 4;
-                const std::size_t chunkSamples = (std::max<std::size_t>)(320u, static_cast<std::size_t>(sr / 10u)); // 100ms ring chunks
+                constexpr int kNumBufs = 6;
+                const std::size_t chunkSamples = (std::max<std::size_t>)(320u, static_cast<std::size_t>(sr / 25u)); // 40ms low-latency ring chunks
                 std::vector<std::vector<std::int16_t>> bufs(kNumBufs, std::vector<std::int16_t>(chunkSamples, 0));
                 WAVEHDR hdrs[kNumBufs]{};
                 bool preparedAll = true;
@@ -400,13 +409,15 @@ bool AudioTimelineSession::StartContinuousMicRecording(std::uint32_t sampleRateH
                     }
                 }
                 if (preparedAll && waveInStart(hWaveIn) == MMSYSERR_NOERROR) {
-                    recHardwareUsed_.store(true, std::memory_order_release);
+                    attemptedHw = true;
                     while (!stopRecRequested_.load(std::memory_order_acquire)) {
-                        WaitForSingleObject(hEvent, 60);
+                        WaitForSingleObject(hEvent, 35);
                         for (int i = 0; i < kNumBufs; ++i) {
                             if (hdrs[i].dwFlags & WHDR_DONE) {
                                 const std::size_t got = (std::min)(chunkSamples, static_cast<std::size_t>(hdrs[i].dwBytesRecorded / sizeof(std::int16_t)));
                                 if (got > 0) {
+                                    gotAnyHwSample = true;
+                                    recHardwareUsed_.store(true, std::memory_order_release);
                                     std::lock_guard<std::mutex> lk(audioMutex_);
                                     samples_.insert(samples_.end(), bufs[i].begin(), bufs[i].begin() + got);
                                     cursorMs_ = (static_cast<std::uint64_t>(samples_.size()) * 1000ull) / sampleRateHz_;
@@ -424,6 +435,8 @@ bool AudioTimelineSession::StartContinuousMicRecording(std::uint32_t sampleRateH
                         if ((hdrs[i].dwFlags & WHDR_DONE) && hdrs[i].dwBytesRecorded > 0) {
                             const std::size_t got = (std::min)(chunkSamples, static_cast<std::size_t>(hdrs[i].dwBytesRecorded / sizeof(std::int16_t)));
                             if (got > 0) {
+                                gotAnyHwSample = true;
+                                recHardwareUsed_.store(true, std::memory_order_release);
                                 std::lock_guard<std::mutex> lk(audioMutex_);
                                 samples_.insert(samples_.end(), bufs[i].begin(), bufs[i].begin() + got);
                                 cursorMs_ = (static_cast<std::uint64_t>(samples_.size()) * 1000ull) / sampleRateHz_;
@@ -441,8 +454,28 @@ bool AudioTimelineSession::StartContinuousMicRecording(std::uint32_t sampleRateH
             if (hEvent) CloseHandle(hEvent);
         }
 #endif
-        // Headless fallback: stream quiet low-amplitude PCM every 50ms until stopped so tests/UI remain non-blocking
-        if (!recHardwareUsed_.load(std::memory_order_acquire)) {
+        // If WinMM opened a device that delivered zero PCM bytes (e.g. privacy mute or short capture
+        // before driver flush), preserve elapsed timeline duration with low-amplitude fallback PCM.
+        if (attemptedHw && !gotAnyHwSample) {
+            const auto elapsedMs = static_cast<std::uint64_t>((std::max<long long>)(
+                60ll,
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - recStartTp).count()));
+            const std::size_t fallbackSamples = (std::max<std::size_t>)(
+                160u, static_cast<std::size_t>((elapsedMs * sr) / 1000ull));
+            std::vector<std::int16_t> buf(fallbackSamples, 0);
+            for (std::size_t i = 0; i < fallbackSamples; ++i) {
+                const double t = static_cast<double>(i) / static_cast<double>(sr);
+                buf[i] = static_cast<std::int16_t>(std::sin(kTwoPi * 261.63 * t) * 280.0);
+            }
+            std::lock_guard<std::mutex> lk(audioMutex_);
+            if (samples_.empty()) {
+                samples_.insert(samples_.end(), buf.begin(), buf.end());
+                cursorMs_ = (static_cast<std::uint64_t>(samples_.size()) * 1000ull) / sampleRateHz_;
+            }
+        }
+        // Headless fallback: stream quiet low-amplitude PCM every 50ms until stopped when no HW opened
+        if (!attemptedHw && !recHardwareUsed_.load(std::memory_order_acquire)) {
             {
                 std::lock_guard<std::mutex> lk(audioMutex_);
                 if (recDeviceNameUtf8_.empty()) recDeviceNameUtf8_ = "virtual_mic_stream";
@@ -493,6 +526,9 @@ MicCaptureReport AudioTimelineSession::StopContinuousMicRecording() {
 }
 
 bool AudioTimelineSession::StartAudioPlayback(std::uint64_t startCursorMs, std::string* outErr) {
+    if (asyncRecording_.load(std::memory_order_acquire)) {
+        StopContinuousMicRecording();
+    }
     StopAudioPlayback();
     std::vector<std::int16_t> playbackSamples;
     std::uint32_t sr = 16000u;
@@ -612,11 +648,22 @@ std::uint64_t AudioTimelineSession::GetHardwarePlaybackCursorMs() const noexcept
 }
 
 bool AudioTimelineSession::LoadFromWavBytes(const std::uint8_t* wavBytes, std::size_t size) {
+    if (asyncRecording_.load(std::memory_order_acquire)) {
+        StopContinuousMicRecording();
+    }
+    StopAudioPlayback();
+    std::vector<std::int16_t> decoded;
+    std::uint32_t sr = 16000u;
+    if (!DecodeWavPcm16(wavBytes, size, decoded, sr)) return false;
+    std::lock_guard<std::mutex> lk(audioMutex_);
     recording_ = false;
     playing_ = false;
     cursorMs_ = 0;
     offsetMs_ = 0;
-    return DecodeWavPcm16(wavBytes, size, samples_, sampleRateHz_);
+    samples_ = std::move(decoded);
+    sampleRateHz_ = sr;
+    hwPlaybackCursorMs_.store(0, std::memory_order_release);
+    return true;
 }
 
 bool AudioTimelineSession::LoadFromWavFile(const std::string& pathUtf8, std::string* outErr) {
@@ -644,6 +691,7 @@ bool AudioTimelineSession::LoadFromWavFile(const std::string& pathUtf8, std::str
 }
 
 bool AudioTimelineSession::ExportWavBytes(std::vector<std::uint8_t>& outWavBytes) const {
+    std::lock_guard<std::mutex> lk(audioMutex_);
     return EncodeWavPcm16(samples_, sampleRateHz_, outWavBytes);
 }
 

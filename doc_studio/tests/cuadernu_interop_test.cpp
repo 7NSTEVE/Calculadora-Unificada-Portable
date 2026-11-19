@@ -9,6 +9,7 @@
 
 #include "../app/canvas_manipulation.hpp"
 #include "../app/studio_cli_dispatch.hpp"
+#include "../circuit/code_mcu_control.hpp"
 #include "../core/audio_timeline.hpp"
 #include "../core/command_stack.hpp"
 #include "../core/cudoc_storage.hpp"
@@ -16,9 +17,11 @@
 #include "../core/document_model.hpp"
 #include "../core/image_processing.hpp"
 #include "../core/ink_engine.hpp"
+#include "../core/notebook_vault.hpp"
 #include "../core/zip_container.hpp"
 #include "../interop/binary_parsers.hpp"
 #include "../interop/notebook_migration_engine.hpp"
+#include "../math/engineering_cas.hpp"
 #include "../pdf/interop_openxml.hpp"
 #include "../pdf/pdf_parser.hpp"
 #include "../pdf/pdf_writer.hpp"
@@ -727,6 +730,265 @@ void TestTrackAToDCoreEngines() {
     std::filesystem::remove_all(tmpDir, ec);
 }
 
+void TestHardeningRegressions() {
+    // 1. Magic-bytes-first format detection (renamed .bin files)
+    {
+        const std::string fakePdf = "%PDF-1.7\n";
+        EXPECT(Interop::NotebookMigrationEngine::DetectFormat("renamed.bin",
+            reinterpret_cast<const std::uint8_t*>(fakePdf.data()), fakePdf.size()) == Interop::SourceFormat::PdfDocument);
+        const std::uint8_t mscf[8] = { 'M','S','C','F',0,0,0,0 };
+        EXPECT(Interop::NotebookMigrationEngine::DetectFormat("pkg.UNKNOWN", mscf, sizeof(mscf)) == Interop::SourceFormat::OneNotePackage);
+        const std::uint8_t tintaSig[8] = { 'T','I','N','T','A',0,1,0 };
+        EXPECT(Interop::NotebookMigrationEngine::DetectFormat("cuaderno.dat", tintaSig, sizeof(tintaSig)) == Interop::SourceFormat::CuadernuTinta);
+    }
+
+    // 2. Goodnotes 6 image + JSON inside notes/ folder + UTF-8 Spanish text in protobuf
+    {
+        ZipArchive z;
+        const std::vector<std::uint8_t> tinyPng = { 0x89,'P','N','G',0x0D,0x0A,0x1A,0x0A, 0,0,0,0,'I','E','N','D',0xAE,0x42,0x60,0x82 };
+        z.SetEntry("notes/photo.png", tinyPng);
+        z.SetTextEntry("notes/meta.json", R"json({"title":"Física III","bookmarks":[{"title":"Óptica","page":0}]})json");
+        std::vector<std::uint8_t> pb;
+        const std::string spanish = "Ecuaci\xC3\xB3n de Maxwell";
+        AppendPbBytesField(pb, 9, std::vector<std::uint8_t>(spanish.begin(), spanish.end()));
+        z.SetEntry("notes/p1.pb", pb);
+        std::vector<std::uint8_t> gnBytes;
+        EXPECT(z.Serialize(gnBytes, true));
+        DocumentModel doc;
+        Interop::MigrationResult res{};
+        EXPECT(Interop::NotebookMigrationEngine::ImportAndMigrateBytes(gnBytes.data(), gnBytes.size(), "clase.goodnotes", doc, res));
+        EXPECT(res.report.imageCount >= 1);
+        EXPECT(res.report.bookmarkOrSectionCount >= 1);
+        EXPECT(res.report.textBoxCount >= 1);
+        EXPECT(doc.Title() == "F\xC3\xADsica III");
+    }
+
+    // 3. OneNote odd-aligned UTF-16LE + embedded JPEG + AudioClip assetKey/audioAssetKey .cudoc round-trip
+    {
+        std::vector<std::uint8_t> oneBytes;
+        oneBytes.push_back(0xAA); // force odd alignment!
+        const std::u16string txt = u"C\u00E1lculo \u03B1 + \u03B2 = \u03C0";
+        for (char16_t ch : txt) {
+            oneBytes.push_back(static_cast<std::uint8_t>(ch & 0xFFu));
+            oneBytes.push_back(static_cast<std::uint8_t>((ch >> 8) & 0xFFu));
+        }
+        oneBytes.push_back(0); oneBytes.push_back(0);
+        // Embed synthetic JPEG block (FF D8 FF E0 ... FF D9, >= 64 bytes)
+        std::vector<std::uint8_t> jpg(72, 0x11);
+        jpg[0] = 0xFF; jpg[1] = 0xD8; jpg[2] = 0xFF; jpg[3] = 0xE0;
+        jpg[70] = 0xFF; jpg[71] = 0xD9;
+        oneBytes.insert(oneBytes.end(), jpg.begin(), jpg.end());
+
+        DocumentModel oneDoc;
+        Interop::MigrationResult oneRes{};
+        EXPECT(Interop::NotebookMigrationEngine::ImportAndMigrateBytes(oneBytes.data(), oneBytes.size(), "sec.one", oneDoc, oneRes));
+        EXPECT(oneRes.report.textBoxCount >= 1);
+        EXPECT(oneRes.report.imageCount >= 1);
+
+        // Verify AudioClip round-trip keeps audioAssetKey AND assetKey synchronized
+        AnnotationObject clip{};
+        clip.kind = ObjectKind::AudioClip;
+        clip.bounds = { 10, 10, 200, 40 };
+        clip.assetKey = "audio_key_42";
+        oneDoc.AddPageObject(0, clip);
+        std::vector<std::uint8_t> cudocBytes;
+        EXPECT(CudocStorage::SerializeToBytes(oneDoc, cudocBytes));
+        DocumentModel reloaded;
+        EXPECT(CudocStorage::DeserializeFromBytes(cudocBytes.data(), cudocBytes.size(), reloaded));
+        bool foundClip = false;
+        for (const auto& o : reloaded.Pages()[0].objects) {
+            if (o.kind == ObjectKind::AudioClip) {
+                foundClip = (o.audioAssetKey == "audio_key_42" && o.assetKey == "audio_key_42");
+            }
+        }
+        EXPECT(foundClip);
+    }
+
+    // 4. .tinta extended Pauta mapping (Milimetrico, Polar, Smith) + tp.medios migration
+    {
+        tinta::Documento td{};
+        td.id = "tinta-pauta-test";
+        td.titulo = "Papeles Tinta";
+        tinta::Cuaderno cu{};
+        cu.titulo = "Ing";
+        tinta::Seccion sec{};
+        sec.titulo = "RF";
+        tinta::Pagina p0{}; p0.papel.pauta = tinta::Pauta::Milimetrico;
+        tinta::Medio md{};
+        md.id = "m1"; md.hash = "sha256_img1"; md.nombre_original = "circuito.png";
+        md.tipo = tinta::TipoMedio::Imagen; md.marco = { 20, 30, 180, 120 };
+        p0.medios.push_back(md);
+        tinta::Pagina p1{}; p1.papel.pauta = tinta::Pauta::Smith;
+        tinta::Pagina p2{}; p2.papel.pauta = tinta::Pauta::Polar;
+        sec.paginas.push_back(p0); sec.paginas.push_back(p1); sec.paginas.push_back(p2);
+        cu.secciones.push_back(sec);
+        td.cuadernos.push_back(cu);
+        const auto raw = tinta::Serializar(td);
+        DocumentModel doc;
+        Interop::MigrationResult res{};
+        EXPECT(Interop::NotebookMigrationEngine::ImportAndMigrateBytes(raw.data(), raw.size(), "rf.tinta", doc, res));
+        EXPECT(doc.Pages().size() == 3);
+        EXPECT(doc.Pages()[0].background == PaperPattern::Millimeter);
+        EXPECT(doc.Pages()[1].background == PaperPattern::SmithChart);
+        EXPECT(doc.Pages()[2].background == PaperPattern::Polar);
+        EXPECT(res.report.imageCount == 1);
+    }
+
+    // 5. Persistent Undo/Redo across reload + new live edits (regression test for hadSnapCmds bug!)
+    {
+        const auto tmpHist = std::filesystem::temp_directory_path() / "cuadernu_hist_regress.json";
+        DocumentModel d;
+        d.ResetToBlank(DocumentMode::InfiniteCanvas);
+        CommandStack st;
+        AnnotationObject a{}; a.kind = ObjectKind::TextBox; a.bounds = { 10, 10, 100, 40 }; a.textUtf8 = "Paso1";
+        st.Execute(d, std::make_unique<AddObjectCommand>(ObjectTarget{ true, 0 }, a));
+        EXPECT(st.SaveSessionHistoryToFile(tmpHist.wstring(), d));
+
+        // Reload history into fresh stack, then make a NEW live edit and save AGAIN
+        CommandStack st2;
+        EXPECT(st2.LoadSessionHistoryFromFile(tmpHist.wstring(), d));
+        AnnotationObject b{}; b.kind = ObjectKind::TextBox; b.bounds = { 10, 60, 100, 40 }; b.textUtf8 = "Paso2";
+        st2.Execute(d, std::make_unique<AddObjectCommand>(ObjectTarget{ true, 0 }, b));
+        EXPECT(d.CanvasObjects().size() == 2);
+        EXPECT(st2.SaveSessionHistoryToFile(tmpHist.wstring(), d));
+
+        // Reload a third time and verify BOTH Paso2 AND Paso1 undo cleanly!
+        CommandStack st3;
+        EXPECT(st3.LoadSessionHistoryFromFile(tmpHist.wstring(), d));
+        EXPECT(st3.Undo(d));
+        EXPECT(d.CanvasObjects().size() == 1);
+        EXPECT(st3.Undo(d));
+        EXPECT(d.CanvasObjects().empty());
+        std::error_code ec;
+        std::filesystem::remove(tmpHist, ec);
+    }
+
+    // 6. PageLayout mixed-height doublePageSpread + 6 consecutive collapsed pages
+    {
+        DocumentModel d;
+        d.ResetToBlank(DocumentMode::PaginatedPdf);
+        d.MutablePages().clear();
+        const double heights[8] = { 900, 400, 500, 500, 500, 500, 500, 750 };
+        for (int i = 0; i < 8; ++i) {
+            PageModel pm{};
+            pm.pageId = d.AllocatePageId();
+            pm.widthPt = 500.0;
+            pm.heightPt = heights[i];
+            d.MutablePages().push_back(std::move(pm));
+        }
+        d.SetDoublePageSpread(true);
+        d.ToggleCollapsedRange(2, 6); // 5 collapsed pages in a row
+        // Hit-test tall left page (page 0) below the shorter right page (page 1, height 400)
+        const auto* pl0 = d.Layout().PlacementAt(0);
+        const auto* pl7 = d.Layout().PlacementAt(7);
+        EXPECT(pl0 != nullptr && pl7 != nullptr);
+        std::size_t hitPg = 99;
+        double lx = 0, ly = 0;
+        EXPECT(d.Layout().HitTestWorldPoint(pl0->leftWorld + 100.0, pl0->topWorld + 750.0, hitPg, lx, ly));
+        EXPECT(hitPg == 0);
+        EXPECT(d.Layout().HitTestWorldPoint(pl7->leftWorld + 100.0, pl7->topWorld + 100.0, hitPg, lx, ly));
+        EXPECT(hitPg == 7);
+        std::size_t vf = 99, vl = 0;
+        EXPECT(d.Layout().ComputeVisibleRange(pl0->topWorld + 700.0, pl0->topWorld + 850.0, vf, vl, 0));
+        EXPECT(vf == 0);
+    }
+
+    // 7. PPTX <a:tblGrid><a:gridCol .../> + non-duplicated TextBox + OMML matrix/nary parsing
+    {
+        DocumentModel src;
+        src.ResetToBlank(DocumentMode::PaginatedPdf);
+        AnnotationObject tb{}; tb.kind = ObjectKind::TextBox; tb.bounds = { 50, 50, 200, 40 }; tb.textUtf8 = "UnicoTextoSlide";
+        src.AddPageObject(0, tb);
+        AnnotationObject tbl{}; tbl.kind = ObjectKind::TableBlock; tbl.bounds = { 50, 120, 400, 120 };
+        tbl.tableJsonUtf8 = R"json({"rows":[["A","B"],["1","2"]]})json";
+        src.AddPageObject(0, tbl);
+        std::vector<std::uint8_t> pptx;
+        EXPECT(OpenXmlInterop::ExportToPptxBytes(src, {}, pptx));
+        ZipArchive z;
+        EXPECT(z.Deserialize(pptx.data(), pptx.size()));
+        const auto* s1 = z.FindEntry("ppt/slides/slide1.xml");
+        EXPECT(s1 != nullptr);
+        const std::string sXml(reinterpret_cast<const char*>(s1->data()), s1->size());
+        EXPECT(sXml.find("<a:gridCol w=") != std::string::npos);
+        // Count occurrences of "UnicoTextoSlide": must appear EXACTLY ONCE (no duplicate slideText blob!)
+        const std::size_t p1 = sXml.find("UnicoTextoSlide");
+        EXPECT(p1 != std::string::npos);
+        EXPECT(sXml.find("UnicoTextoSlide", p1 + 1) == std::string::npos);
+    }
+
+    // 8. WAL snapshot recovery end-to-end
+    {
+        const auto tmpBase = std::filesystem::temp_directory_path() / "cuadernu_wal_snap_test.cudoc";
+        const auto tmpWal = std::filesystem::path(tmpBase.wstring() + L"-wal");
+        DocumentModel baseDoc;
+        baseDoc.ResetToBlank(DocumentMode::InfiniteCanvas);
+        baseDoc.SetTitle("AntesCrash");
+        EXPECT(CudocStorage::SaveToFile(tmpBase.wstring(), baseDoc));
+
+        // Mutate in memory and write snapshot WAL
+        baseDoc.SetTitle("DespuesCrash");
+        AnnotationObject note{}; note.kind = ObjectKind::TextBox; note.bounds = { 20, 20, 160, 40 }; note.textUtf8 = "Recuperado";
+        baseDoc.AddCanvasObject(note);
+        std::vector<std::uint8_t> snapBytes;
+        EXPECT(CudocStorage::SerializeToBytes(baseDoc, snapBytes));
+        static constexpr char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string b64;
+        for (std::size_t i = 0; i < snapBytes.size(); i += 3u) {
+            const std::uint32_t b0 = snapBytes[i];
+            const std::uint32_t b1 = (i + 1u < snapBytes.size()) ? snapBytes[i + 1u] : 0u;
+            const std::uint32_t b2 = (i + 2u < snapBytes.size()) ? snapBytes[i + 2u] : 0u;
+            const std::uint32_t t = (b0 << 16) | (b1 << 8) | b2;
+            b64.push_back(kB64[(t >> 18) & 0x3Fu]);
+            b64.push_back(kB64[(t >> 12) & 0x3Fu]);
+            b64.push_back((i + 1u < snapBytes.size()) ? kB64[(t >> 6) & 0x3Fu] : '=');
+            b64.push_back((i + 2u < snapBytes.size()) ? kB64[t & 0x3Fu] : '=');
+        }
+        WalRecord wr{};
+        wr.opTag = "snapshot";
+        wr.payloadJson = "{\"cudocB64\":\"" + b64 + "\"}";
+        EXPECT(CudocWal::AppendRecord(tmpWal.wstring(), wr));
+
+        DocumentModel recovered;
+        std::size_t replayed = 0;
+        EXPECT(CudocWal::RecoverDocument(tmpBase.wstring(), tmpWal.wstring(), recovered, &replayed));
+        EXPECT(replayed >= 1);
+        EXPECT(recovered.Title() == "DespuesCrash");
+        EXPECT(recovered.CanvasObjects().size() == 1);
+        std::error_code ec;
+        std::filesystem::remove(tmpBase, ec);
+        std::filesystem::remove(tmpWal, ec);
+    }
+
+    // 9. Statics FBD + GUM Uncertainty + Control Block PID integration checks
+    {
+        Cas::FbdModel fbd{};
+        fbd.supports.push_back({ "A", "RA", Cas::FbdSupportKind::Pin, 0.0, 0.0, 90.0 });
+        fbd.supports.push_back({ "B", "RB", Cas::FbdSupportKind::RollerX, 4.0, 0.0, 90.0 });
+        fbd.forces.push_back({ "F1", "P", 2.0, 0.0, 100.0, -90.0, false, "N" });
+        const auto s = Cas::SolveFbdEquilibrium(fbd);
+        EXPECT(s.ok && s.inEquilibrium && s.reactions.size() == 3);
+
+        std::unordered_map<std::string, Cas::UncertainValue> vars;
+        vars["V"] = { 12.0, 0.1, {}, "V", 3 };
+        vars["R"] = { 1000.0, 10.0, {}, "Ohm", 3 };
+        const auto u = Cas::PropagateUncertainty("V/R", vars, 1000);
+        EXPECT(u.ok && std::abs(u.mean - 0.012) < 1e-6);
+
+        Circuit::ControlBlockDiagram diag{};
+        Circuit::ControlBlockNode n1{ 1, Circuit::ControlNodeKind::Input, "R" };
+        Circuit::ControlBlockNode n2{ 2, Circuit::ControlNodeKind::SumJunction, "E" };
+        Circuit::ControlBlockNode n3{ 3, Circuit::ControlNodeKind::Pid, "PID" };
+        n3.kp = 2.0; n3.ki = 1.0; n3.kd = 0.1;
+        Circuit::ControlBlockNode n4{ 4, Circuit::ControlNodeKind::TransferFunction, "G" };
+        n4.tf = { Circuit::Poly1D{ { 1.0 } }, Circuit::Poly1D{ { 1.0, 0.5 } } };
+        Circuit::ControlBlockNode n5{ 5, Circuit::ControlNodeKind::Output, "Y" };
+        diag.nodes = { n1, n2, n3, n4, n5 };
+        diag.edges = { { 1, 1, 2, +1, {} }, { 2, 2, 3, +1, {} }, { 3, 3, 4, +1, {} }, { 4, 4, 5, +1, {} }, { 5, 4, 2, -1, {} } };
+        const auto ca = Circuit::AnalyzeControlBlockDiagram(diag, 2.0, 40);
+        EXPECT(ca.ok && ca.isStableRouth && !ca.stepOutput.empty());
+    }
+}
+
 } // namespace
 
 int main() {
@@ -737,6 +999,7 @@ int main() {
     TestDocxAndPptxHighFidelityRoundTrip();
     TestNegativeCorruptInputs();
     TestTrackAToDCoreEngines();
+    TestHardeningRegressions();
 
     std::cout << "CuadernuInteropTest: " << g_pass << " passed, " << g_fail << " failed.\n";
     return (g_fail == 0) ? 0 : 1;

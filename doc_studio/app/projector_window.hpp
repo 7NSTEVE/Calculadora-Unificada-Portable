@@ -1,8 +1,10 @@
 #pragma once
 
 #include "../core/camera.hpp"
+#include "../core/cudoc_storage.hpp"
 #include "../core/document_model.hpp"
 #include "../render/d2d_renderer.hpp"
+#include "../../ui_glass/gdi_liquid_glass.hpp"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -17,16 +19,29 @@ namespace DocStudio {
 
 // Dedicated Secondary Projector / Classroom Window (F-199, F-209):
 // Projects clean canvas/PDF output with presenterMode=true (hiding private teacher layers)
-// and supports Freeze Projector so the instructor can prepare next steps privately.
+// and supports true snapshot Freeze Projector so the instructor can prepare next steps privately.
 class SecondaryProjectorWindow {
 public:
     ~SecondaryProjectorWindow() { Close(); }
 
     bool IsOpen() const noexcept { return hwnd_ != nullptr && IsWindow(hwnd_); }
     bool IsFrozen() const noexcept { return frozen_; }
-    void SetFrozen(bool f) noexcept {
+    void SetFrozen(bool f) {
+        if (f && !frozen_ && doc_ && cam_) {
+            std::vector<std::uint8_t> snap;
+            if (CudocStorage::SerializeToBytes(*doc_, snap, nullptr) &&
+                CudocStorage::DeserializeFromBytes(snap.data(), snap.size(), frozenDoc_, nullptr)) {
+                frozenCam_ = *cam_;
+                hasFrozenSnapshot_ = true;
+            }
+        }
         frozen_ = f;
-        if (!frozen_) RefreshNow();
+        if (IsOpen()) {
+            SetWindowTextW(hwnd_, frozen_
+                ? L"CuadernU \u2014 Proyector [CONGELADO]"
+                : L"CuadernU \u2014 Proyector (Vista Limpia)");
+            if (!frozen_) RefreshNow();
+        }
     }
 
     bool Open(HINSTANCE hInst, HWND owner,
@@ -40,11 +55,10 @@ public:
         cache_ = cache;
         if (baseOverlay) {
             overlay_ = *baseOverlay;
-            overlay_.presenterMode = true;
-            overlay_.showSelectionHandles = false;
-            overlay_.floatingOverlayBgra = nullptr;
+            SanitizeOverlay();
         }
         if (IsOpen()) {
+            UiGlass::ApplyGoldenGateWindowFrame(hwnd_, overlay_.darkTheme);
             ShowWindow(hwnd_, SW_SHOWNORMAL);
             SetForegroundWindow(hwnd_);
             RefreshNow();
@@ -88,6 +102,7 @@ public:
             0, L"CuadernUProjectorWndClass", L"CuadernU \u2014 Proyector (Vista Limpia)",
             WS_OVERLAPPEDWINDOW, wx, wy, ww, wh, owner, nullptr, hInst, this);
         if (!hwnd_) return false;
+        UiGlass::ApplyGoldenGateWindowFrame(hwnd_, overlay_.darkTheme);
         ShowWindow(hwnd_, SW_SHOWNORMAL);
         UpdateWindow(hwnd_);
         return true;
@@ -103,10 +118,10 @@ public:
         doc_ = doc;
         cam_ = cam;
         cache_ = cache;
+        const bool darkChanged = (overlay_.darkTheme != mainOverlay.darkTheme);
         overlay_ = mainOverlay;
-        overlay_.presenterMode = true;
-        overlay_.showSelectionHandles = false;
-        overlay_.floatingOverlayBgra = nullptr;
+        SanitizeOverlay();
+        if (darkChanged) UiGlass::ApplyGoldenGateWindowFrame(hwnd_, overlay_.darkTheme);
         RefreshNow();
     }
 
@@ -120,10 +135,19 @@ public:
             hwnd_ = nullptr;
             if (IsWindow(h)) DestroyWindow(h);
         }
+        hasFrozenSnapshot_ = false;
+        frozen_ = false;
         renderer_.DiscardDeviceResources();
     }
 
 private:
+    void SanitizeOverlay() noexcept {
+        overlay_.presenterMode = true;
+        overlay_.showSelectionHandles = false;
+        overlay_.floatingOverlayBgra = nullptr;
+        overlay_.searchMatches = nullptr;
+    }
+
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         SecondaryProjectorWindow* self = reinterpret_cast<SecondaryProjectorWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (msg == WM_NCCREATE) {
@@ -138,15 +162,27 @@ private:
             self->renderer_.Resize(LOWORD(lParam), HIWORD(lParam));
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
+        case WM_DPICHANGED: {
+            const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+            if (suggested) {
+                SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                    suggested->right - suggested->left, suggested->bottom - suggested->top,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             BeginPaint(hwnd, &ps);
             RECT rc{};
             GetClientRect(hwnd, &rc);
-            if (self->doc_ && self->cam_ && rc.right > 0 && rc.bottom > 0) {
+            const DocumentModel* activeDoc = (self->frozen_ && self->hasFrozenSnapshot_) ? &self->frozenDoc_ : self->doc_;
+            const Camera2D* activeCam = (self->frozen_ && self->hasFrozenSnapshot_) ? &self->frozenCam_ : self->cam_;
+            if (activeDoc && activeCam && rc.right > 0 && rc.bottom > 0) {
                 self->renderer_.AttachHwnd(hwnd, rc.right, rc.bottom);
                 self->renderer_.RenderViewport(
-                    *self->doc_, *self->cam_, rc.right, rc.bottom,
+                    *activeDoc, *activeCam, rc.right, rc.bottom,
                     self->cache_, 1, nullptr, &self->overlay_);
             }
             EndPaint(hwnd, &ps);
@@ -159,9 +195,6 @@ private:
             }
             if (wParam == 'F') {
                 self->SetFrozen(!self->frozen_);
-                SetWindowTextW(hwnd, self->frozen_
-                    ? L"CuadernU \u2014 Proyector [CONGELADO]"
-                    : L"CuadernU \u2014 Proyector (Vista Limpia)");
                 return 0;
             }
             break;
@@ -175,6 +208,9 @@ private:
 
     HWND hwnd_ = nullptr;
     bool frozen_ = false;
+    bool hasFrozenSnapshot_ = false;
+    DocumentModel frozenDoc_{};
+    Camera2D frozenCam_{};
     const DocumentModel* doc_ = nullptr;
     const Camera2D* cam_ = nullptr;
     PageRenderCache* cache_ = nullptr;

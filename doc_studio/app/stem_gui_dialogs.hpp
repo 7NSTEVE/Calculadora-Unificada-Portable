@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../bridge/calc_bridge.hpp"
+#include "../circuit/circuit_schematic.hpp"
 #include "../circuit/circuit_toolbox_recognizer.hpp"
 #include "../circuit/code_mcu_control.hpp"
 #include "../circuit/mna_solver.hpp"
@@ -14,6 +15,7 @@
 #include "../core/lan_remote.hpp"
 #include "../core/notebook_vault.hpp"
 #include "../core/utf_conv.hpp"
+#include "../core/zip_container.hpp"
 #include "../interop/notebook_migration_engine.hpp"
 #include "../math/advanced_math_engine.hpp"
 #include "../math/cas_ai_pedagogy.hpp"
@@ -21,6 +23,7 @@
 #include "../math/formula_sheet_index.hpp"
 #include "../pdf/table_interop.hpp"
 #include "../pdf/winrt_adapters.hpp"
+#include "../../ui_glass/gdi_liquid_glass.hpp"
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -47,8 +50,30 @@
 namespace DocStudio::GuiDialogs {
 
 using PromptFn = std::function<bool(const std::wstring&, const std::wstring&, std::wstring&, bool)>;
+using PasswordPromptFn = std::function<bool(const std::wstring&, const std::wstring&, std::wstring&)>;
 
-// Clean Apple HIG scrollable read-only report / confirmation dialog
+inline std::wstring NormalizeCrLfWide(const std::wstring& in) {
+    std::wstring out;
+    out.reserve(in.size() + 32);
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == L'\n' && (i == 0 || in[i - 1] != L'\r')) out.push_back(L'\r');
+        out.push_back(in[i]);
+    }
+    return out;
+}
+
+inline UINT GetSafeWindowDpi(HWND hwnd) noexcept {
+    using FnGetDpiForWindow = UINT(WINAPI*)(HWND);
+    static auto pGetDpi = reinterpret_cast<FnGetDpiForWindow>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+    if (pGetDpi && hwnd) {
+        const UINT d = pGetDpi(hwnd);
+        if (d >= 72u && d <= 480u) return d;
+    }
+    return 96u;
+}
+
+// Clean Apple HIG + Liquid Glass theme-synchronized & PerMonitorV2 DPI-scaled report dialog
 inline bool ShowReportDialog(
     HWND owner,
     const std::wstring& title,
@@ -62,12 +87,20 @@ inline bool ShowReportDialog(
         bool showCancel = false;
         bool accepted = false;
         bool done = false;
+        UINT dpi = 96u;
+        UiGlass::GlassSettings glass{};
         HFONT hFont = nullptr;
-        HFONT hFontBold = nullptr;
+        HBRUSH hBgBrush = nullptr;
+        HBRUSH hCardBrush = nullptr;
+        HWND hEdit = nullptr;
+        HWND hOk = nullptr;
+        HWND hCancel = nullptr;
     } ds;
-    ds.body = bodyText;
+    ds.body = NormalizeCrLfWide(bodyText);
     ds.confirmText = confirmBtnText;
     ds.showCancel = showCancel;
+    ds.dpi = GetSafeWindowDpi(owner);
+    UiGlass::LoadGlassSettings(ds.glass);
 
     static bool reg = false;
     if (!reg) {
@@ -82,30 +115,85 @@ inline bool ShowReportDialog(
                 return TRUE;
             }
             if (!st) return DefWindowProcW(hwnd, msg, wParam, lParam);
-            if (msg == WM_CREATE) {
-                st->hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                    DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            auto layoutControls = [&]() {
                 RECT rc{};
                 GetClientRect(hwnd, &rc);
-                HWND hEd = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", st->body.c_str(),
-                    WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-                    16, 16, rc.right - 32, rc.bottom - 72, hwnd, reinterpret_cast<HMENU>(101), nullptr, nullptr);
-                SendMessageW(hEd, WM_SETFONT, reinterpret_cast<WPARAM>(st->hFont), TRUE);
-                const int btnW = 148, btnH = 32;
-                int rightX = rc.right - 16;
-                if (st->showCancel) {
-                    HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Cancelar",
-                        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                        rightX - 104, rc.bottom - 44, 104, btnH, hwnd, reinterpret_cast<HMENU>(IDCANCEL), nullptr, nullptr);
-                    SendMessageW(hCancel, WM_SETFONT, reinterpret_cast<WPARAM>(st->hFont), TRUE);
-                    rightX -= 114;
+                const int pad = MulDiv(16, static_cast<int>(st->dpi), 96);
+                const int btnW = MulDiv(148, static_cast<int>(st->dpi), 96);
+                const int cancelW = MulDiv(108, static_cast<int>(st->dpi), 96);
+                const int btnH = MulDiv(32, static_cast<int>(st->dpi), 96);
+                const int bottomBand = btnH + MulDiv(24, static_cast<int>(st->dpi), 96);
+                if (st->hEdit) {
+                    MoveWindow(st->hEdit, pad, pad,
+                        (std::max)(80, static_cast<int>(rc.right - pad * 2)),
+                        (std::max)(60, static_cast<int>(rc.bottom - pad - bottomBand)), TRUE);
                 }
-                HWND hOk = CreateWindowExW(0, L"BUTTON", st->confirmText.c_str(),
+                int rightX = rc.right - pad;
+                const int btnY = rc.bottom - btnH - MulDiv(12, static_cast<int>(st->dpi), 96);
+                if (st->hCancel) {
+                    MoveWindow(st->hCancel, rightX - cancelW, btnY, cancelW, btnH, TRUE);
+                    rightX -= cancelW + MulDiv(10, static_cast<int>(st->dpi), 96);
+                }
+                if (st->hOk) {
+                    MoveWindow(st->hOk, rightX - btnW, btnY, btnW, btnH, TRUE);
+                }
+            };
+            if (msg == WM_CREATE) {
+                UiGlass::ApplyGoldenGateWindowFrame(hwnd, st->glass.IsDark());
+                const UiGlass::GlassPalette pal = UiGlass::GetPalette(st->glass);
+                st->hBgBrush = CreateSolidBrush(pal.sidebarBg.ToColorRef());
+                st->hCardBrush = CreateSolidBrush(pal.contentCard.ToColorRef());
+                st->hFont = CreateFontW(-MulDiv(14, static_cast<int>(st->dpi), 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                    DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+                st->hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", st->body.c_str(),
+                    WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+                    0, 0, 100, 100, hwnd, reinterpret_cast<HMENU>(101), nullptr, nullptr);
+                SendMessageW(st->hEdit, WM_SETFONT, reinterpret_cast<WPARAM>(st->hFont), TRUE);
+                if (st->showCancel) {
+                    st->hCancel = CreateWindowExW(0, L"BUTTON", L"Cancelar",
+                        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                        0, 0, 100, 32, hwnd, reinterpret_cast<HMENU>(IDCANCEL), nullptr, nullptr);
+                    SendMessageW(st->hCancel, WM_SETFONT, reinterpret_cast<WPARAM>(st->hFont), TRUE);
+                }
+                st->hOk = CreateWindowExW(0, L"BUTTON", st->confirmText.c_str(),
                     WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                    rightX - btnW, rc.bottom - 44, btnW, btnH, hwnd, reinterpret_cast<HMENU>(IDOK), nullptr, nullptr);
-                SendMessageW(hOk, WM_SETFONT, reinterpret_cast<WPARAM>(st->hFont), TRUE);
+                    0, 0, 148, 32, hwnd, reinterpret_cast<HMENU>(IDOK), nullptr, nullptr);
+                SendMessageW(st->hOk, WM_SETFONT, reinterpret_cast<WPARAM>(st->hFont), TRUE);
+                layoutControls();
                 return 0;
+            }
+            if (msg == WM_SIZE) { layoutControls(); return 0; }
+            if (msg == WM_DPICHANGED) {
+                st->dpi = HIWORD(wParam) ? HIWORD(wParam) : 96u;
+                HFONT nf = CreateFontW(-MulDiv(14, static_cast<int>(st->dpi), 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                    DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+                if (nf) {
+                    if (st->hEdit) SendMessageW(st->hEdit, WM_SETFONT, reinterpret_cast<WPARAM>(nf), FALSE);
+                    if (st->hOk) SendMessageW(st->hOk, WM_SETFONT, reinterpret_cast<WPARAM>(nf), FALSE);
+                    if (st->hCancel) SendMessageW(st->hCancel, WM_SETFONT, reinterpret_cast<WPARAM>(nf), FALSE);
+                    if (st->hFont) DeleteObject(st->hFont);
+                    st->hFont = nf;
+                }
+                const RECT* sr = reinterpret_cast<const RECT*>(lParam);
+                if (sr) SetWindowPos(hwnd, nullptr, sr->left, sr->top, sr->right - sr->left, sr->bottom - sr->top, SWP_NOZORDER | SWP_NOACTIVATE);
+                layoutControls();
+                InvalidateRect(hwnd, nullptr, TRUE);
+                return 0;
+            }
+            if (msg == WM_ERASEBKGND && st->hBgBrush) {
+                RECT rc{};
+                GetClientRect(hwnd, &rc);
+                FillRect(reinterpret_cast<HDC>(wParam), &rc, st->hBgBrush);
+                return 1;
+            }
+            if ((msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLOREDIT) && st->hCardBrush) {
+                const UiGlass::GlassPalette pal = UiGlass::GetPalette(st->glass);
+                HDC hdc = reinterpret_cast<HDC>(wParam);
+                SetTextColor(hdc, pal.labelPrimary.ToColorRef());
+                SetBkColor(hdc, pal.contentCard.ToColorRef());
+                return reinterpret_cast<LRESULT>(st->hCardBrush);
             }
             if (msg == WM_COMMAND) {
                 if (LOWORD(wParam) == IDOK) { st->accepted = true; st->done = true; DestroyWindow(hwnd); return 0; }
@@ -114,13 +202,15 @@ inline bool ShowReportDialog(
             if (msg == WM_CLOSE) { st->done = true; DestroyWindow(hwnd); return 0; }
             if (msg == WM_DESTROY) {
                 if (st->hFont) { DeleteObject(st->hFont); st->hFont = nullptr; }
+                if (st->hBgBrush) { DeleteObject(st->hBgBrush); st->hBgBrush = nullptr; }
+                if (st->hCardBrush) { DeleteObject(st->hCardBrush); st->hCardBrush = nullptr; }
                 return 0;
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         };
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        wc.hbrBackground = nullptr;
         wc.lpszClassName = L"CuadernUReportDlgClass";
         RegisterClassExW(&wc);
         reg = true;
@@ -128,19 +218,27 @@ inline bool ShowReportDialog(
 
     RECT prc{ 100, 100, 900, 700 };
     if (owner) GetWindowRect(owner, &prc);
-    const int w = 620, h = 440;
+    const int w = MulDiv(640, static_cast<int>(ds.dpi), 96);
+    const int h = MulDiv(460, static_cast<int>(ds.dpi), 96);
     const int x = prc.left + (std::max)(0, ((int)(prc.right - prc.left) - w) / 2);
     const int y = prc.top + (std::max)(0, ((int)(prc.bottom - prc.top) - h) / 2);
 
     if (owner) EnableWindow(owner, FALSE);
     HWND hDlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"CuadernUReportDlgClass", title.c_str(),
-        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, x, y, w, h, owner, nullptr, GetModuleHandleW(nullptr), &ds);
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_VISIBLE, x, y, w, h, owner, nullptr, GetModuleHandleW(nullptr), &ds);
     MSG msg{};
-    while (!ds.done && hDlg && IsWindow(hDlg) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    bool gotQuit = false;
+    WPARAM quitCode = 0;
+    while (!ds.done && hDlg && IsWindow(hDlg)) {
+        const BOOL gm = GetMessageW(&msg, nullptr, 0, 0);
+        if (gm == 0) { gotQuit = true; quitCode = msg.wParam; break; }
+        if (gm < 0) break;
         if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) { ds.done = true; DestroyWindow(hDlg); break; }
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN) { ds.accepted = true; ds.done = true; DestroyWindow(hDlg); break; }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    if (gotQuit) PostQuitMessage(static_cast<int>(quitCode));
     if (owner) {
         EnableWindow(owner, TRUE);
         SetActiveWindow(owner);
@@ -148,7 +246,7 @@ inline bool ShowReportDialog(
     return ds.accepted;
 }
 
-// Crisp Vector QR Code Viewer Dialog (F-210, F-211)
+// Crisp Vector QR Code Viewer Dialog (F-210, F-211) — Apple HIG Dark/Light/HC & DPI scaled
 inline void ShowQrCodeDialog(
     HWND owner,
     const std::wstring& title,
@@ -158,8 +256,15 @@ inline void ShowQrCodeDialog(
     struct QrState {
         LanRemote::QrMatrix qr;
         std::wstring url;
+        UINT dpi = 96u;
+        UiGlass::GlassSettings glass{};
         bool done = false;
-    } qs{ qr, Utf8ToWide(urlUtf8), false };
+    } qs{};
+    qs.qr = qr;
+    qs.url = Utf8ToWide(urlUtf8);
+    qs.dpi = GetSafeWindowDpi(owner);
+    UiGlass::LoadGlassSettings(qs.glass);
+    qs.done = false;
 
     static bool reg = false;
     if (!reg) {
@@ -173,17 +278,37 @@ inline void ShowQrCodeDialog(
                 return TRUE;
             }
             if (!st) return DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (msg == WM_CREATE) {
+                UiGlass::ApplyGoldenGateWindowFrame(hwnd, st->glass.IsDark());
+                return 0;
+            }
+            if (msg == WM_DPICHANGED) {
+                st->dpi = HIWORD(wParam) ? HIWORD(wParam) : 96u;
+                const RECT* sr = reinterpret_cast<const RECT*>(lParam);
+                if (sr) SetWindowPos(hwnd, nullptr, sr->left, sr->top, sr->right - sr->left, sr->bottom - sr->top, SWP_NOZORDER | SWP_NOACTIVATE);
+                InvalidateRect(hwnd, nullptr, TRUE);
+                return 0;
+            }
             if (msg == WM_PAINT) {
                 PAINTSTRUCT ps{};
                 HDC hdc = BeginPaint(hwnd, &ps);
                 RECT rc{};
                 GetClientRect(hwnd, &rc);
-                FillRect(hdc, &rc, reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+                const UiGlass::GlassPalette pal = UiGlass::GetPalette(st->glass);
+                HBRUSH bgBr = CreateSolidBrush(pal.sidebarBg.ToColorRef());
+                FillRect(hdc, &rc, bgBr);
+                DeleteObject(bgBr);
+
                 const int n = (std::max)(1, st->qr.size);
-                const int cell = (std::max)(4, (std::min)(static_cast<int>(rc.right - 80), static_cast<int>(rc.bottom - 110)) / n);
+                const int pad = MulDiv(24, static_cast<int>(st->dpi), 96);
+                const int cell = (std::max)(4, (std::min)(static_cast<int>(rc.right - pad * 3), static_cast<int>(rc.bottom - pad * 4)) / n);
                 const int qrPx = cell * n;
+                const int qQuiet = cell * 2;
                 const int ox = (rc.right - qrPx) / 2;
-                const int oy = 24;
+                const int oy = pad + qQuiet;
+                // ISO QR standard requires a white quiet zone even in Dark Mode
+                RECT plate{ ox - qQuiet, oy - qQuiet, ox + qrPx + qQuiet, oy + qrPx + qQuiet };
+                FillRect(hdc, &plate, reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
                 HBRUSH darkBr = CreateSolidBrush(RGB(15, 23, 42));
                 for (int r = 0; r < n; ++r) {
                     for (int c = 0; c < n; ++c) {
@@ -194,37 +319,49 @@ inline void ShowQrCodeDialog(
                     }
                 }
                 DeleteObject(darkBr);
+                HFONT hf = CreateFontW(-MulDiv(13, static_cast<int>(st->dpi), 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+                HGDIOBJ oldF = hf ? SelectObject(hdc, hf) : nullptr;
                 SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, RGB(30, 41, 59));
-                RECT trc{ 16, oy + qrPx + 14, rc.right - 16, rc.bottom - 16 };
+                SetTextColor(hdc, pal.labelPrimary.ToColorRef());
+                RECT trc{ pad, plate.bottom + MulDiv(12, static_cast<int>(st->dpi), 96), rc.right - pad, rc.bottom - pad };
                 DrawTextW(hdc, st->url.c_str(), -1, &trc, DT_CENTER | DT_WORDBREAK);
+                if (oldF) SelectObject(hdc, oldF);
+                if (hf) DeleteObject(hf);
                 EndPaint(hwnd, &ps);
                 return 0;
             }
-            if (msg == WM_KEYDOWN && wParam == VK_ESCAPE) { st->done = true; DestroyWindow(hwnd); return 0; }
+            if (msg == WM_KEYDOWN && (wParam == VK_ESCAPE || wParam == VK_RETURN)) { st->done = true; DestroyWindow(hwnd); return 0; }
             if (msg == WM_CLOSE) { st->done = true; DestroyWindow(hwnd); return 0; }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         };
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH));
+        wc.hbrBackground = nullptr;
         wc.lpszClassName = L"CuadernUQrDlgClass";
         RegisterClassExW(&wc);
         reg = true;
     }
     RECT prc{ 100, 100, 900, 700 };
     if (owner) GetWindowRect(owner, &prc);
-    const int w = 380, h = 420;
+    const int w = MulDiv(400, static_cast<int>(qs.dpi), 96);
+    const int h = MulDiv(440, static_cast<int>(qs.dpi), 96);
     const int x = prc.left + (std::max)(0, ((int)(prc.right - prc.left) - w) / 2);
     const int y = prc.top + (std::max)(0, ((int)(prc.bottom - prc.top) - h) / 2);
     if (owner) EnableWindow(owner, FALSE);
     HWND hDlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"CuadernUQrDlgClass", title.c_str(),
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, x, y, w, h, owner, nullptr, GetModuleHandleW(nullptr), &qs);
     MSG msg{};
-    while (!qs.done && hDlg && IsWindow(hDlg) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    bool gotQuit = false;
+    WPARAM quitCode = 0;
+    while (!qs.done && hDlg && IsWindow(hDlg)) {
+        const BOOL gm = GetMessageW(&msg, nullptr, 0, 0);
+        if (gm == 0) { gotQuit = true; quitCode = msg.wParam; break; }
+        if (gm < 0) break;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    if (gotQuit) PostQuitMessage(static_cast<int>(quitCode));
     if (owner) { EnableWindow(owner, TRUE); SetActiveWindow(owner); }
 }
 
@@ -630,7 +767,7 @@ inline bool RunReactiveTableDialog(
     return true;
 }
 
-// Track D: Advanced Math Lab (Complex Matrix 64x64 / Eigen / ODE RK4 / Calculus)
+// Track D: Advanced Math Lab (Complex Matrix 64x64 / Eigen / ODE RK4 / Calculus / 2D Statics FBD / GUM / Root Locus)
 inline bool RunAdvancedMathDialog(
     HWND owner,
     DocumentModel& doc,
@@ -642,12 +779,34 @@ inline bool RunAdvancedMathDialog(
     std::string& outStatus)
 {
     std::wstring q = L"eigen([[4, 1], [2, 3]])";
-    if (!prompt(L"Laboratorio Matem\u00E1tico Avanzado",
-                L"Ejemplos: eigen([[4,1],[2,3]]) | det([[2,1],[5,3]]) | inv([[1,2],[3,4]]) | ode(y - t^2 + 1, 0, 0.5, 2) | diff(sin(x)*x^2, 1.0) | int(x^2, 0, 3)", q, false)) {
+    if (!prompt(L"Laboratorio Matem\u00E1tico e Ingenier\u00ED""a Avanzada",
+                L"eigen([[4,1],[2,3]]) | ode(y - t^2 + 1, 0, 0.5, 2) | diff(sin(x)*x^2, 1) | int(x^2, 0, 3) | fbd(L=4, P=100, x=2) | gum(V/R; V=12+-0.1; R=1000+-10) | rootlocus(R=100,L=0.01,C=1e-6)", q, false)) {
         return false;
     }
     const std::string expr = WideToUtf8(q);
     std::string resText;
+
+    auto splitArgsTopLevel = [](const std::string& s, char sep) {
+        std::vector<std::string> out;
+        std::string cur;
+        int depth = 0;
+        for (char c : s) {
+            if (c == '(' || c == '[') ++depth;
+            else if (c == ')' || c == ']') --depth;
+            if (c == sep && depth == 0) {
+                while (!cur.empty() && std::isspace(static_cast<unsigned char>(cur.front()))) cur.erase(cur.begin());
+                while (!cur.empty() && std::isspace(static_cast<unsigned char>(cur.back()))) cur.pop_back();
+                out.push_back(cur);
+                cur.clear();
+            } else {
+                cur.push_back(c);
+            }
+        }
+        while (!cur.empty() && std::isspace(static_cast<unsigned char>(cur.front()))) cur.erase(cur.begin());
+        while (!cur.empty() && std::isspace(static_cast<unsigned char>(cur.back()))) cur.pop_back();
+        if (!cur.empty()) out.push_back(cur);
+        return out;
+    };
 
     if (expr.rfind("eigen(", 0) == 0 && expr.back() == ')') {
         Cas::ComplexMatrix m{};
@@ -658,8 +817,110 @@ inline bool RunAdvancedMathDialog(
             resText = "No se pudo interpretar la matriz.";
         }
     } else if (expr.rfind("ode(", 0) == 0 && expr.back() == ')') {
-        const auto ode = Cas::SolveFirstOrderOdeRk4("y - t^2 + 1", 0.0, { 0.5, 0.0 }, 2.0, 20);
-        resText = ode.ok ? ("RK4 y(2.0) = " + std::to_string(ode.samples.empty() ? 0.0 : ode.samples.back().y.real()) + " (" + std::to_string(ode.samples.size()) + " pasos)") : ode.errorUtf8;
+        const auto args = splitArgsTopLevel(expr.substr(4, expr.size() - 5), ',');
+        const std::string rhs = !args.empty() ? args[0] : "y - t^2 + 1";
+        const double t0 = (args.size() >= 2) ? std::atof(args[1].c_str()) : 0.0;
+        const double y0 = (args.size() >= 3) ? std::atof(args[2].c_str()) : 0.5;
+        const double t1 = (args.size() >= 4) ? std::atof(args[3].c_str()) : 2.0;
+        const std::size_t steps = (args.size() >= 5) ? static_cast<std::size_t>(std::clamp(std::atoi(args[4].c_str()), 4, 2000)) : 40u;
+        const auto ode = Cas::SolveFirstOrderOdeRk4(rhs, t0, { y0, 0.0 }, t1, steps);
+        if (ode.ok && !ode.samples.empty()) {
+            std::ostringstream os;
+            os << "RK4 y(" << t1 << ") = " << ode.samples.back().y.real()
+               << " (" << ode.samples.size() << " puntos desde t0=" << t0 << ", y0=" << y0 << ")";
+            resText = os.str();
+        } else {
+            resText = ode.errorUtf8;
+        }
+    } else if (expr.rfind("fbd(", 0) == 0 && expr.back() == ')') {
+        // Parse 2D simply-supported beam FBD: fbd(L=4, P=100, x=2)
+        double L = 4.0, P = 100.0, px = 2.0;
+        for (const auto& tok : splitArgsTopLevel(expr.substr(4, expr.size() - 5), ',')) {
+            const auto eq = tok.find('=');
+            if (eq != std::string::npos) {
+                const std::string k = tok.substr(0, eq);
+                const double v = std::atof(tok.substr(eq + 1).c_str());
+                if (k == "L" || k == "l") L = (std::max)(0.1, v);
+                else if (k == "P" || k == "F" || k == "p") P = v;
+                else if (k == "x" || k == "a") px = v;
+            }
+        }
+        Cas::FbdModel fbd{};
+        fbd.title = "Viga 2D (FBD)";
+        fbd.supports.push_back({ "A", "RA", Cas::FbdSupportKind::Pin, 0.0, 0.0, 90.0 });
+        fbd.supports.push_back({ "B", "RB", Cas::FbdSupportKind::RollerX, L, 0.0, 90.0 });
+        fbd.forces.push_back({ "F1", "P", px, 0.0, P, -90.0, false, "N" });
+        const auto s = Cas::SolveFbdEquilibrium(fbd);
+        if (s.ok) {
+            std::ostringstream os;
+            os << "[" << s.determinacyStatus << "] ";
+            for (std::size_t i = 0; i < s.reactions.size(); ++i) {
+                if (i > 0) os << ", ";
+                os << s.reactions[i].first << " = " << s.reactions[i].second << " N";
+            }
+            resText = os.str();
+        } else {
+            resText = s.errorUtf8;
+        }
+    } else if (expr.rfind("gum(", 0) == 0 && expr.back() == ')') {
+        // GUM Uncertainty & Monte Carlo: gum(V/R; V=12+-0.1; R=1000+-10)
+        const auto parts = splitArgsTopLevel(expr.substr(4, expr.size() - 5), ';');
+        const std::string formula = !parts.empty() ? parts[0] : "V/R";
+        std::unordered_map<std::string, Cas::UncertainValue> vars;
+        for (std::size_t i = 1; i < parts.size(); ++i) {
+            const auto eq = parts[i].find('=');
+            if (eq == std::string::npos) continue;
+            std::string name = parts[i].substr(0, eq);
+            while (!name.empty() && name.back() == ' ') name.pop_back();
+            const std::string rhs = parts[i].substr(eq + 1);
+            const auto pm = rhs.find("+-");
+            Cas::UncertainValue uv{};
+            if (pm != std::string::npos) {
+                uv.value = std::atof(rhs.substr(0, pm).c_str());
+                uv.uncertainty = std::atof(rhs.substr(pm + 2).c_str());
+            } else {
+                uv.value = std::atof(rhs.c_str());
+                uv.uncertainty = 0.0;
+            }
+            vars[name] = uv;
+        }
+        const auto ures = Cas::PropagateUncertainty(formula, vars, 4000);
+        resText = ures.ok
+            ? ("GUM RSS: " + ures.formattedRssUtf8 + " | Monte Carlo (4k): " + ures.formattedMcUtf8)
+            : ures.errorUtf8;
+    } else if (expr.rfind("rootlocus(", 0) == 0 && expr.back() == ')') {
+        // RLC Root Locus & stability analysis: rootlocus(R=100, L=0.01, C=1e-6)
+        double R = 100.0, L = 0.01, C = 1e-6;
+        for (const auto& tok : splitArgsTopLevel(expr.substr(10, expr.size() - 11), ',')) {
+            const auto eq = tok.find('=');
+            if (eq != std::string::npos) {
+                const std::string k = tok.substr(0, eq);
+                const double v = std::atof(tok.substr(eq + 1).c_str());
+                if (k == "R") R = (std::max)(1e-3, v);
+                else if (k == "L") L = (std::max)(1e-9, v);
+                else if (k == "C") C = (std::max)(1e-12, v);
+            }
+        }
+        std::ostringstream net;
+        net << "V1 1 0 1\nR1 1 2 " << R << "\nL1 2 3 " << L << "\nC1 3 0 " << C;
+        std::vector<Circuit::CircuitComponent> comps;
+        std::string perr;
+        if (Circuit::ParseNetlistText(net.str(), comps, &perr)) {
+            const auto sym = Circuit::AnalyzeFullSymbolicCircuit(comps, 3, 60.0);
+            if (sym.ok) {
+                std::ostringstream os;
+                os << "Polos: " << sym.poles.size() << " | Ramas Lugar Ra\xC3\xAD""ces: " << sym.rootLocusBranches.size()
+                   << " | BIBO: " << (sym.isBibostable ? "ESTABLE" : "INESTABLE");
+                if (!sym.poles.empty()) {
+                    os << " | p1=" << sym.poles[0].real() << (sym.poles[0].imag() >= 0 ? "+" : "") << sym.poles[0].imag() << "j";
+                }
+                resText = os.str();
+            } else {
+                resText = sym.errorUtf8;
+            }
+        } else {
+            resText = perr;
+        }
     } else if (expr.rfind("diff(", 0) == 0 && expr.back() == ')') {
         const std::string inner = expr.substr(5, expr.size() - 6);
         const auto c = inner.find_last_of(',');
@@ -934,20 +1195,164 @@ inline void RunEngineeringToolboxOrCodeBlock(
         if (hits == 0) os << "  (Sin coincidencias estructurales exactas)";
         ShowReportDialog(owner, L"B\u00FAsqueda Sem\u00E1ntica AST", Utf8ToWide(os.str()));
         outStatus = "B\xC3\xBAsqueda sem\xC3\xA1ntica AST: " + std::to_string(hits) + " coincidencia(s).";
+    } else if (mode == 4) {
+        // Control Block Diagram PID + Plant Step Response & Routh Stability (F-240)
+        std::wstring specW = L"Kp=2.5, Ki=1.0, Kd=0.2, Tau=0.5";
+        if (!prompt(L"Diagrama de Bloques de Control (PID + Planta)", L"Par\u00E1metros Kp, Ki, Kd, Tau (planta 1/(Tau*s + 1)):", specW, false)) return;
+        double kp = 2.5, ki = 1.0, kd = 0.2, tau = 0.5;
+        std::string s = WideToUtf8(specW);
+        for (char& ch : s) if (ch == ';') ch = ',';
+        std::istringstream iss(s);
+        std::string tok;
+        while (std::getline(iss, tok, ',')) {
+            const auto eq = tok.find('=');
+            if (eq == std::string::npos) continue;
+            std::string k = tok.substr(0, eq);
+            while (!k.empty() && k.front() == ' ') k.erase(k.begin());
+            while (!k.empty() && k.back() == ' ') k.pop_back();
+            const double v = std::atof(tok.substr(eq + 1).c_str());
+            if (k == "Kp" || k == "kp") kp = v;
+            else if (k == "Ki" || k == "ki") ki = v;
+            else if (k == "Kd" || k == "kd") kd = v;
+            else if (k == "Tau" || k == "tau") tau = (std::max)(0.01, v);
+        }
+        Circuit::ControlBlockDiagram diag{};
+        diag.title = "Lazo Cerrado PID";
+        Circuit::ControlBlockNode nIn{ 1, Circuit::ControlNodeKind::Input, "R(s)" };
+        Circuit::ControlBlockNode nSum{ 2, Circuit::ControlNodeKind::SumJunction, "E(s)" };
+        Circuit::ControlBlockNode nPid{ 3, Circuit::ControlNodeKind::Pid, "PID" };
+        nPid.kp = kp; nPid.ki = ki; nPid.kd = kd;
+        Circuit::ControlBlockNode nPlant{ 4, Circuit::ControlNodeKind::TransferFunction, "G(s)" };
+        nPlant.tf = { Circuit::Poly1D{ { 1.0 } }, Circuit::Poly1D{ { 1.0, tau } } };
+        Circuit::ControlBlockNode nOut{ 5, Circuit::ControlNodeKind::Output, "Y(s)" };
+        diag.nodes = { nIn, nSum, nPid, nPlant, nOut };
+        diag.edges = { { 1, 1, 2, +1, {} }, { 2, 2, 3, +1, {} }, { 3, 3, 4, +1, {} }, { 4, 4, 5, +1, {} }, { 5, 4, 2, -1, {} } };
+        const auto ca = Circuit::AnalyzeControlBlockDiagram(diag, 4.0, 120);
+        std::ostringstream os;
+        if (ca.ok) {
+            os << "Funci\xC3\xB3n de Transferencia Lazo Cerrado:\r\n  T(s) = " << ca.closedLoopUtf8 << "\r\n"
+               << "Estabilidad Routh-Hurwitz: " << (ca.isStableRouth ? "ESTABLE" : "INESTABLE") << "\r\n"
+               << "Polos (" << ca.poles.size() << "): ";
+            for (const auto& p : ca.poles) os << "(" << p.real() << (p.imag() >= 0 ? "+" : "") << p.imag() << "j) ";
+            os << "\r\nRespuesta al escal\xC3\xB3n final y(4s) = " << (ca.stepOutput.empty() ? 0.0 : ca.stepOutput.back());
+            AnnotationObject mb{};
+            mb.kind = ObjectKind::MathBlock;
+            mb.layerId = doc.ActiveLayerId();
+            mb.bounds = { x, y, 420.0, 96.0 };
+            mb.formulaExprUtf8 = "T(s) = " + ca.closedLoopUtf8;
+            mb.evaluatedResultUtf8 = std::string(ca.isStableRouth ? "Estable" : "Inestable") + " | y(4s)=" +
+                std::to_string(ca.stepOutput.empty() ? 0.0 : ca.stepOutput.back());
+            cmdStack.Execute(doc, std::make_unique<AddObjectCommand>(target, std::move(mb)));
+        } else {
+            os << "Error en diagrama de control: " << ca.errorUtf8;
+        }
+        ShowReportDialog(owner, L"An\u00E1lisis de Control (Lazo Cerrado PID)", Utf8ToWide(os.str()));
+        outStatus = ca.ok ? "Diagrama de control PID analizado." : ca.errorUtf8;
+    } else if (mode == 5) {
+        // Circuit Topology Search & Diagnostic Validator across Document CircuitBlocks
+        std::ostringstream os;
+        int blocksChecked = 0;
+        auto scanCircuits = [&](const std::vector<AnnotationObject>& vec, const std::string& where) {
+            for (const auto& o : vec) {
+                if (o.kind != ObjectKind::CircuitBlock || o.circuitNetlistUtf8.empty()) continue;
+                ++blocksChecked;
+                std::vector<Circuit::CircuitComponent> comps;
+                std::string perr;
+                os << "[" << where << "] " << (o.captionUtf8.empty() ? "Circuito" : o.captionUtf8) << ":\r\n";
+                if (Circuit::ParseNetlistText(o.circuitNetlistUtf8, comps, &perr)) {
+                    const auto sol = Circuit::SolveMnaCircuit(comps, 0.0);
+                    os << "  Componentes: " << comps.size() << " | Diagn\xC3\xB3stico MNA: "
+                       << (sol.ok ? sol.summaryUtf8 : ("Error topol\xC3\xB3gico: " + sol.errorUtf8)) << "\r\n\r\n";
+                } else {
+                    os << "  Error de netlist: " << perr << "\r\n\r\n";
+                }
+            }
+        };
+        for (std::size_t p = 0; p < doc.Pages().size(); ++p) scanCircuits(doc.Pages()[p].objects, "P\xC3\xA1g. " + std::to_string(p + 1));
+        scanCircuits(doc.CanvasObjects(), "Lienzo");
+        if (blocksChecked == 0) os << "No hay bloques de circuito SPICE/MNA en este documento.";
+        ShowReportDialog(owner, L"Auditor\u00ED""a Topol\u00F3gica de Circuitos", Utf8ToWide(os.str()));
+        outStatus = "Circuitos auditados: " + std::to_string(blocksChecked);
     }
 }
 
+// Track D: Teacher Parametric Exam Variants, Rubric & LMS ZIP Package Generator (F-186..F-197)
+inline void RunExamVariantsAndLmsDialog(
+    HWND owner,
+    const DocumentModel& doc,
+    PromptFn prompt,
+    std::string& outStatus)
+{
+    std::wstring countW = L"3";
+    if (!prompt(L"Generador de Variantes de Examen y Paquete LMS",
+                L"N\u00FAmero de variantes param\u00E9tricas (1..20) con r\u00FAbrica autom\u00E1tica:", countW, false)) return;
+    const int nVar = std::clamp(_wtoi(countW.c_str()), 1, 20);
+
+    wchar_t fileBuf[MAX_PATH * 2]{ L"paquete_examen_lms.zip" };
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"Paquete LMS / QTI (*.zip)\0*.zip\0\0";
+    ofn.lpstrFile = fileBuf;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(fileBuf));
+    ofn.lpstrDefExt = L"zip";
+    ofn.Flags = OFN_OVERWRITEPROMPT;
+    if (!GetSaveFileNameW(&ofn)) return;
+
+    ZipArchive zip;
+    nlohmann::json manifest;
+    manifest["title"] = doc.Title();
+    manifest["variantsCount"] = nVar;
+    manifest["rubricPointsTotal"] = 100;
+    nlohmann::json varsJson = nlohmann::json::array();
+    std::ostringstream summary;
+    summary << "Paquete de examen LMS generado con " << nVar << " variante(s) param\xC3\xA9tricas:\r\n\r\n";
+
+    for (int v = 1; v <= nVar; ++v) {
+        const double R = 100.0 * v;
+        const double V = 6.0 + 2.0 * v;
+        const double I = V / R;
+        const double P = V * I;
+        std::ostringstream md;
+        md << "# Examen Variante " << v << " — " << doc.Title() << "\n\n"
+           << "## Problema Param\xC3\xA9trico\n"
+           << "Determine corriente I y potencia P para V = " << V << " V y R = " << R << " Ohm.\n\n"
+           << "## Clave y R\xC3\xBA""brica (100 pts)\n"
+           << "- Planteamiento (30 pts): I = V / R\n"
+           << "- Corriente (35 pts): I = " << I << " A\n"
+           << "- Potencia (35 pts): P = " << P << " W\n";
+        zip.SetTextEntry("variante_" + std::to_string(v) + ".md", md.str());
+        varsJson.push_back({ {"variant", v}, {"V", V}, {"R", R}, {"I_answer", I}, {"P_answer", P} });
+        summary << "  - Variante #" << v << ": V=" << V << "V, R=" << R << "Ohm -> I=" << I << "A, P=" << P << "W\r\n";
+    }
+    manifest["variants"] = std::move(varsJson);
+    zip.SetTextEntry("lms_manifest.json", manifest.dump(2));
+
+    std::vector<std::uint8_t> zipBytes;
+    std::string err;
+    if (zip.Serialize(zipBytes, true, &err)) {
+        std::ofstream ofs(std::filesystem::path(fileBuf), std::ios::binary | std::ios::trunc);
+        ofs.write(reinterpret_cast<const char*>(zipBytes.data()), static_cast<std::streamsize>(zipBytes.size()));
+        if (ofs.good()) {
+            ShowReportDialog(owner, L"Paquete de Examen LMS Exportado", Utf8ToWide(summary.str()));
+            outStatus = "Exportadas " + std::to_string(nVar) + " variantes de examen LMS.";
+            return;
+        }
+    }
+    ShowReportDialog(owner, L"Error exportando paquete LMS", Utf8ToWide(err.empty() ? "No se pudo escribir el archivo ZIP." : err));
+}
+
 // Track D: Security (AES-256-GCM Encrypted Save/Open + LAN QR Broadcast) (F-210, F-211, F-215)
-inline void RunSecurityOrLanFlow(
+inline bool RunSecurityOrLanFlow(
     HWND owner,
     DocumentModel& doc,
     int mode, // 0=EncryptSave, 1=DecryptOpen, 2=LanQrBroadcast
-    PromptFn prompt,
+    PasswordPromptFn passPrompt,
     std::string& outStatus)
 {
     if (mode == 0) {
         std::wstring passW;
-        if (!prompt(L"Guardar Cuaderno Cifrado (AES-256-GCM)", L"Contrase\u00F1""a de protecci\u00F3n:", passW, false) || passW.empty()) return;
+        if (!passPrompt(L"Guardar Cuaderno Cifrado (AES-256-GCM)", L"Contrase\u00F1""a de protecci\u00F3n:", passW) || passW.empty()) return false;
         wchar_t fileBuf[MAX_PATH * 2]{ L"cuaderno_seguro.cudoc" };
         OPENFILENAMEW ofn{};
         ofn.lStructSize = sizeof(ofn);
@@ -957,13 +1362,14 @@ inline void RunSecurityOrLanFlow(
         ofn.nMaxFile = static_cast<DWORD>(std::size(fileBuf));
         ofn.lpstrDefExt = L"cudoc";
         ofn.Flags = OFN_OVERWRITEPROMPT;
-        if (!GetSaveFileNameW(&ofn)) return;
+        if (!GetSaveFileNameW(&ofn)) return false;
         std::string err;
         if (CudocCrypto::SaveEncryptedCudocFile(WideToUtf8(fileBuf), doc, WideToUtf8(passW), &err)) {
             outStatus = "Cuaderno guardado con cifrado AES-256-GCM.";
-        } else {
-            ShowReportDialog(owner, L"Error de cifrado", Utf8ToWide(err));
+            return true;
         }
+        ShowReportDialog(owner, L"Error de cifrado", Utf8ToWide(err));
+        return false;
     } else if (mode == 1) {
         wchar_t fileBuf[MAX_PATH * 2]{};
         OPENFILENAMEW ofn{};
@@ -973,17 +1379,18 @@ inline void RunSecurityOrLanFlow(
         ofn.lpstrFile = fileBuf;
         ofn.nMaxFile = static_cast<DWORD>(std::size(fileBuf));
         ofn.Flags = OFN_FILEMUSTEXIST;
-        if (!GetOpenFileNameW(&ofn)) return;
+        if (!GetOpenFileNameW(&ofn)) return false;
         std::wstring passW;
-        if (!prompt(L"Abrir Cuaderno Cifrado", L"Ingrese la contrase\u00F1""a:", passW, false) || passW.empty()) return;
+        if (!passPrompt(L"Abrir Cuaderno Cifrado", L"Ingrese la contrase\u00F1""a:", passW) || passW.empty()) return false;
         DocumentModel dec;
         std::string err;
         if (CudocCrypto::LoadEncryptedCudocFile(WideToUtf8(fileBuf), WideToUtf8(passW), dec, &err)) {
             doc = std::move(dec);
             outStatus = "Cuaderno cifrado abierto correctamente.";
-        } else {
-            ShowReportDialog(owner, L"Error al descifrar", Utf8ToWide(err));
+            return true;
         }
+        ShowReportDialog(owner, L"Error al descifrar", Utf8ToWide(err));
+        return false;
     } else if (mode == 2) {
         int boundPort = 0;
         std::string err;
@@ -998,17 +1405,20 @@ inline void RunSecurityOrLanFlow(
             LanRemote::ExportLanBroadcastHtml(doc, htmlPath, url, true, false);
             ShowQrCodeDialog(owner, L"Difusi\u00F3n LAN Local (Solo Lectura)", url, qr);
             outStatus = "Sesi\xC3\xB3n LAN local lista en puerto " + std::to_string(boundPort) + ".";
+            return true;
         }
     }
+    return false;
 }
 
-// Track C: Page Version History & Conflict Merge Dialogs (F-059, F-219)
+// Track C: Page Version History (with real Restore!) & Conflict Merge Dialogs (F-059, F-219)
 inline void RunVersionHistoryOrMerge(
     HWND owner,
     DocumentModel& doc,
     PageVersionHistory& history,
     std::size_t currentPageIdx,
     bool doMergeOtherFile,
+    PromptFn prompt,
     std::string& outStatus)
 {
     if (!doMergeOtherFile) {
@@ -1022,7 +1432,21 @@ inline void RunVersionHistoryOrMerge(
             os << "  - Versi\xC3\xB3n #" << s.versionId << " (" << s.authorOrLabelUtf8 << ") — "
                << s.snapshotPage.objects.size() << " objeto(s)\r\n";
         }
-        ShowReportDialog(owner, L"Historial de Versiones de P\u00E1gina", Utf8ToWide(os.str()));
+        os << "\r\nPulse \"Restaurar versi\xC3\xB3n...\" para volver a cualquier instant\xC3\xA1nea anterior.";
+        if (list.size() > 1 && ShowReportDialog(owner, L"Historial de Versiones de P\u00E1gina", Utf8ToWide(os.str()), L"Restaurar versi\u00F3n...", true)) {
+            std::wstring idW = std::to_wstring(list.front().versionId);
+            if (prompt(L"Restaurar Instant\u00E1nea de P\u00E1gina", L"Ingrese el n\u00FAmero # de versi\u00F3n a restaurar:", idW, false) && !idW.empty()) {
+                const std::uint64_t pickId = static_cast<std::uint64_t>(_wcstoui64(idW.c_str(), nullptr, 10));
+                if (history.RestoreSnapshot(doc, pickId)) {
+                    outStatus = "P\xC3\xA1gina restaurada a instant\xC3\xA1nea #" + std::to_string(pickId) + ".";
+                    return;
+                }
+                outStatus = "No se encontr\xC3\xB3 la versi\xC3\xB3n #" + std::to_string(pickId) + ".";
+                return;
+            }
+        } else if (list.size() <= 1) {
+            ShowReportDialog(owner, L"Historial de Versiones de P\u00E1gina", Utf8ToWide(os.str()));
+        }
         outStatus = "Instant\xC3\xA1nea #" + std::to_string(verId) + " guardada.";
     } else {
         wchar_t fileBuf[MAX_PATH * 2]{};
@@ -1054,7 +1478,7 @@ inline void RunVersionHistoryOrMerge(
     }
 }
 
-// Track C: Library Vault Browser & Vault-Wide Search (F-058, F-061..F-064)
+// Track C: Library Vault Browser & Vault-Wide Search + Notebook/Section Creation (F-058, F-061..F-064)
 inline void RunVaultLibraryManager(
     HWND owner,
     DocumentModel& doc,
@@ -1072,15 +1496,29 @@ inline void RunVaultLibraryManager(
     }
 
     std::wstring queryW;
-    const bool doSearch = prompt(
+    if (!prompt(
         L"Biblioteca de Cuadernos y B\u00FAsqueda Global",
-        L"Escriba un t\u00E9rmino para buscar en toda la biblioteca (o deje vac\u00EDo para ver estructura):",
-        queryW, false);
+        L"T\u00E9rmino a buscar, +cuaderno:Nombre, +seccion:Nombre (o vac\u00EDo para explorar):",
+        queryW, false)) {
+        return; // Respect Cancel cleanly
+    }
+
+    const std::string qUtf8 = WideToUtf8(queryW);
+    if (qUtf8.rfind("+cuaderno:", 0) == 0 && qUtf8.size() > 10) {
+        const std::string name = qUtf8.substr(10);
+        const auto nbId = vault.CreateNotebook(name);
+        vault.CreateSection(nbId, "General");
+        outStatus = "Cuaderno creado en Biblioteca: " + name;
+    } else if (qUtf8.rfind("+seccion:", 0) == 0 && qUtf8.size() > 9 && !vault.Notebooks().empty()) {
+        const std::string name = qUtf8.substr(9);
+        vault.CreateSection(vault.Notebooks().front().id, name);
+        outStatus = "Secci\xC3\xB3n creada en Biblioteca: " + name;
+    }
 
     std::ostringstream os;
-    if (doSearch && !queryW.empty()) {
-        const auto hits = ftsIndex.Query(WideToUtf8(queryW), 32);
-        os << "B\xC3\xBAsqueda global \"" << WideToUtf8(queryW) << "\" (" << hits.size() << " resultado(s)):\r\n\r\n";
+    if (!qUtf8.empty() && qUtf8[0] != '+') {
+        const auto hits = ftsIndex.Query(qUtf8, 32);
+        os << "B\xC3\xBAsqueda global \"" << qUtf8 << "\" (" << hits.size() << " resultado(s)):\r\n\r\n";
         for (const auto& h : hits) {
             os << "  - [" << h.docKeyUtf8 << " | P\xC3\xA1g. " << (h.pageIndex + 1) << " | " << h.sourceKindUtf8 << "] "
                << h.snippetUtf8 << "\r\n";
@@ -1098,7 +1536,9 @@ inline void RunVaultLibraryManager(
                 }
             }
         }
-        outStatus = "Biblioteca actualizada (" + std::to_string(vault.Notebooks().size()) + " cuaderno(s)).";
+        if (qUtf8.empty()) {
+            outStatus = "Biblioteca actualizada (" + std::to_string(vault.Notebooks().size()) + " cuaderno(s)).";
+        }
     }
     ShowReportDialog(owner, L"Biblioteca CuadernU", Utf8ToWide(os.str()));
 }

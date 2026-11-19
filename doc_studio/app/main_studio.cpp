@@ -263,6 +263,19 @@ enum CmdId : WORD {
     CMD_TEXT_BOLD,
     CMD_TEXT_ITALIC,
     CMD_TEXT_UNDERLINE,
+    CMD_TEXT_BULLET_LIST,
+    CMD_TEXT_CHECKBOX_TOGGLE,
+    CMD_PEN_WIDTH_FINE,
+    CMD_PEN_WIDTH_MED,
+    CMD_PEN_WIDTH_BOLD,
+    CMD_PEN_WIDTH_MARKER,
+    CMD_PEN_OPACITY_100,
+    CMD_PEN_OPACITY_75,
+    CMD_PEN_OPACITY_50,
+    CMD_PEN_OPACITY_30,
+    CMD_CONTROL_BLOCK_LAB,
+    CMD_CIRCUIT_TOPO_AUDIT,
+    CMD_EXAM_VARIANTS_LMS,
     CMD_INLINE_EDIT_CTRL = 2599
 };
 
@@ -392,6 +405,7 @@ struct StudioAppState {
     std::vector<OpenDocTab> tabs;
     std::size_t activeTabIdx = 0;
     bool splitViewActive = false;
+    bool splitPanning = false;
     Camera2D splitCamera{};
     NotebookVault vault;
     PageVersionHistory versionHistory;
@@ -512,6 +526,8 @@ struct PromptState {
     std::wstring label2;
     std::wstring val2;
     bool twoFields = false;
+    bool multiline = false;
+    bool passwordMask = false;
     bool accepted = false;
     UiGlass::GlassSettings glassSettings{};
     HWND hwndEdit1 = nullptr;
@@ -539,11 +555,20 @@ LRESULT CALLBACK PromptWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         HWND l1 = CreateWindowW(L"STATIC", ps->label1.c_str(), WS_CHILD | WS_VISIBLE, 14, 12, 390, 20, hwnd, nullptr, nullptr, nullptr);
         SendMessageW(l1, WM_SETFONT, reinterpret_cast<WPARAM>(hf), TRUE);
+        DWORD ed1Style = WS_CHILD | WS_VISIBLE | WS_TABSTOP;
+        int ed1H = 24;
+        if (ps->multiline) {
+            ed1Style |= ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL;
+            ed1H = 104;
+        } else {
+            ed1Style |= ES_AUTOHSCROLL;
+            if (ps->passwordMask) ed1Style |= ES_PASSWORD;
+        }
         ps->hwndEdit1 = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", ps->val1.c_str(),
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP, 14, 34, 390, 24, hwnd, reinterpret_cast<HMENU>(101), nullptr, nullptr);
+            ed1Style, 14, 34, 390, ed1H, hwnd, reinterpret_cast<HMENU>(101), nullptr, nullptr);
         SendMessageW(ps->hwndEdit1, WM_SETFONT, reinterpret_cast<WPARAM>(hf), TRUE);
 
-        int btnY = 72;
+        int btnY = ps->multiline ? 150 : 72;
         if (ps->twoFields) {
             HWND l2 = CreateWindowW(L"STATIC", ps->label2.c_str(), WS_CHILD | WS_VISIBLE, 14, 68, 390, 20, hwnd, nullptr, nullptr, nullptr);
             SendMessageW(l2, WM_SETFONT, reinterpret_cast<WPARAM>(hf), TRUE);
@@ -637,11 +662,22 @@ LRESULT CALLBACK PromptWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-bool ShowTextPrompt(HWND owner, const wchar_t* title, const wchar_t* label1, std::wstring& val1, const wchar_t* label2 = nullptr, std::wstring* val2 = nullptr) {
+bool ShowTextPrompt(
+    HWND owner,
+    const wchar_t* title,
+    const wchar_t* label1,
+    std::wstring& val1,
+    const wchar_t* label2 = nullptr,
+    std::wstring* val2 = nullptr,
+    bool multiline = false,
+    bool passwordMask = false)
+{
     PromptState ps;
     ps.label1 = label1 ? label1 : L"";
     ps.val1 = val1;
     ps.twoFields = (label2 != nullptr && val2 != nullptr);
+    ps.multiline = multiline && !ps.twoFields;
+    ps.passwordMask = passwordMask && !ps.multiline;
     if (ps.twoFields) {
         ps.label2 = label2;
         ps.val2 = *val2;
@@ -655,7 +691,7 @@ bool ShowTextPrompt(HWND owner, const wchar_t* title, const wchar_t* label1, std
     RECT ownerRc{};
     GetWindowRect(owner, &ownerRc);
     const int w = 434;
-    const int h = ps.twoFields ? 204 : 150;
+    const int h = ps.multiline ? 232 : (ps.twoFields ? 204 : 150);
     const int x = (ownerRc.left + ownerRc.right - w) / 2;
     const int y = (ownerRc.top + ownerRc.bottom - h) / 2;
 
@@ -665,7 +701,8 @@ bool ShowTextPrompt(HWND owner, const wchar_t* title, const wchar_t* label1, std
 
     MSG msg{};
     while (IsWindow(dlg) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN) {
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN &&
+            (!ps.multiline || (GetKeyState(VK_CONTROL) & 0x8000) != 0)) {
             SendMessageW(dlg, WM_COMMAND, IDOK, 0);
             continue;
         }
@@ -1284,8 +1321,27 @@ void TryLoadPersistentUndo(StudioAppState* st) {
 void AppendWalMutation(StudioAppState* st, const std::string& opTag) {
     if (!st || st->currentDocPath.empty()) return;
     WalRecord rec{};
-    rec.opTag = opTag;
-    rec.payloadJson = "{\"rev\":" + std::to_string(st->doc.Revision()) + "}";
+    std::vector<std::uint8_t> bytes;
+    if (CudocStorage::SerializeToBytes(st->doc, bytes, nullptr) && !bytes.empty() && bytes.size() <= 2u * 1024u * 1024u) {
+        static constexpr char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string b64;
+        b64.reserve(((bytes.size() + 2u) / 3u) * 4u);
+        for (std::size_t i = 0; i < bytes.size(); i += 3u) {
+            const std::uint32_t b0 = bytes[i];
+            const std::uint32_t b1 = (i + 1u < bytes.size()) ? bytes[i + 1u] : 0u;
+            const std::uint32_t b2 = (i + 2u < bytes.size()) ? bytes[i + 2u] : 0u;
+            const std::uint32_t t = (b0 << 16) | (b1 << 8) | b2;
+            b64.push_back(kB64[(t >> 18) & 0x3Fu]);
+            b64.push_back(kB64[(t >> 12) & 0x3Fu]);
+            b64.push_back((i + 1u < bytes.size()) ? kB64[(t >> 6) & 0x3Fu] : '=');
+            b64.push_back((i + 2u < bytes.size()) ? kB64[t & 0x3Fu] : '=');
+        }
+        rec.opTag = "snapshot";
+        rec.payloadJson = nlohmann::json{ {"op", opTag}, {"rev", st->doc.Revision()}, {"cudocB64", std::move(b64)} }.dump();
+    } else {
+        rec.opTag = opTag;
+        rec.payloadJson = "{\"rev\":" + std::to_string(st->doc.Revision()) + "}";
+    }
     CudocWal::AppendRecord(st->currentDocPath + L"-wal", rec);
 }
 
@@ -1307,8 +1363,14 @@ const char* PaperPatternLabelUtf8(PaperPattern pat) noexcept {
 }
 
 GuiDialogs::PromptFn MakePromptAdapter(StudioAppState* st) {
-    return [st](const std::wstring& title, const std::wstring& label, std::wstring& value, bool) -> bool {
-        return ShowTextPrompt(st->hwndMain, title.c_str(), label.c_str(), value);
+    return [st](const std::wstring& title, const std::wstring& label, std::wstring& value, bool multiline) -> bool {
+        return ShowTextPrompt(st->hwndMain, title.c_str(), label.c_str(), value, nullptr, nullptr, multiline, false);
+    };
+}
+
+GuiDialogs::PasswordPromptFn MakePasswordPromptAdapter(StudioAppState* st) {
+    return [st](const std::wstring& title, const std::wstring& label, std::wstring& value) -> bool {
+        return ShowTextPrompt(st->hwndMain, title.c_str(), label.c_str(), value, nullptr, nullptr, false, true);
     };
 }
 
@@ -1927,6 +1989,8 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, CMD_ADD_CIRCUIT,           L"Resolver Circuito MNA (DC / AC / Diodos)...");
         AppendMenuW(menu, MF_STRING, CMD_RECOGNIZE_CIRCUIT,     L"Reconocer Circuito a Mano Alzada...");
+        AppendMenuW(menu, MF_STRING, CMD_CIRCUIT_TOPO_AUDIT,    L"Auditor\u00ED""a Topol\u00F3gica de Circuitos...");
+        AppendMenuW(menu, MF_STRING, CMD_CONTROL_BLOCK_LAB,     L"Diagrama de Bloques de Control (PID / Routh)...");
         AppendMenuW(menu, MF_STRING, CMD_ENG_TOOLBOX,           L"Caja de Herramientas de Ingenier\u00ED""a (RC / Op-Amp / SMD)...");
         AppendMenuW(menu, MF_STRING, CMD_ADD_TRANSIENT_LAPLACE, L"Simulaci\u00F3n Transitoria Osciloscopio + Laplace (s)...");
         AppendMenuW(menu, MF_STRING, CMD_ADD_KMAP,              L"Simplificar Mapa de Karnaugh...");
@@ -1956,12 +2020,14 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
     }
     case CMD_STUDY_MENU: {
         HMENU menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING, CMD_CHECK_MY_WORK,       L"Revisar mi Procedimiento (Check My Work)...");
-        AppendMenuW(menu, MF_STRING, CMD_TEACH_ME,            L"Gu\u00ED""a Socr\u00E1tica Paso a Paso (Teach Me)...");
-        AppendMenuW(menu, MF_STRING, CMD_SUMMARIZE_NOTES,     L"Generar Resumen No Destructivo (Capa Separada)");
-        AppendMenuW(menu, MF_STRING, CMD_LOCAL_QA,            L"Consulta Local con Citas sobre Apuntes...");
+        const UINT examGate = st->examModeLocked ? (MF_STRING | MF_GRAYED) : MF_STRING;
+        AppendMenuW(menu, examGate,  CMD_CHECK_MY_WORK,       L"Revisar mi Procedimiento (Check My Work)...");
+        AppendMenuW(menu, examGate,  CMD_TEACH_ME,            L"Gu\u00ED""a Socr\u00E1tica Paso a Paso (Teach Me)...");
+        AppendMenuW(menu, examGate,  CMD_SUMMARIZE_NOTES,     L"Generar Resumen No Destructivo (Capa Separada)");
+        AppendMenuW(menu, examGate,  CMD_LOCAL_QA,            L"Consulta Local con Citas sobre Apuntes...");
         AppendMenuW(menu, MF_STRING, CMD_STUDY_DECK,          L"Repasar Flashcards (SM-2)...");
         AppendMenuW(menu, MF_STRING, CMD_FTS_SEARCH,          L"Buscar en \u00CDndice Unicode (FTS Vault)...");
+        AppendMenuW(menu, MF_STRING, CMD_EXAM_VARIANTS_LMS,   L"Generar Variantes de Examen y Paquete LMS...");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         HMENU hAudioSub = CreatePopupMenu();
         AppendMenuW(hAudioSub, MF_STRING, CMD_AUDIO_REC,          st->audioSession.IsContinuousRecording() ? L"Detener Grabaci\u00F3n Continua (Mic)" : L"Grabar Audio Continuo en Segundo Plano (Mic)");
@@ -2438,7 +2504,9 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
                 clip.textUtf8 = rep.statusNoteUtf8;
                 clip.inkStartTimeMs = 0;
                 clip.inkEndTimeMs = st->audioSession.DurationMs();
-                clip.assetKey = st->doc.RegisterAsset(wav);
+                const std::string audioKey = st->doc.RegisterAsset(wav);
+                clip.assetKey = audioKey;
+                clip.audioAssetKey = audioKey;
                 st->cmdStack.Execute(st->doc, std::make_unique<AddObjectCommand>(CurrentTarget(st), std::move(clip)));
                 st->statusBannerUtf8 = rep.statusNoteUtf8 + " — clic en tarjeta o Replay para reproducir";
             } else {
@@ -2782,7 +2850,19 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
     case CMD_MORE_OVERFLOW: {
         HMENU hm = CreatePopupMenu();
         HMENU hInkSub = CreatePopupMenu();
-        AppendMenuW(hInkSub, MF_STRING, CMD_CYCLE_PEN_STYLE,       L"Cambiar estilo de l\u00E1piz (Bol\u00EDgrafo / Pluma / L\u00E1piz / Pincel)");
+        AppendMenuW(hInkSub, MF_STRING, CMD_CYCLE_PEN_STYLE,       L"Cambiar estilo de l\u00E1piz (Bol\u00EDgrafo / Pluma / Pincel / L\u00E1piz)");
+        HMENU hWidthSub = CreatePopupMenu();
+        AppendMenuW(hWidthSub, MF_STRING | (st->penWidth < 2.0 ? MF_CHECKED : 0),  CMD_PEN_WIDTH_FINE,   L"Fino (1.5 pt)");
+        AppendMenuW(hWidthSub, MF_STRING | (st->penWidth >= 2.0 && st->penWidth < 3.8 ? MF_CHECKED : 0), CMD_PEN_WIDTH_MED, L"Medio (2.6 pt)");
+        AppendMenuW(hWidthSub, MF_STRING | (st->penWidth >= 3.8 && st->penWidth < 6.5 ? MF_CHECKED : 0), CMD_PEN_WIDTH_BOLD, L"Grueso (4.8 pt)");
+        AppendMenuW(hWidthSub, MF_STRING | (st->penWidth >= 6.5 ? MF_CHECKED : 0), CMD_PEN_WIDTH_MARKER, L"Marcador (8.0 pt)");
+        AppendMenuW(hInkSub, MF_POPUP, reinterpret_cast<UINT_PTR>(hWidthSub), L"Grosor de trazo");
+        HMENU hOpSub = CreatePopupMenu();
+        AppendMenuW(hOpSub, MF_STRING | (st->penOpacity > 0.90 ? MF_CHECKED : 0), CMD_PEN_OPACITY_100, L"100% (Opaco)");
+        AppendMenuW(hOpSub, MF_STRING | (st->penOpacity <= 0.90 && st->penOpacity > 0.62 ? MF_CHECKED : 0), CMD_PEN_OPACITY_75, L"75%");
+        AppendMenuW(hOpSub, MF_STRING | (st->penOpacity <= 0.62 && st->penOpacity > 0.40 ? MF_CHECKED : 0), CMD_PEN_OPACITY_50, L"50%");
+        AppendMenuW(hOpSub, MF_STRING | (st->penOpacity <= 0.40 ? MF_CHECKED : 0), CMD_PEN_OPACITY_30, L"30% (Transl\u00FAcido)");
+        AppendMenuW(hInkSub, MF_POPUP, reinterpret_cast<UINT_PTR>(hOpSub), L"Opacidad de tinta");
         AppendMenuW(hInkSub, MF_STRING, CMD_CUSTOM_INK_COLOR,      L"Color personalizado de tinta...");
         AppendMenuW(hInkSub, MF_STRING, CMD_TOGGLE_PARTIAL_ERASER, st->eraserActionMode == EraserActionMode::PartialPixel ? L"Borrador: Cambiar a Trazo Completo" : L"Borrador: Cambiar a Precisi\u00F3n / P\u00EDxel");
         AppendMenuW(hInkSub, MF_STRING, CMD_CYCLE_ERASER_FILTER,   L"Filtro de borrador (Todo / Solo Resaltador / Solo Tinta)");
@@ -2808,6 +2888,8 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         AppendMenuW(hObjSub, MF_STRING, CMD_TEXT_BOLD,              L"Texto: Negrita (Ctrl+B)");
         AppendMenuW(hObjSub, MF_STRING, CMD_TEXT_ITALIC,            L"Texto: Cursiva (Ctrl+I)");
         AppendMenuW(hObjSub, MF_STRING, CMD_TEXT_UNDERLINE,         L"Texto: Subrayado (Ctrl+U)");
+        AppendMenuW(hObjSub, MF_STRING, CMD_TEXT_BULLET_LIST,       L"Texto: Alternar vi\u00F1""etas (\u2022)");
+        AppendMenuW(hObjSub, MF_STRING, CMD_TEXT_CHECKBOX_TOGGLE,   L"Texto: Alternar casilla (\u2610 / \u2611)");
         AppendMenuW(hObjSub, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(hObjSub, MF_STRING, CMD_IMG_ENHANCE_WHITEBOARD, L"Imagen: Mejorar contraste de pizarra");
         AppendMenuW(hObjSub, MF_STRING, CMD_IMG_REMOVE_BG,          L"Imagen: Quitar fondo blanco");
@@ -2919,20 +3001,21 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         GuiDialogs::RunVaultLibraryManager(st->hwndMain, st->doc, st->vault, st->ftsIndex, st->currentDocPath, MakePromptAdapter(st), st->statusBannerUtf8);
         break;
     case CMD_SAVE_ENCRYPTED:
-        GuiDialogs::RunSecurityOrLanFlow(st->hwndMain, st->doc, 0, MakePromptAdapter(st), st->statusBannerUtf8);
+        GuiDialogs::RunSecurityOrLanFlow(st->hwndMain, st->doc, 0, MakePasswordPromptAdapter(st), st->statusBannerUtf8);
         break;
     case CMD_OPEN_ENCRYPTED:
-        GuiDialogs::RunSecurityOrLanFlow(st->hwndMain, st->doc, 1, MakePromptAdapter(st), st->statusBannerUtf8);
-        st->cmdStack.Clear();
-        st->pageCache.InvalidateAll(++st->asyncGen);
-        CenterCameraOnPage(st, 0);
-        LayoutMainChildren(st);
+        if (GuiDialogs::RunSecurityOrLanFlow(st->hwndMain, st->doc, 1, MakePasswordPromptAdapter(st), st->statusBannerUtf8)) {
+            st->cmdStack.Clear();
+            st->pageCache.InvalidateAll(++st->asyncGen);
+            CenterCameraOnPage(st, 0);
+            LayoutMainChildren(st);
+        }
         break;
     case CMD_VERSION_HISTORY:
-        GuiDialogs::RunVersionHistoryOrMerge(st->hwndMain, st->doc, st->versionHistory, st->activePageIndex, false, st->statusBannerUtf8);
+        GuiDialogs::RunVersionHistoryOrMerge(st->hwndMain, st->doc, st->versionHistory, st->activePageIndex, false, MakePromptAdapter(st), st->statusBannerUtf8);
         break;
     case CMD_CONFLICT_MERGE:
-        GuiDialogs::RunVersionHistoryOrMerge(st->hwndMain, st->doc, st->versionHistory, st->activePageIndex, true, st->statusBannerUtf8);
+        GuiDialogs::RunVersionHistoryOrMerge(st->hwndMain, st->doc, st->versionHistory, st->activePageIndex, true, MakePromptAdapter(st), st->statusBannerUtf8);
         st->pageCache.InvalidateAll(++st->asyncGen);
         break;
     case CMD_VIEW_ATTACHMENTS: {
@@ -3028,7 +3111,7 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
     case CMD_CYCLE_PEN_STYLE: {
         const int next = (static_cast<int>(st->penStyle) + 1) % 4;
         st->penStyle = static_cast<InkPenStyle>(next);
-        static const char* kStyleNames[4] = { "Bol\xC3\xADgrafo", "Pluma Fuente", "L\xC3\xA1piz Grafito", "Pincel Caligr\xC3\xA1" "fico" };
+        static const char* kStyleNames[4] = { "Bol\xC3\xADgrafo", "Pluma Fuente", "Pincel Caligr\xC3\xA1""fico", "L\xC3\xA1piz Grafito" };
         st->activeTool = ToolKind::Pen;
         st->statusBannerUtf8 = std::string("Estilo de l\xC3\xA1piz: ") + kStyleNames[next];
         break;
@@ -3095,7 +3178,27 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         const ObjectTarget tgt = CurrentTarget(st);
         std::vector<std::uint64_t> ids = st->lassoSelectedIds;
         if (ids.empty() && st->selectedObjectId != 0) ids.push_back(st->selectedObjectId);
-        const bool ok = InkEngine::NeatenAndRestyleStrokes(st->doc, tgt, ids);
+        std::vector<AnnotationObject> beforeSnaps;
+        for (std::uint64_t oid : ids) {
+            if (const auto* o = CanvasManip::FindObjectConst(st->doc, tgt, oid)) {
+                if (o->kind == ObjectKind::InkStroke) beforeSnaps.push_back(*o);
+            }
+        }
+        const bool ok = !beforeSnaps.empty() && InkEngine::NeatenAndRestyleStrokes(st->doc, tgt, ids);
+        if (ok) {
+            std::vector<AnnotationObject> afterSnaps;
+            for (const auto& b : beforeSnaps) {
+                if (AnnotationObject* m = CanvasManip::FindObjectMut(st->doc, tgt, b.id)) {
+                    afterSnaps.push_back(*m);
+                    *m = b;
+                }
+            }
+            if (afterSnaps.size() == beforeSnaps.size()) {
+                st->cmdStack.Execute(st->doc, std::make_unique<BatchModifyObjectsCommand>(
+                    tgt, std::move(beforeSnaps), std::move(afterSnaps), "Estilizar tinta"));
+                AppendWalMutation(st, "restyle_ink");
+            }
+        }
         st->statusBannerUtf8 = ok
             ? ("Estilizados y enderezados " + std::to_string(ids.size()) + " trazo(s)")
             : "Seleccione o encierre con Lazo los trazos a estilizar";
@@ -3238,11 +3341,30 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
             std::ifstream ifs(std::filesystem::path(paths[0]), std::ios::binary | std::ios::ate);
             if (ifs.is_open()) {
                 const auto sz = ifs.tellg();
-                std::vector<std::uint8_t> buf(static_cast<std::size_t>(sz));
-                ifs.seekg(0, std::ios::beg);
-                ifs.read(reinterpret_cast<char*>(buf.data()), sz);
-                if (st->audioSession.LoadFromWavBytes(buf.data(), buf.size())) {
-                    st->statusBannerUtf8 = "Audio WAV importado (" + std::to_string(st->audioSession.DurationMs() / 1000) + " s)";
+                if (sz >= 44 && static_cast<std::uint64_t>(sz) <= 128ull * 1024ull * 1024ull) {
+                    std::vector<std::uint8_t> buf(static_cast<std::size_t>(sz));
+                    ifs.seekg(0, std::ios::beg);
+                    if (ifs.read(reinterpret_cast<char*>(buf.data()), sz) &&
+                        st->audioSession.LoadFromWavBytes(buf.data(), buf.size())) {
+                        double x = 80.0, y = 80.0;
+                        NextCardPlacement(st, x, y);
+                        AnnotationObject clip{};
+                        clip.kind = ObjectKind::AudioClip;
+                        clip.layerId = st->doc.ActiveLayerId();
+                        clip.bounds = { x, y, 270.0, 56.0 };
+                        clip.captionUtf8 = "Audio WAV (" + std::to_string(st->audioSession.DurationMs() / 1000) + " s)";
+                        clip.inkStartTimeMs = 0;
+                        clip.inkEndTimeMs = st->audioSession.DurationMs();
+                        const std::string key = st->doc.RegisterAsset(buf);
+                        clip.assetKey = key;
+                        clip.audioAssetKey = key;
+                        st->cmdStack.Execute(st->doc, std::make_unique<AddObjectCommand>(CurrentTarget(st), std::move(clip)));
+                        st->statusBannerUtf8 = "Audio WAV importado (" + std::to_string(st->audioSession.DurationMs() / 1000) + " s)";
+                    } else {
+                        st->statusBannerUtf8 = "Archivo WAV inv\xC3\xA1lido o formato PCM no soportado";
+                    }
+                } else {
+                    st->statusBannerUtf8 = "Archivo WAV vac\xC3\xADo o superior al l\xC3\xADmite de 128 MB";
                 }
             }
         }
@@ -3296,6 +3418,10 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
     case CMD_SUMMARIZE_NOTES:
     case CMD_LOCAL_QA:
     case CMD_COMPARE_4_CASIO: {
+        if (st->examModeLocked && id != CMD_COMPARE_4_CASIO) {
+            st->statusBannerUtf8 = "Modo Examen activo: funciones asistidas bloqueadas (desbloquee con PIN)";
+            break;
+        }
         double x = 80.0, y = 80.0;
         NextCardPlacement(st, x, y);
         const int m = (id == CMD_CHECK_MY_WORK) ? 0
@@ -3307,26 +3433,34 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
     }
     case CMD_RECOGNIZE_CIRCUIT:
     case CMD_ENG_TOOLBOX:
-    case CMD_FORMULA_AST_SEARCH: {
+    case CMD_FORMULA_AST_SEARCH:
+    case CMD_CONTROL_BLOCK_LAB:
+    case CMD_CIRCUIT_TOPO_AUDIT: {
         double x = 80.0, y = 80.0;
         NextCardPlacement(st, x, y);
-        const int m = (id == CMD_RECOGNIZE_CIRCUIT) ? 0 : (id == CMD_ENG_TOOLBOX) ? 1 : 3;
+        const int m = (id == CMD_RECOGNIZE_CIRCUIT) ? 0
+            : (id == CMD_ENG_TOOLBOX) ? 1
+            : (id == CMD_FORMULA_AST_SEARCH) ? 3
+            : (id == CMD_CONTROL_BLOCK_LAB) ? 4 : 5;
         GuiDialogs::RunEngineeringToolboxOrCodeBlock(st->hwndMain, st->doc, st->cmdStack, CurrentTarget(st), x, y, m, MakePromptAdapter(st), st->statusBannerUtf8);
         break;
     }
+    case CMD_EXAM_VARIANTS_LMS:
+        GuiDialogs::RunExamVariantsAndLmsDialog(st->hwndMain, st->doc, MakePromptAdapter(st), st->statusBannerUtf8);
+        break;
     case CMD_LAN_QR:
-        GuiDialogs::RunSecurityOrLanFlow(st->hwndMain, st->doc, 2, MakePromptAdapter(st), st->statusBannerUtf8);
+        GuiDialogs::RunSecurityOrLanFlow(st->hwndMain, st->doc, 2, MakePasswordPromptAdapter(st), st->statusBannerUtf8);
         break;
     case CMD_EXAM_PIN_LOCK: {
         std::wstring pinW;
         if (!st->examModeLocked) {
-            if (ShowTextPrompt(st->hwndMain, L"Activar Modo Examen", L"Establezca un PIN de 4 d\u00EDgitos para bloquear funciones asistidas:", pinW) && !pinW.empty()) {
+            if (ShowTextPrompt(st->hwndMain, L"Activar Modo Examen", L"Establezca un PIN de 4 d\u00EDgitos para bloquear funciones asistidas:", pinW, nullptr, nullptr, false, true) && !pinW.empty()) {
                 st->examPinUtf8 = WideToUtf8(pinW);
                 st->examModeLocked = true;
                 st->statusBannerUtf8 = "Modo Examen ACTIVADO (bloqueado por PIN)";
             }
         } else {
-            if (ShowTextPrompt(st->hwndMain, L"Desbloquear Modo Examen", L"Ingrese el PIN para desactivar el Modo Examen:", pinW)) {
+            if (ShowTextPrompt(st->hwndMain, L"Desbloquear Modo Examen", L"Ingrese el PIN para desactivar el Modo Examen:", pinW, nullptr, nullptr, false, true)) {
                 if (WideToUtf8(pinW) == st->examPinUtf8) {
                     st->examModeLocked = false;
                     st->examPinUtf8.clear();
@@ -3338,9 +3472,19 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         }
         break;
     }
+    case CMD_PEN_WIDTH_FINE:   st->penWidth = 1.5; st->activeTool = ToolKind::Pen; st->statusBannerUtf8 = "Grosor de tinta: Fino (1.5 pt)"; break;
+    case CMD_PEN_WIDTH_MED:    st->penWidth = 2.6; st->activeTool = ToolKind::Pen; st->statusBannerUtf8 = "Grosor de tinta: Medio (2.6 pt)"; break;
+    case CMD_PEN_WIDTH_BOLD:   st->penWidth = 4.8; st->activeTool = ToolKind::Pen; st->statusBannerUtf8 = "Grosor de tinta: Grueso (4.8 pt)"; break;
+    case CMD_PEN_WIDTH_MARKER: st->penWidth = 8.0; st->activeTool = ToolKind::Pen; st->statusBannerUtf8 = "Grosor de tinta: Marcador (8.0 pt)"; break;
+    case CMD_PEN_OPACITY_100:  st->penOpacity = 1.00; st->statusBannerUtf8 = "Opacidad de tinta: 100%"; break;
+    case CMD_PEN_OPACITY_75:   st->penOpacity = 0.75; st->statusBannerUtf8 = "Opacidad de tinta: 75%"; break;
+    case CMD_PEN_OPACITY_50:   st->penOpacity = 0.50; st->statusBannerUtf8 = "Opacidad de tinta: 50%"; break;
+    case CMD_PEN_OPACITY_30:   st->penOpacity = 0.30; st->statusBannerUtf8 = "Opacidad de tinta: 30%"; break;
     case CMD_TEXT_BOLD:
     case CMD_TEXT_ITALIC:
-    case CMD_TEXT_UNDERLINE: {
+    case CMD_TEXT_UNDERLINE:
+    case CMD_TEXT_BULLET_LIST:
+    case CMD_TEXT_CHECKBOX_TOGGLE: {
         const ObjectTarget tgt = CurrentTarget(st);
         if (AnnotationObject* obj = CanvasManip::FindObjectMut(st->doc, tgt, st->selectedObjectId)) {
             if (obj->kind == ObjectKind::TextBox) {
@@ -3348,7 +3492,33 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
                 AnnotationObject after = *obj;
                 if (id == CMD_TEXT_BOLD) after.bold = !after.bold;
                 else if (id == CMD_TEXT_ITALIC) after.italic = !after.italic;
-                else after.underline = !after.underline;
+                else if (id == CMD_TEXT_UNDERLINE) after.underline = !after.underline;
+                else if (id == CMD_TEXT_BULLET_LIST) {
+                    std::istringstream iss(after.textUtf8);
+                    std::ostringstream oss;
+                    std::string ln;
+                    bool first = true;
+                    while (std::getline(iss, ln)) {
+                        if (!first) oss << '\n';
+                        first = false;
+                        if (ln.rfind("\xE2\x80\xA2 ", 0) == 0) oss << ln.substr(4);
+                        else oss << "\xE2\x80\xA2 " << ln;
+                    }
+                    after.textUtf8 = oss.str();
+                } else if (id == CMD_TEXT_CHECKBOX_TOGGLE) {
+                    std::istringstream iss(after.textUtf8);
+                    std::ostringstream oss;
+                    std::string ln;
+                    bool first = true;
+                    while (std::getline(iss, ln)) {
+                        if (!first) oss << '\n';
+                        first = false;
+                        if (ln.rfind("\xE2\x98\x90 ", 0) == 0) oss << "\xE2\x98\x91 " << ln.substr(4);
+                        else if (ln.rfind("\xE2\x98\x91 ", 0) == 0) oss << "\xE2\x98\x90 " << ln.substr(4);
+                        else oss << "\xE2\x98\x90 " << ln;
+                    }
+                    after.textUtf8 = oss.str();
+                }
                 st->cmdStack.Execute(st->doc, std::make_unique<ModifyObjectCommand>(tgt, std::move(before), std::move(after)));
                 st->statusBannerUtf8 = "Formato de texto actualizado";
             }
@@ -3591,17 +3761,52 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 InvalidateViews(st);
             }
         } else if (obj->kind == ObjectKind::AudioClip) {
-            if (const auto* bytes = st->doc.FindAsset(obj->assetKey)) {
-                st->audioSession.LoadFromWavBytes(bytes->data(), bytes->size());
+            const std::string audioKey = !obj->audioAssetKey.empty() ? obj->audioAssetKey : obj->assetKey;
+            if (!audioKey.empty()) {
+                if (const auto* bytes = st->doc.FindAsset(audioKey)) {
+                    st->audioSession.LoadFromWavBytes(bytes->data(), bytes->size());
+                }
             }
             ExecuteToolbarCommand(st, CMD_REPLAY_TOGGLE);
         }
         return 0;
     }
+    case WM_KEYDOWN:
+    case WM_KEYUP: {
+        if (st && st->hwndMain) {
+            return SendMessageW(st->hwndMain, msg, wp, lp);
+        }
+        break;
+    }
+    case WM_POINTERCAPTURECHANGED:
+    case WM_POINTERLEAVE: {
+        if (st && (st->invertedTempEraser || st->barrelTempLasso)) {
+            st->activeTool = st->savedToolBeforeStylusMod;
+            st->invertedTempEraser = false;
+            st->barrelTempLasso = false;
+        }
+        return 0;
+    }
     case WM_CAPTURECHANGED: {
         if (st) {
+            // Roll back any active interactive transform drag cleanly so lost focus never leaves partial mutations
+            if (st->transformDrag.active && !st->transformDrag.beforeSnapshots.empty()) {
+                for (std::size_t i = 0; i < st->transformDrag.objectIds.size() && i < st->transformDrag.beforeSnapshots.size(); ++i) {
+                    if (AnnotationObject* m = CanvasManip::FindObjectMut(st->doc, st->transformDrag.target, st->transformDrag.objectIds[i])) {
+                        *m = st->transformDrag.beforeSnapshots[i];
+                    }
+                }
+                st->doc.BumpRevision();
+                InvalidateViews(st);
+            }
+            if (st->invertedTempEraser || st->barrelTempLasso) {
+                st->activeTool = st->savedToolBeforeStylusMod;
+                st->invertedTempEraser = false;
+                st->barrelTempLasso = false;
+            }
             st->draggingOpacitySlider = false;
             st->panning = false;
+            st->splitPanning = false;
             st->drawing = false;
             st->transformDrag.active = false;
             st->pdfSelectingText = false;
@@ -3633,7 +3838,10 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MBUTTONDOWN: {
         if (!st) break;
         CommitInlineTextEdit(st, true);
+        RECT vrc{};
+        GetClientRect(hwnd, &vrc);
         st->panning = true;
+        st->splitPanning = (st->splitViewActive && GET_X_LPARAM(lp) > (vrc.right / 2));
         st->rbuttonMoved = false;
         st->rbuttonDownPt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         st->lastPanPt = st->rbuttonDownPt;
@@ -3644,8 +3852,25 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MBUTTONUP: {
         if (st && st->panning) {
             st->panning = false;
+            st->splitPanning = false;
             ReleaseCapture();
             if (msg == WM_RBUTTONUP && !st->rbuttonMoved) {
+                // Auto-select object under right-click cursor so context menu immediately exposes object actions
+                const DocPoint wpWorld = st->camera.ScreenToWorld(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                const bool isCanvas = (st->doc.Mode() == DocumentMode::InfiniteCanvas);
+                std::size_t pgIdx = st->activePageIndex;
+                double lx = wpWorld.x, ly = wpWorld.y;
+                const bool hitPage = isCanvas || st->doc.Layout().HitTestWorldPoint(wpWorld.x, wpWorld.y, pgIdx, lx, ly);
+                if (hitPage) {
+                    const double tol = std::clamp(8.0 / (std::max)(0.25, st->camera.zoom), 3.0, 18.0);
+                    const auto hits = CollectHits(st, isCanvas, pgIdx, lx, ly, tol);
+                    if (!hits.empty()) {
+                        st->selectedObjectId = hits.back();
+                        st->selectedIsCanvas = isCanvas;
+                        st->selectedPageIndex = pgIdx;
+                        InvalidateViews(st);
+                    }
+                }
                 HMENU cm = CreatePopupMenu();
                 AppendMenuW(cm, MF_STRING, CMD_CLIPBOARD_PASTE, L"Pegar (Ctrl+V)");
                 if (st->selectedObjectId != 0 || !st->lassoSelectedIds.empty()) {
@@ -3660,7 +3885,11 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     AppendMenuW(cm, MF_SEPARATOR, 0, nullptr);
                     AppendMenuW(cm, MF_STRING, CMD_IMG_ENHANCE_WHITEBOARD, L"Imagen: Mejorar pizarra");
                     AppendMenuW(cm, MF_STRING, CMD_IMG_ROTATE_90,          L"Imagen: Rotar +90\u00B0");
-                    AppendMenuW(cm, MF_STRING, CMD_TEXT_BOLD,              L"Texto: Negrita");
+                    AppendMenuW(cm, MF_STRING, CMD_TEXT_BOLD,              L"Texto: Negrita (Ctrl+B)");
+                    AppendMenuW(cm, MF_STRING, CMD_TEXT_ITALIC,            L"Texto: Cursiva (Ctrl+I)");
+                    AppendMenuW(cm, MF_STRING, CMD_TEXT_UNDERLINE,         L"Texto: Subrayado (Ctrl+U)");
+                    AppendMenuW(cm, MF_STRING, CMD_TEXT_BULLET_LIST,       L"Texto: Vi\u00F1""etas (\u2022)");
+                    AppendMenuW(cm, MF_STRING, CMD_TEXT_CHECKBOX_TOGGLE,   L"Texto: Casilla (\u2610 / \u2611)");
                 }
                 POINT spt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
                 ClientToScreen(hwnd, &spt);
@@ -3675,9 +3904,18 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: {
         if (!st) break;
         CommitInlineTextEdit(st, true);
-        if (msg == WM_LBUTTONDOWN && st->appearancePopoverOpen) {
-            POINT ptMain{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-            MapWindowPoints(hwnd, st->hwndMain, &ptMain, 1);
+        if (st->appearancePopoverOpen) {
+            POINT ptMain{};
+            if (msg == WM_POINTERDOWN) {
+                POINTER_INFO piPop{};
+                if (GetPointerInfo(GET_POINTERID_WPARAM(wp), &piPop)) {
+                    ptMain = piPop.ptPixelLocation;
+                    ScreenToClient(st->hwndMain, &ptMain);
+                }
+            } else {
+                ptMain = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                MapWindowPoints(hwnd, st->hwndMain, &ptMain, 1);
+            }
             if (PtInRect(&st->appearancePopoverRc, ptMain)) {
                 if (ptMain.x >= st->opacityTrackRc.left - 8 && ptMain.x <= st->opacityTrackRc.right + 8 &&
                     ptMain.y >= st->opacityTrackRc.top - 6 && ptMain.y <= st->opacityTrackRc.bottom + 6) {
@@ -3834,6 +4072,8 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         const double cy = selObj->bounds.y + selObj->bounds.h * 0.5;
                         st->transformDrag.initialAngleRad = std::atan2(ly - cy, lx - cx);
                         st->transformDrag.initialRotDeg = selObj->rotationDeg;
+                        st->panMoved = false;
+                        st->panStartPt = { static_cast<LONG>(sp.x), static_cast<LONG>(sp.y) };
                         SetCapture(hwnd);
                         return 0;
                     }
@@ -3883,6 +4123,19 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         st->transformDrag.beforeSnapshots.push_back(*o);
                     }
                 }
+                // Also capture any magnetic connectors attached to moved objects so Ctrl+Z restores them cleanly
+                const auto& scopeObjs = tgt.isCanvas ? st->doc.CanvasObjects() : st->doc.Pages()[tgt.pageIndex].objects;
+                for (const auto& o : scopeObjs) {
+                    if (o.kind == ObjectKind::Shape && o.shapeKind == ShapeKind::Connector) {
+                        const bool attached =
+                            std::find(dragIds.begin(), dragIds.end(), o.connectorFromId) != dragIds.end() ||
+                            std::find(dragIds.begin(), dragIds.end(), o.connectorToId) != dragIds.end();
+                        if (attached && std::find(st->transformDrag.objectIds.begin(), st->transformDrag.objectIds.end(), o.id) == st->transformDrag.objectIds.end()) {
+                            st->transformDrag.objectIds.push_back(o.id);
+                            st->transformDrag.beforeSnapshots.push_back(o);
+                        }
+                    }
+                }
                 if (hitObj && CanvasManip::IsPlot3DObject(*hitObj) && (shiftHeld || dragIds.size() == 1)) {
                     // Drag inside center of 3D surface rotates yaw/pitch interactively; edge moves box
                     const bool nearEdge = (lx - hitObj->bounds.x < 22.0) || (hitObj->bounds.Right() - lx < 22.0) ||
@@ -3916,7 +4169,10 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         if (st->activeTool == ToolKind::Hand || spacePan) {
+            RECT vrc{};
+            GetClientRect(hwnd, &vrc);
             st->panning = true;
+            st->splitPanning = (st->splitViewActive && sp.x > static_cast<double>(vrc.right / 2));
             st->panMoved = false;
             st->panStartPt = { static_cast<LONG>(sp.x), static_cast<LONG>(sp.y) };
             st->lastPanPt = st->panStartPt;
@@ -4103,8 +4359,10 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             } else if (st->transformDrag.handle == CanvasManip::HandleKind::Body) {
                 for (std::size_t i = 0; i < st->transformDrag.objectIds.size() && i < st->transformDrag.beforeSnapshots.size(); ++i) {
+                    const auto& snap = st->transformDrag.beforeSnapshots[i];
+                    if (snap.kind == ObjectKind::Shape && snap.shapeKind == ShapeKind::Connector) continue;
                     if (AnnotationObject* obj = CanvasManip::FindObjectMut(st->doc, st->transformDrag.target, st->transformDrag.objectIds[i])) {
-                        *obj = st->transformDrag.beforeSnapshots[i];
+                        *obj = snap;
                         CanvasManip::TranslateAnnotationObject(*obj, dx, dy);
                         InkEngine::UpdateMagneticConnectors(st->doc, st->transformDrag.target, obj->id);
                     }
@@ -4154,10 +4412,11 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             const double dx = sp.x - st->lastPanPt.x;
             const double dy = sp.y - st->lastPanPt.y;
-            st->camera.panX -= dx / st->camera.zoom;
-            st->camera.panY -= dy / st->camera.zoom;
+            Camera2D& panCam = st->splitPanning ? st->splitCamera : st->camera;
+            panCam.panX -= dx / panCam.zoom;
+            panCam.panY -= dy / panCam.zoom;
             st->lastPanPt = { static_cast<LONG>(sp.x), static_cast<LONG>(sp.y) };
-            RefreshActivePageFromCamera(st);
+            if (!st->splitPanning) RefreshActivePageFromCamera(st);
             InvalidateViews(st);
             return 0;
         }
@@ -4403,6 +4662,7 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (st->panning) {
             st->panning = false;
+            st->splitPanning = false;
             ReleaseCapture();
             if (!st->panMoved && st->activeTool == ToolKind::Hand) {
                 st->selectedObjectId = 0;

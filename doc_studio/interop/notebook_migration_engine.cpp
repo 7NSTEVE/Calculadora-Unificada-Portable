@@ -144,12 +144,25 @@ void ExtractStrokesFromGoodnotesProtobuf(
                 for (float v : arr) if (!std::isfinite(v) || v < 0.0f || v > 5.0f) { plausible = false; break; }
                 if (plausible && ps.empty()) { ps = std::move(arr); continue; }
             }
-            // Check printable UTF-8 text block
+            // Check printable UTF-8 text block (supports Spanish accents & math/Greek symbols)
             bool printable = (f.bytesVal.size() >= 3 && f.bytesVal.size() <= 4096);
             int alphaCount = 0;
-            for (std::uint8_t b : f.bytesVal) {
-                if (b < 0x09 || (b > 0x0D && b < 0x20)) { printable = false; break; }
-                if (std::isalpha(b)) ++alphaCount;
+            for (std::size_t bi = 0; bi < f.bytesVal.size(); ++bi) {
+                const std::uint8_t b = f.bytesVal[bi];
+                if (b < 0x09 || (b > 0x0D && b < 0x20) || b == 0x7Fu) { printable = false; break; }
+                if (std::isalpha(b)) {
+                    ++alphaCount;
+                } else if (b >= 0xC2u && b <= 0xDFu && bi + 1 < f.bytesVal.size() && (f.bytesVal[bi + 1] & 0xC0u) == 0x80u) {
+                    ++alphaCount;
+                    ++bi;
+                } else if (b >= 0xE0u && b <= 0xEFu && bi + 2 < f.bytesVal.size() &&
+                           (f.bytesVal[bi + 1] & 0xC0u) == 0x80u && (f.bytesVal[bi + 2] & 0xC0u) == 0x80u) {
+                    ++alphaCount;
+                    bi += 2;
+                } else if (b >= 0x80u) {
+                    printable = false;
+                    break;
+                }
             }
             if (printable && alphaCount >= 2 && f.fieldNumber >= 9) {
                 outTexts.push_back(f.AsString());
@@ -240,43 +253,15 @@ bool ImportGoodnotes6(
         doc.MutablePages().push_back(std::move(pm));
     }
 
-    // 2. Parse Goodnotes Protobuf (.pb) and JSON stroke/page files
+    // 2. Parse Goodnotes JSON/media first (avoid misrouting images/audio/json under notes/), then Protobuf (.pb)
     std::size_t pbPageCursor = 0;
     for (const auto& ep : entries) {
         const std::string low = ToLowerCopy(ep);
         const auto* raw = zip.FindEntry(ep);
         if (!raw || raw->empty()) continue;
+        if (low.size() >= 4 && low.compare(low.size() - 4, 4, ".pdf") == 0) continue;
 
-        if (low.find(".pb") != std::string::npos || low.rfind("notes/", 0) == 0) {
-            std::vector<AnnotationObject> strokes;
-            std::vector<std::string> texts;
-            ExtractStrokesFromGoodnotesProtobuf(raw->data(), raw->size(), strokes, texts);
-            if (!strokes.empty() || !texts.empty()) {
-                if (pbPageCursor >= doc.Pages().size()) {
-                    PageModel pm{};
-                    pm.pageId = doc.AllocatePageId();
-                    pm.background = PaperPattern::Grid;
-                    doc.MutablePages().push_back(std::move(pm));
-                }
-                for (auto& st : strokes) {
-                    doc.AddPageObject(pbPageCursor, std::move(st));
-                    ++res.report.editableStrokeCount;
-                }
-                double ty = 56.0;
-                for (const auto& txt : texts) {
-                    AnnotationObject tb{};
-                    tb.kind = ObjectKind::TextBox;
-                    tb.bounds = { 48.0, ty, 480.0, 42.0 };
-                    tb.textUtf8 = txt;
-                    tb.fontSizePt = 12.0;
-                    tb.strokeColor = DocColor::RGBA(24, 30, 42, 255);
-                    doc.AddPageObject(pbPageCursor, std::move(tb));
-                    ty += 48.0;
-                    ++res.report.textBoxCount;
-                }
-                ++pbPageCursor;
-            }
-        } else if (low.size() >= 5 && low.compare(low.size() - 5, 5, ".json") == 0) {
+        if (low.size() >= 5 && low.compare(low.size() - 5, 5, ".json") == 0) {
             try {
                 const json j = json::parse(raw->begin(), raw->end());
                 if (j.is_object()) {
@@ -330,6 +315,7 @@ bool ImportGoodnotes6(
             clip.kind = ObjectKind::AudioClip;
             clip.bounds = { 48.0, 36.0 + static_cast<double>(res.report.audioClipCount) * 44.0, 240.0, 34.0 };
             clip.audioAssetKey = key;
+            clip.assetKey = key;
             clip.captionUtf8 = "Audio importado: " + StemFromPath(ep);
             doc.AddPageObject(0, std::move(clip));
             if (res.primaryAudioWavBytes.empty() && low.compare(low.size() - 4, 4, ".wav") == 0) {
@@ -337,6 +323,35 @@ bool ImportGoodnotes6(
             }
             ++res.report.audioClipCount;
             ++res.report.attachmentCount;
+        } else if (low.find(".pb") != std::string::npos || low.rfind("notes/", 0) == 0) {
+            std::vector<AnnotationObject> strokes;
+            std::vector<std::string> texts;
+            ExtractStrokesFromGoodnotesProtobuf(raw->data(), raw->size(), strokes, texts);
+            if (!strokes.empty() || !texts.empty()) {
+                if (pbPageCursor >= doc.Pages().size()) {
+                    PageModel pm{};
+                    pm.pageId = doc.AllocatePageId();
+                    pm.background = PaperPattern::Grid;
+                    doc.MutablePages().push_back(std::move(pm));
+                }
+                for (auto& st : strokes) {
+                    doc.AddPageObject(pbPageCursor, std::move(st));
+                    ++res.report.editableStrokeCount;
+                }
+                double ty = 56.0;
+                for (const auto& txt : texts) {
+                    AnnotationObject tb{};
+                    tb.kind = ObjectKind::TextBox;
+                    tb.bounds = { 48.0, ty, 480.0, 42.0 };
+                    tb.textUtf8 = txt;
+                    tb.fontSizePt = 12.0;
+                    tb.strokeColor = DocColor::RGBA(24, 30, 42, 255);
+                    doc.AddPageObject(pbPageCursor, std::move(tb));
+                    ty += 48.0;
+                    ++res.report.textBoxCount;
+                }
+                ++pbPageCursor;
+            }
         }
     }
 
@@ -544,6 +559,7 @@ bool ImportNotabilityNote(
             clip.kind = ObjectKind::AudioClip;
             clip.bounds = { 48.0, 32.0 + static_cast<double>(res.report.audioClipCount) * 44.0, 250.0, 34.0 };
             clip.audioAssetKey = key;
+            clip.assetKey = key;
             clip.captionUtf8 = "Grabaci\xC3\xB3n Notability: " + StemFromPath(ep);
             doc.AddPageObject(0, std::move(clip));
             if (res.primaryAudioWavBytes.empty() && low.compare(low.size() - 4, 4, ".wav") == 0) {
@@ -606,7 +622,7 @@ void ExtractOneNoteSectionIntoPage(
         ++res.report.editableStrokeCount;
     }
 
-    // 2. Scan embedded PNG images by PNG magic/IEND framing
+    // 2. Scan embedded PNG & JPEG images by magic framing
     static constexpr std::uint8_t kPngSig[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
     static constexpr std::uint8_t kPngIend[8] = { 'I', 'E', 'N', 'D', 0xAE, 0x42, 0x60, 0x82 };
     double imgY = 420.0;
@@ -628,6 +644,24 @@ void ExtractOneNoteSectionIntoPage(
                     break;
                 }
             }
+        } else if (data[p] == 0xFFu && data[p + 1] == 0xD8u && data[p + 2] == 0xFFu &&
+                   (data[p + 3] == 0xE0u || data[p + 3] == 0xE1u || data[p + 3] == 0xDBu)) {
+            for (std::size_t q = p + 16; q + 2 <= size && (q - p) <= 16u * 1024u * 1024u; ++q) {
+                if (data[q] == 0xFFu && data[q + 1] == 0xD9u) {
+                    const std::size_t jpgLen = (q + 2) - p;
+                    if (jpgLen >= 64) {
+                        AnnotationObject img{};
+                        img.kind = ObjectKind::Image;
+                        img.bounds = { 64.0, imgY, 300.0, 190.0 };
+                        img.pngBytes.assign(data + p, data + p + jpgLen);
+                        doc.AddPageObject(pageIdx, std::move(img));
+                        imgY += 205.0;
+                        ++res.report.imageCount;
+                    }
+                    p = q + 1;
+                    break;
+                }
+            }
         }
     }
 
@@ -643,6 +677,7 @@ void ExtractOneNoteSectionIntoPage(
                 clip.kind = ObjectKind::AudioClip;
                 clip.bounds = { 48.0, 36.0 + static_cast<double>(res.report.audioClipCount) * 44.0, 260.0, 34.0 };
                 clip.audioAssetKey = key;
+                clip.assetKey = key;
                 clip.captionUtf8 = "Audio OneNote (" + sectionTitle + ")";
                 doc.AddPageObject(pageIdx, std::move(clip));
                 if (res.primaryAudioWavBytes.empty()) res.primaryAudioWavBytes = std::move(wav);
@@ -653,19 +688,31 @@ void ExtractOneNoteSectionIntoPage(
         }
     }
 
-    // 4. Extract readable UTF-16LE text runs (OneNote [MS-ONE] RichEditTextRun stores text in UTF-16LE)
+    // 4. Extract readable UTF-16LE text runs (even & odd alignments + Latin/Greek/Math Unicode)
     std::vector<std::string> extractedLines;
     std::size_t pos = 0;
     while (pos + 8 <= size && extractedLines.size() < 200) {
         std::string run;
+        int alphaCnt = 0;
         std::size_t k = pos;
         while (k + 1 < size) {
             const std::uint16_t ch = Binary::ReadLe16(data + k);
-            if ((ch >= 0x20u && ch <= 0x7Eu) || (ch >= 0xA0u && ch <= 0x017Fu) || ch == 0x0Au || ch == 0x0Du || ch == 0x09u) {
+            const bool isAsciiPrint = (ch >= 0x20u && ch <= 0x7Eu);
+            const bool isLatinExt = (ch >= 0x00A0u && ch <= 0x024Fu);
+            const bool isGreek = (ch >= 0x0370u && ch <= 0x03FFu);
+            const bool isMathSym = (ch >= 0x2000u && ch <= 0x22FFu);
+            if (isAsciiPrint || isLatinExt || isGreek || isMathSym || ch == 0x0Au || ch == 0x0Du || ch == 0x09u) {
                 if (ch == 0x0Du) { /* skip CR */ }
-                else if (ch < 0x80u) run.push_back(static_cast<char>(ch));
-                else {
+                else if (ch < 0x80u) {
+                    run.push_back(static_cast<char>(ch));
+                    if (std::isalpha(static_cast<unsigned char>(ch))) ++alphaCnt;
+                } else if (ch < 0x800u) {
                     run.push_back(static_cast<char>(0xC0u | (ch >> 6)));
+                    run.push_back(static_cast<char>(0x80u | (ch & 0x3Fu)));
+                    if (isLatinExt || isGreek) ++alphaCnt;
+                } else {
+                    run.push_back(static_cast<char>(0xE0u | (ch >> 12)));
+                    run.push_back(static_cast<char>(0x80u | ((ch >> 6) & 0x3Fu)));
                     run.push_back(static_cast<char>(0x80u | (ch & 0x3Fu)));
                 }
                 k += 2;
@@ -673,13 +720,11 @@ void ExtractOneNoteSectionIntoPage(
                 break;
             }
         }
-        int alphaCnt = 0;
-        for (unsigned char c : run) if (std::isalpha(c)) ++alphaCnt;
         if (run.size() >= 6 && alphaCnt >= 4 && run.find("<trace") == std::string::npos) {
             extractedLines.push_back(run);
             pos = k + 2;
         } else {
-            pos += 2;
+            pos += 1;
         }
     }
 
@@ -768,13 +813,21 @@ bool ImportOneNote(
 // ============================================================================
 PaperPattern MapTintaPauta(tinta::Pauta p) noexcept {
     switch (p) {
-    case tinta::Pauta::Rayado:     return PaperPattern::Ruled;
-    case tinta::Pauta::Cuadricula: return PaperPattern::Grid;
-    case tinta::Pauta::Puntos:     return PaperPattern::Dots;
-    case tinta::Pauta::Isometrico: return PaperPattern::Isometric;
-    case tinta::Pauta::Cornell:    return PaperPattern::Cornell;
-    case tinta::Pauta::Pentagrama: return PaperPattern::MusicStaff;
-    default:                       return PaperPattern::Plain;
+    case tinta::Pauta::Rayado:          return PaperPattern::Ruled;
+    case tinta::Pauta::Cuadricula:      return PaperPattern::Grid;
+    case tinta::Pauta::Ingenieria:      return PaperPattern::Grid;
+    case tinta::Pauta::Circuitos:       return PaperPattern::Grid;
+    case tinta::Pauta::Cartesiano:      return PaperPattern::Grid;
+    case tinta::Pauta::Puntos:          return PaperPattern::Dots;
+    case tinta::Pauta::Milimetrico:     return PaperPattern::Millimeter;
+    case tinta::Pauta::Isometrico:      return PaperPattern::Isometric;
+    case tinta::Pauta::Logaritmico:     return PaperPattern::LogLog;
+    case tinta::Pauta::SemiLogaritmico: return PaperPattern::LogLog;
+    case tinta::Pauta::Polar:           return PaperPattern::Polar;
+    case tinta::Pauta::Smith:           return PaperPattern::SmithChart;
+    case tinta::Pauta::Cornell:         return PaperPattern::Cornell;
+    case tinta::Pauta::Pentagrama:      return PaperPattern::MusicStaff;
+    default:                            return PaperPattern::Plain;
     }
 }
 
@@ -867,6 +920,49 @@ bool ImportCuadernuTinta(
                     doc.AddPageObject(pageIdx, std::move(sn));
                     ++res.report.textBoxCount;
                 }
+
+                for (const auto& md : tp.medios) {
+                    AnnotationObject mo{};
+                    mo.bounds = {
+                        md.marco.x, md.marco.y,
+                        (std::max)(48.0, static_cast<double>(md.marco.ancho)),
+                        (std::max)(36.0, static_cast<double>(md.marco.alto))
+                    };
+                    mo.rotationDeg = md.rotacion * (180.0 / 3.14159265358979323846);
+                    mo.opacity = std::clamp(static_cast<double>(md.opacidad), 0.05, 1.0);
+                    mo.captionUtf8 = md.nombre_original.empty() ? md.hash : md.nombre_original;
+                    if (md.tipo == tinta::TipoMedio::Audio) {
+                        mo.kind = ObjectKind::AudioClip;
+                        mo.audioAssetKey = md.hash;
+                        mo.assetKey = md.hash;
+                        doc.AddPageObject(pageIdx, std::move(mo));
+                        ++res.report.audioClipCount;
+                    } else {
+                        mo.kind = ObjectKind::Image;
+                        mo.assetKey = md.hash;
+                        mo.imageCrop = {
+                            md.recorte_x, md.recorte_y,
+                            md.recorte_x + md.recorte_ancho,
+                            md.recorte_y + md.recorte_alto
+                        };
+                        mo.imageCrop.Clamp();
+                        doc.AddPageObject(pageIdx, std::move(mo));
+                        ++res.report.imageCount;
+                    }
+                }
+            }
+        }
+        // Migrate notebook-scoped sticky notes onto first page
+        if (!cuaderno.notas.empty() && !doc.Pages().empty()) {
+            for (const auto& nf : cuaderno.notas) {
+                AnnotationObject sn{};
+                sn.kind = ObjectKind::TextBox;
+                sn.bounds = { nf.posicion.x, nf.posicion.y, (std::max)(120.0, static_cast<double>(nf.ancho)), (std::max)(80.0, static_cast<double>(nf.alto)) };
+                sn.textUtf8 = nf.texto;
+                sn.fillColor = ArgbToDocColor(nf.color_argb);
+                sn.strokeColor = DocColor::RGBA(28, 32, 42, 255);
+                doc.AddPageObject(0, std::move(sn));
+                ++res.report.textBoxCount;
             }
         }
     }
@@ -986,16 +1082,9 @@ SourceFormat NotebookMigrationEngine::DetectFormat(
     std::size_t size)
 {
     const std::string ext = LowerExt(filenameUtf8);
-    if (ext == ".goodnotes") return SourceFormat::Goodnotes6;
-    if (ext == ".note")      return SourceFormat::Notability;
-    if (ext == ".onepkg")    return SourceFormat::OneNotePackage;
-    if (ext == ".one")       return SourceFormat::OneNoteSection;
-    if (ext == ".tinta")     return SourceFormat::CuadernuTinta;
-    if (ext == ".docx")      return SourceFormat::WordDocx;
-    if (ext == ".pptx")      return SourceFormat::PowerPointPptx;
-    if (ext == ".pdf")       return SourceFormat::PdfDocument;
-    if (ext == ".cudoc")     return SourceFormat::CudocNative;
 
+    // 1. Inspect authoritative file magic bytes / container structure FIRST
+    //    so renamed or uppercase-extension files are never misclassified.
     if (bytes && size >= 6) {
         if (std::memcmp(bytes, "%PDF-", 5) == 0) return SourceFormat::PdfDocument;
         if (std::memcmp(bytes, "TINTA\0", 6) == 0) return SourceFormat::CuadernuTinta;
@@ -1017,6 +1106,17 @@ SourceFormat NotebookMigrationEngine::DetectFormat(
             }
         }
     }
+
+    // 2. Fallback to case-insensitive extension hint (handles non-magic or dry-run probes)
+    if (ext == ".goodnotes") return SourceFormat::Goodnotes6;
+    if (ext == ".note")      return SourceFormat::Notability;
+    if (ext == ".onepkg")    return SourceFormat::OneNotePackage;
+    if (ext == ".one")       return SourceFormat::OneNoteSection;
+    if (ext == ".tinta")     return SourceFormat::CuadernuTinta;
+    if (ext == ".docx")      return SourceFormat::WordDocx;
+    if (ext == ".pptx")      return SourceFormat::PowerPointPptx;
+    if (ext == ".pdf")       return SourceFormat::PdfDocument;
+    if (ext == ".cudoc")     return SourceFormat::CudocNative;
     return SourceFormat::Unknown;
 }
 
