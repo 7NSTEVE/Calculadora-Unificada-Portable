@@ -276,6 +276,9 @@ enum CmdId : WORD {
     CMD_CONTROL_BLOCK_LAB,
     CMD_CIRCUIT_TOPO_AUDIT,
     CMD_EXAM_VARIANTS_LMS,
+    CMD_INSERT_PRINTOUT,
+    CMD_TOGGLE_LOCK_IN_PLACE,
+    CMD_SEARCH_IN_THIS_SHEET,
     CMD_INLINE_EDIT_CTRL = 2599
 };
 
@@ -420,6 +423,7 @@ struct StudioAppState {
     std::vector<std::uint64_t> lassoSelectedIds;
     std::vector<SearchMatch> searchMatches;
     std::size_t activeSearchIdx = 0;
+    std::string lastSearchQueryUtf8;
     std::size_t activePageIndex = 0;
     int sidebarScrollPos = 0;
 
@@ -901,6 +905,23 @@ void CenterCameraOnPage(StudioAppState* st, std::size_t pageIdx) {
     st->camera.panX = -vw / (2.0 * st->camera.zoom);
     st->camera.panY = pl->topWorld - 16.0;
     st->activePageIndex = idx;
+}
+
+void CenterCameraOnWorldRect(StudioAppState* st, const DocRect& worldBox) {
+    if (!st || worldBox.Empty()) return;
+    RECT rc{};
+    GetClientRect(st->hwndViewport, &rc);
+    const double vw = (std::max)(200.0, static_cast<double>(rc.right - rc.left));
+    const double vh = (std::max)(200.0, static_cast<double>(rc.bottom - rc.top));
+    // Keep current zoom if comfortable, otherwise fit target box nicely
+    const double fitZoom = std::clamp((vw * 0.72) / (std::max)(160.0, worldBox.w), 0.45, 1.45);
+    if (st->camera.zoom < 0.35 || st->camera.zoom > 2.4) {
+        st->camera.zoom = fitZoom;
+    }
+    const double cx = worldBox.x + worldBox.w * 0.5;
+    const double cy = worldBox.y + worldBox.h * 0.5;
+    st->camera.panX = cx - (vw / (2.0 * st->camera.zoom));
+    st->camera.panY = cy - (vh / (2.0 * st->camera.zoom));
 }
 
 void UpdateWindowTitle(StudioAppState* st) {
@@ -2146,15 +2167,47 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         const std::string qUtf8 = WideToUtf8(qbuf);
         if (qUtf8.empty()) {
             st->searchMatches.clear();
+            st->lastSearchQueryUtf8.clear();
             break;
         }
-        st->searchMatches = st->doc.SearchText(qUtf8, false);
+        const bool isNewQuery = (qUtf8 != st->lastSearchQueryUtf8 || st->searchMatches.empty());
+        if (isNewQuery) {
+            st->searchMatches = st->doc.SearchText(qUtf8, false, true);
+            st->lastSearchQueryUtf8 = qUtf8;
+            st->activeSearchIdx = 0;
+        }
         if (st->searchMatches.empty()) {
             st->statusBannerUtf8 = "Sin resultados para: " + qUtf8;
         } else {
-            st->activeSearchIdx = (st->activeSearchIdx + 1) % st->searchMatches.size();
-            CenterCameraOnPage(st, st->searchMatches[st->activeSearchIdx].pageIndex);
-            st->statusBannerUtf8 = "Coincidencia " + std::to_string(st->activeSearchIdx + 1) + "/" + std::to_string(st->searchMatches.size());
+            if (!isNewQuery) {
+                st->activeSearchIdx = (st->activeSearchIdx + 1) % st->searchMatches.size();
+            }
+            const auto& m = st->searchMatches[st->activeSearchIdx];
+            if (m.onCanvas) {
+                if (st->doc.Mode() != DocumentMode::InfiniteCanvas) {
+                    st->doc.SetMode(DocumentMode::InfiniteCanvas);
+                    LayoutMainChildren(st);
+                }
+                if (m.objectId != 0) {
+                    st->selectedObjectId = m.objectId;
+                    st->selectedIsCanvas = true;
+                }
+                CenterCameraOnWorldRect(st, m.worldBox);
+            } else {
+                if (st->doc.Mode() != DocumentMode::PaginatedPdf) {
+                    st->doc.SetMode(DocumentMode::PaginatedPdf);
+                    LayoutMainChildren(st);
+                }
+                if (m.objectId != 0) {
+                    st->selectedObjectId = m.objectId;
+                    st->selectedIsCanvas = false;
+                    st->selectedPageIndex = m.pageIndex;
+                }
+                CenterCameraOnPage(st, m.pageIndex);
+            }
+            st->statusBannerUtf8 = "Coincidencia " + std::to_string(st->activeSearchIdx + 1) + "/" +
+                std::to_string(st->searchMatches.size()) + " (" +
+                (m.onCanvas ? "Lienzo Infinito" : ("P\xC3\xA1g. " + std::to_string(m.pageIndex + 1))) + ")";
         }
         break;
     }
@@ -2456,7 +2509,16 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
             st->statusBannerUtf8 = "FTS (" + std::to_string(st->ftsIndex.VocabularySize()) + " t\xC3\xA9rminos): 0 coincidencias";
         } else {
             if (hits.front().objectId != 0) st->selectedObjectId = hits.front().objectId;
-            if (st->doc.Mode() == DocumentMode::PaginatedPdf && hits.front().pageIndex < st->doc.Pages().size()) {
+            if (const auto* cObj = (hits.front().objectId != 0) ? st->doc.FindCanvasObject(hits.front().objectId) : nullptr) {
+                if (st->doc.Mode() != DocumentMode::InfiniteCanvas) {
+                    st->doc.SetMode(DocumentMode::InfiniteCanvas);
+                    LayoutMainChildren(st);
+                }
+                st->selectedIsCanvas = true;
+                CenterCameraOnWorldRect(st, cObj->bounds);
+            } else if (st->doc.Mode() == DocumentMode::PaginatedPdf && hits.front().pageIndex < st->doc.Pages().size()) {
+                st->selectedIsCanvas = false;
+                st->selectedPageIndex = hits.front().pageIndex;
                 CenterCameraOnPage(st, hits.front().pageIndex);
             }
             st->statusBannerUtf8 = "FTS " + std::to_string(hits.size()) + " resultado(s): " + hits.front().snippetUtf8;
@@ -2776,6 +2838,7 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
     case CMD_FILE_MENU: {
         HMENU hm = CreatePopupMenu();
         AppendMenuW(hm, MF_STRING, CMD_OPEN,                 L"Abrir documento... (Ctrl+O)");
+        AppendMenuW(hm, MF_STRING, CMD_INSERT_PRINTOUT,      L"Insertar copia impresa (PDF / Word / PowerPoint)...");
         AppendMenuW(hm, MF_STRING, CMD_MIGRATE_NOTEBOOK,     L"Importar / Migrar Cuaderno (Goodnotes / Notability / OneNote / Office / .tinta)...");
         AppendMenuW(hm, MF_STRING, CMD_OPEN_VAULT_LIBRARY,   L"Biblioteca de Cuadernos y B\u00FAsqueda Global...");
         AppendMenuW(hm, MF_STRING, CMD_SAVE_CUDOC,           L"Guardar cuaderno .cudoc (Ctrl+S)");
@@ -2791,7 +2854,6 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         HMENU hPdfSub = CreatePopupMenu();
         AppendMenuW(hPdfSub, MF_STRING, CMD_MERGE_PDF,            L"Combinar PDFs...");
         AppendMenuW(hPdfSub, MF_STRING, CMD_SPLIT_PDF,            L"Dividir / Extraer p\u00E1ginas...");
-        AppendMenuW(hPdfSub, MF_STRING, CMD_IMPORT_PDF_TO_CANVAS, L"Importar p\u00E1ginas de PDF al Lienzo...");
         AppendMenuW(hPdfSub, MF_STRING, CMD_VIEW_ATTACHMENTS,     L"Ver adjuntos incrustados en PDF...");
         AppendMenuW(hPdfSub, MF_STRING, CMD_SIGN_PDF,             L"Firmar PDF (PKCS#7)...");
         AppendMenuW(hPdfSub, MF_STRING, CMD_VERIFY_SIG,           L"Verificar firma digital...");
@@ -3066,38 +3128,53 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
             st->statusBannerUtf8 = "Abra primero la Ventana de Proyector";
         }
         break;
+    case CMD_INSERT_PRINTOUT:
     case CMD_IMPORT_PDF_TO_CANVAS: {
-        static constexpr COMDLG_FILTERSPEC kPdfF[] = { { L"Archivos PDF (*.pdf)", L"*.pdf" } };
-        std::vector<std::wstring> paths;
-        if (!ShowOpenDialog(st->hwndMain, L"Importar p\u00E1ginas de PDF al Lienzo", kPdfF, 1, paths, false)) break;
-        PdfDocument pdf;
-        std::string err;
-        if (!pdf.LoadFromFile(paths[0], &err)) {
-            st->statusBannerUtf8 = "Error PDF: " + err;
-            break;
-        }
-        if (st->doc.Mode() != DocumentMode::InfiniteCanvas) {
-            st->doc.SetMode(DocumentMode::InfiniteCanvas);
-            LayoutMainChildren(st);
-        }
-        const std::size_t nImport = (std::min<std::size_t>)(pdf.PageCount(), 6u);
         double cx = 60.0, cy = 60.0;
-        for (std::size_t p = 0; p < nImport; ++p) {
-            RasterImageBgra32 img{};
-            std::vector<std::uint8_t> pngBytes;
-            if (WinRtPdfRenderer::RenderPageToBgra32(paths[0], static_cast<int>(p), 720, 0, {}, img, nullptr, nullptr) &&
-                WinRtPdfRenderer::EncodeBgra32ToPngBytes(img, pngBytes)) {
-                AnnotationObject pic{};
-                pic.kind = ObjectKind::Image;
-                pic.layerId = st->doc.ActiveLayerId();
-                pic.bounds = { cx, cy, 420.0, 420.0 * (static_cast<double>(img.height) / (std::max)(1, img.width)) };
-                pic.pngBytes = std::move(pngBytes);
-                pic.captionUtf8 = "PDF P\xC3\xA1g. " + std::to_string(p + 1);
-                st->cmdStack.Execute(st->doc, std::make_unique<AddObjectCommand>(ObjectTarget{ true, 0 }, std::move(pic)));
-                cx += 456.0;
+        for (const auto& o : st->doc.CanvasObjects()) {
+            if (o.kind == ObjectKind::PdfCard) {
+                cy = (std::max)(cy, o.bounds.Bottom() + 36.0);
             }
         }
-        st->statusBannerUtf8 = "Importadas " + std::to_string(nImport) + " p\xC3\xA1gina(s) del PDF al Lienzo Infinito";
+        if (GuiDialogs::RunInsertPrintoutDialog(
+                st->hwndMain, st->doc, st->cmdStack, st->activePageIndex, { cx, cy }, st->statusBannerUtf8)) {
+            st->pageCache.InvalidateAll(++st->asyncGen);
+            LayoutMainChildren(st);
+            UpdateWindowTitle(st);
+            InvalidateViews(st);
+            AppendWalMutation(st, "insert_printout");
+        }
+        break;
+    }
+    case CMD_TOGGLE_LOCK_IN_PLACE: {
+        if (st->selectedObjectId != 0) {
+            const ObjectTarget tgt{ st->selectedIsCanvas, st->selectedPageIndex };
+            if (const auto* cur = CanvasManip::FindObjectConst(st->doc, tgt, st->selectedObjectId)) {
+                AnnotationObject before = *cur;
+                AnnotationObject after = before;
+                after.lockedInPlace = !before.lockedInPlace;
+                if (st->cmdStack.Execute(st->doc, std::make_unique<ModifyObjectCommand>(tgt, std::move(before), std::move(after)))) {
+                    st->statusBannerUtf8 = after.lockedInPlace
+                        ? "Copia impresa fijada al fondo"
+                        : "Copia impresa desfijada";
+                    AppendWalMutation(st, "lock_in_place");
+                }
+            }
+        }
+        break;
+    }
+    case CMD_SEARCH_IN_THIS_SHEET: {
+        std::wstring qW;
+        if (!ShowTextPrompt(st->hwndMain, L"Buscar en esta hoja", L"Palabra o frase:", qW) || qW.empty()) break;
+        if (!st->searchVisible) {
+            st->searchVisible = true;
+            LayoutMainChildren(st);
+        }
+        if (st->hwndSearchEdit) {
+            SetWindowTextW(st->hwndSearchEdit, qW.c_str());
+        }
+        st->lastSearchQueryUtf8.clear();
+        ExecuteToolbarCommand(st, CMD_SEARCH_NEXT);
         break;
     }
     case CMD_TOGGLE_PARTIAL_ERASER:
@@ -3543,17 +3620,27 @@ bool PointHitsAnnotation(const AnnotationObject& obj, double lx, double ly, doub
     return true;
 }
 
-std::vector<std::uint64_t> CollectHits(StudioAppState* st, bool isCanvas, std::size_t pageIdx, double lx, double ly, double tol) {
+std::vector<std::uint64_t> CollectHits(
+    StudioAppState* st,
+    bool isCanvas,
+    std::size_t pageIdx,
+    double lx,
+    double ly,
+    double tol,
+    bool includeLockedInPlace = false)
+{
     std::vector<std::uint64_t> hits;
     if (isCanvas) {
         const auto candidates = st->doc.QueryCanvasRect({ lx - tol, ly - tol, tol * 2.0, tol * 2.0 });
         for (std::uint64_t id : candidates) {
             if (const auto* o = st->doc.FindCanvasObject(id)) {
+                if (o->lockedInPlace && !includeLockedInPlace) continue;
                 if (PointHitsAnnotation(*o, lx, ly, tol)) hits.push_back(id);
             }
         }
     } else if (pageIdx < st->doc.Pages().size()) {
         for (const auto& o : st->doc.Pages()[pageIdx].objects) {
+            if (o.lockedInPlace && !includeLockedInPlace) continue;
             if (PointHitsAnnotation(o, lx, ly, tol)) hits.push_back(o.id);
         }
     }
@@ -3863,7 +3950,10 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 const bool hitPage = isCanvas || st->doc.Layout().HitTestWorldPoint(wpWorld.x, wpWorld.y, pgIdx, lx, ly);
                 if (hitPage) {
                     const double tol = std::clamp(8.0 / (std::max)(0.25, st->camera.zoom), 3.0, 18.0);
-                    const auto hits = CollectHits(st, isCanvas, pgIdx, lx, ly, tol);
+                    auto hits = CollectHits(st, isCanvas, pgIdx, lx, ly, tol, false);
+                    if (hits.empty()) {
+                        hits = CollectHits(st, isCanvas, pgIdx, lx, ly, tol, true);
+                    }
                     if (!hits.empty()) {
                         st->selectedObjectId = hits.back();
                         st->selectedIsCanvas = isCanvas;
@@ -3873,7 +3963,16 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 HMENU cm = CreatePopupMenu();
                 AppendMenuW(cm, MF_STRING, CMD_CLIPBOARD_PASTE, L"Pegar (Ctrl+V)");
+                AppendMenuW(cm, MF_STRING, CMD_INSERT_PRINTOUT, L"Insertar copia impresa (PDF / Word / PowerPoint)...");
                 if (st->selectedObjectId != 0 || !st->lassoSelectedIds.empty()) {
+                    const ObjectTarget selTgt{ st->selectedIsCanvas, st->selectedPageIndex };
+                    const auto* selObj = CanvasManip::FindObjectConst(st->doc, selTgt, st->selectedObjectId);
+                    const bool isLocked = selObj && selObj->lockedInPlace;
+                    AppendMenuW(cm, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(cm, MF_STRING, CMD_TOGGLE_LOCK_IN_PLACE,
+                        isLocked ? L"Desfijar copia impresa del fondo" : L"Fijar copia impresa al fondo");
+                    AppendMenuW(cm, MF_STRING, CMD_SEARCH_IN_THIS_SHEET, L"Buscar en esta hoja...");
+                    AppendMenuW(cm, MF_SEPARATOR, 0, nullptr);
                     AppendMenuW(cm, MF_STRING, CMD_DUPLICATE_OBJECTS, L"Duplicar (Ctrl+D)");
                     AppendMenuW(cm, MF_STRING, CMD_GROUP_OBJECTS,     L"Agrupar (Ctrl+G)");
                     AppendMenuW(cm, MF_STRING, CMD_UNGROUP_OBJECTS,   L"Desagrupar");
@@ -4056,6 +4155,7 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // 4. Hit-test 8 resize handles + rotation stalk on currently selected object (F-026, F-103)
             if (st->selectedObjectId != 0 && st->selectedIsCanvas == isCanvas && (isCanvas || st->selectedPageIndex == pgIdx)) {
                 if (const auto* selObj = CanvasManip::FindObjectConst(st->doc, tgt, st->selectedObjectId)) {
+                    if (!selObj->lockedInPlace) {
                     const auto hKind = CanvasManip::HitTestSelectionHandles(
                         selObj->bounds, originX, originY, st->camera,
                         static_cast<int>(std::lround(sp.x)), static_cast<int>(std::lround(sp.y)));
@@ -4076,6 +4176,7 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         st->panStartPt = { static_cast<LONG>(sp.x), static_cast<LONG>(sp.y) };
                         SetCapture(hwnd);
                         return 0;
+                    }
                     }
                 }
             }
@@ -5696,6 +5797,22 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HDROP hDrop = reinterpret_cast<HDROP>(wp);
         wchar_t path[4096]{};
         if (DragQueryFileW(hDrop, 0, path, 4096) > 0) {
+            const std::wstring ext = GetFileExtLower(path);
+            const bool isPrintoutExt = (ext == L".pdf" || ext == L".docx" || ext == L".pptx" || ext == L".doc" || ext == L".ppt");
+            if (isPrintoutExt && st->doc.Mode() == DocumentMode::InfiniteCanvas) {
+                POINT dpt{ 120, 120 };
+                DragQueryPoint(hDrop, &dpt);
+                const DocPoint wpt = st->camera.ScreenToWorld(dpt.x, dpt.y);
+                DragFinish(hDrop);
+                if (GuiDialogs::RunInsertPrintoutDialog(
+                        st->hwndMain, st->doc, st->cmdStack, st->activePageIndex, wpt, st->statusBannerUtf8, path)) {
+                    st->pageCache.InvalidateAll(++st->asyncGen);
+                    LayoutMainChildren(st);
+                    UpdateWindowTitle(st);
+                    InvalidateViews(st);
+                }
+                return 0;
+            }
             OpenDocumentFile(st, path);
         }
         DragFinish(hDrop);
@@ -6128,13 +6245,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
             st->renderer.AttachHwnd(st->hwndViewport, (std::max)(200, winW - kSidebarWidth), (std::max)(200, winH - kTopChromeH - kBottomStatusH));
         }
 
-        if (!initialOpen.empty()) {
+        if (!initialOpen.empty() && !cliOpts.HasAnyExtendedWorkflow()) {
             const std::wstring openExt = GetFileExtLower(initialOpen);
             if (openExt != L".png" && openExt != L".jpg" && openExt != L".jpeg" && cliOpts.decryptPassUtf8.empty()) {
                 OpenDocumentFile(st.get(), initialOpen);
             }
         }
-        if (initialMode == "canvas") {
+        if (initialMode == "canvas" && cliOpts.insertPrintoutPathUtf8.empty()) {
             if (st->doc.Mode() != DocumentMode::InfiniteCanvas) {
                 ExecuteToolbarCommand(st.get(), CMD_MODE_CANVAS);
             }
@@ -6184,6 +6301,56 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         }
 
         LayoutMainChildren(st.get());
+        if (!cliOpts.searchQueryUtf8.empty()) {
+            st->searchVisible = true;
+            LayoutMainChildren(st.get());
+            if (st->hwndSearchEdit) {
+                SetWindowTextW(st->hwndSearchEdit, Utf8ToWide(cliOpts.searchQueryUtf8).c_str());
+            }
+            st->lastSearchQueryUtf8.clear();
+            ExecuteToolbarCommand(st.get(), CMD_SEARCH_NEXT);
+            // If we have an active canvas match and screenshotOutPath is requested, add a live annotation over the sheet
+            if (!st->screenshotOutPath.empty() && !st->searchMatches.empty() && st->searchMatches[st->activeSearchIdx].onCanvas) {
+                const auto& m = st->searchMatches[st->activeSearchIdx];
+                // Translucent yellow highlighter stroke right under the matched region
+                AnnotationObject hl{};
+                hl.kind = ObjectKind::InkStroke;
+                hl.layerId = st->doc.ActiveLayerId();
+                hl.isHighlighter = true;
+                hl.penStyle = InkPenStyle::Highlighter;
+                hl.strokeColor = DocColor::RGBA(250, 204, 21, 110);
+                hl.strokeWidth = 14.0;
+                hl.inkPoints = {
+                    { m.worldBox.x, m.worldBox.Bottom() + 18.0, 0.7f, 0, 0, 10 },
+                    { m.worldBox.x + 190.0, m.worldBox.Bottom() + 18.0, 0.7f, 0, 0, 30 }
+                };
+                hl.RecomputeBounds();
+                st->doc.AddCanvasObject(std::move(hl));
+
+                // Red ink underline + arrow annotation pointing to the searched concept
+                AnnotationObject ink{};
+                ink.kind = ObjectKind::InkStroke;
+                ink.layerId = st->doc.ActiveLayerId();
+                ink.strokeColor = DocColor::RGBA(220, 38, 38, 245);
+                ink.strokeWidth = 2.6;
+                ink.inkPoints = {
+                    { m.worldBox.x - 4.0, m.worldBox.Bottom() + 3.0, 0.75f, 0, 0, 40 },
+                    { m.worldBox.x + (std::min)(220.0, m.worldBox.w + 20.0), m.worldBox.Bottom() + 3.0, 0.85f, 0, 0, 75 }
+                };
+                ink.RecomputeBounds();
+                st->doc.AddCanvasObject(std::move(ink));
+
+                // 2D Natural Math margin note next to the printed page
+                if (const auto* card = st->doc.FindCanvasObject(m.objectId)) {
+                    AppActions::AddFormulaNodeAction(
+                        st->doc, st->cmdStack, ObjectTarget{ true, 0 },
+                        card->bounds.Right() + 14.0, m.worldBox.y - 10.0,
+                        "F_net = 12 kg * 9.81 m/s^2", "", st->statusBannerUtf8);
+                    st->statusBannerUtf8 = "Coincidencia 1/" + std::to_string(st->searchMatches.size()) +
+                        " en Lienzo Infinito \xC2\xB7 \"" + cliOpts.searchQueryUtf8 + "\"";
+                }
+            }
+        }
         ShowWindow(hwnd, st->smokeTestMode ? SW_SHOWNOACTIVATE : nCmdShow);
         UpdateWindow(hwnd);
 

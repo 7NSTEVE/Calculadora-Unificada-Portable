@@ -154,18 +154,76 @@ std::string SliceUtf8SafeSnippet(const std::string& utf8, std::size_t matchStart
     return utf8.substr(snipStart, snipEnd - snipStart);
 }
 
+bool ContainsNormalizedMatch(
+    const std::string& haystack,
+    const NormalizedCodepoints& needleNorm,
+    bool caseSensitive,
+    bool accentInsensitive);
+
+bool FindMatchingRunBox(
+    const std::vector<PdfTextRunBox>& runs,
+    const NormalizedCodepoints& needleNorm,
+    bool caseSensitive,
+    bool accentInsensitive,
+    std::size_t& ioRunCursor,
+    DocRect& outNormRect)
+{
+    if (runs.empty() || needleNorm.cps.empty()) return false;
+    // 1. Try direct match in runs starting from ioRunCursor, then wrap around
+    for (std::size_t pass = 0; pass < 2; ++pass) {
+        const std::size_t start = (pass == 0) ? (ioRunCursor % runs.size()) : 0;
+        const std::size_t end   = (pass == 0) ? runs.size() : (ioRunCursor % runs.size());
+        for (std::size_t r = start; r < end; ++r) {
+            if (ContainsNormalizedMatch(runs[r].textUtf8, needleNorm, caseSensitive, accentInsensitive) &&
+                runs[r].rectNorm.w > 0.0 && runs[r].rectNorm.h > 0.0) {
+                outNormRect = runs[r].rectNorm;
+                ioRunCursor = r + 1;
+                return true;
+            }
+        }
+    }
+    // 2. If needle has multiple words (e.g. "Clave-137 termodinamica"), match first token >= 3 codepoints
+    NormalizedCodepoints firstTok;
+    for (std::size_t k = 0; k < needleNorm.cps.size(); ++k) {
+        const std::uint32_t c = needleNorm.cps[k];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (firstTok.cps.size() >= 2) break;
+            firstTok.cps.clear();
+            firstTok.srcStartOffsets.clear();
+            firstTok.srcEndOffsets.clear();
+        } else {
+            firstTok.cps.push_back(c);
+            firstTok.srcStartOffsets.push_back(0);
+            firstTok.srcEndOffsets.push_back(1);
+        }
+    }
+    if (firstTok.cps.size() >= 2 && firstTok.cps.size() < needleNorm.cps.size()) {
+        for (std::size_t r = 0; r < runs.size(); ++r) {
+            if (ContainsNormalizedMatch(runs[r].textUtf8, firstTok, caseSensitive, accentInsensitive) &&
+                runs[r].rectNorm.w > 0.0 && runs[r].rectNorm.h > 0.0) {
+                outNormRect = runs[r].rectNorm;
+                ioRunCursor = r + 1;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void SearchInText(
     std::size_t pageIdx,
     const std::string& haystack,
     const NormalizedCodepoints& needleNorm,
     bool caseSensitive,
     bool accentInsensitive,
-    std::vector<SearchMatch>& out)
+    std::vector<SearchMatch>& out,
+    const std::vector<PdfTextRunBox>* runs = nullptr)
 {
     if (haystack.empty() || needleNorm.cps.empty()) return;
     const NormalizedCodepoints hayNorm = NormalizeTextForSearch(haystack, caseSensitive, accentInsensitive);
     if (hayNorm.cps.size() < needleNorm.cps.size()) return;
 
+    std::size_t runCursor = 0;
     const std::size_t nLen = needleNorm.cps.size();
     for (std::size_t i = 0; i + nLen <= hayNorm.cps.size(); ) {
         bool match = true;
@@ -183,6 +241,9 @@ void SearchInText(
             m.charOffset = byteStart;
             m.charLength = byteEnd - byteStart;
             m.snippetUtf8 = SliceUtf8SafeSnippet(haystack, byteStart, byteEnd);
+            if (runs && FindMatchingRunBox(*runs, needleNorm, caseSensitive, accentInsensitive, runCursor, m.boxNormalized)) {
+                m.hasBox = true;
+            }
             out.push_back(std::move(m));
             i += (std::max<std::size_t>)(1u, nLen);
         } else {
@@ -457,11 +518,15 @@ std::vector<SearchMatch> DocumentModel::SearchText(
 
     for (std::size_t p = 0; p < pages_.size(); ++p) {
         const auto& pg = pages_[p];
-        SearchInText(p, pg.extractedTextUtf8, needleNorm, caseSensitive, accentInsensitive, out);
-        SearchInText(p, pg.ocrTextUtf8, needleNorm, caseSensitive, accentInsensitive, out);
+        SearchInText(p, pg.extractedTextUtf8, needleNorm, caseSensitive, accentInsensitive, out, &pg.textBoxes);
+        SearchInText(p, pg.ocrTextUtf8, needleNorm, caseSensitive, accentInsensitive, out, &pg.textBoxes);
         for (const auto& obj : pg.objects) {
             std::string searchable;
             if (!obj.textUtf8.empty()) searchable += obj.textUtf8;
+            if (!obj.printoutTextUtf8.empty()) {
+                if (!searchable.empty()) searchable += ' ';
+                searchable += obj.printoutTextUtf8;
+            }
             if (!obj.formulaExprUtf8.empty()) {
                 if (!searchable.empty()) searchable += ' ';
                 searchable += obj.formulaExprUtf8;
@@ -486,6 +551,7 @@ std::vector<SearchMatch> DocumentModel::SearchText(
                 if (ContainsNormalizedMatch(searchable, needleNorm, caseSensitive, accentInsensitive)) {
                     SearchMatch m{};
                     m.pageIndex = p;
+                    m.objectId = obj.id;
                     m.charOffset = 0;
                     m.charLength = queryUtf8.size();
                     m.snippetUtf8 = searchable;
@@ -501,6 +567,69 @@ std::vector<SearchMatch> DocumentModel::SearchText(
                     out.push_back(std::move(m));
                 }
             }
+        }
+    }
+
+    // Search all Infinite Canvas objects (including PdfCard printouts with embedded text/OCR runs)
+    for (const auto& obj : canvasObjects_) {
+        if (!obj.printoutTextUtf8.empty()) {
+            std::vector<SearchMatch> cardMatches;
+            SearchInText(0, obj.printoutTextUtf8, needleNorm, caseSensitive, accentInsensitive, cardMatches, &obj.printoutTextRuns);
+            for (auto& cm : cardMatches) {
+                cm.onCanvas = true;
+                cm.objectId = obj.id;
+                if (!cm.hasBox) {
+                    cm.hasBox = true;
+                    cm.boxNormalized = { 0.04, 0.04, 0.92, 0.10 };
+                }
+                const double nx = std::clamp(cm.boxNormalized.x, 0.0, 0.98);
+                const double ny = std::clamp(cm.boxNormalized.y, 0.0, 0.98);
+                const double nw = std::clamp(cm.boxNormalized.w, 0.02, 1.0 - nx);
+                const double nh = std::clamp(cm.boxNormalized.h, 0.015, 1.0 - ny);
+                cm.worldBox = {
+                    obj.bounds.x + nx * obj.bounds.w,
+                    obj.bounds.y + ny * obj.bounds.h,
+                    (std::max)(16.0, nw * obj.bounds.w),
+                    (std::max)(14.0, nh * obj.bounds.h)
+                };
+                out.push_back(std::move(cm));
+            }
+        }
+
+        std::string searchable;
+        if (!obj.textUtf8.empty()) searchable += obj.textUtf8;
+        if (!obj.formulaExprUtf8.empty()) {
+            if (!searchable.empty()) searchable += ' ';
+            searchable += obj.formulaExprUtf8;
+        }
+        if (!obj.evaluatedResultUtf8.empty()) {
+            if (!searchable.empty()) searchable += ' ';
+            searchable += obj.evaluatedResultUtf8;
+        }
+        if (!obj.calcModelIdUtf8.empty()) {
+            if (!searchable.empty()) searchable += ' ';
+            searchable += obj.calcModelIdUtf8 + " " + obj.calcKeySeqUtf8;
+        }
+        if (!obj.htrRecognizedTextUtf8.empty()) {
+            if (!searchable.empty()) searchable += ' ';
+            searchable += obj.htrRecognizedTextUtf8;
+        }
+        if (!obj.tableJsonUtf8.empty()) {
+            if (!searchable.empty()) searchable += ' ';
+            searchable += obj.tableJsonUtf8;
+        }
+        if (!searchable.empty() && ContainsNormalizedMatch(searchable, needleNorm, caseSensitive, accentInsensitive)) {
+            SearchMatch m{};
+            m.pageIndex = 0;
+            m.onCanvas = true;
+            m.objectId = obj.id;
+            m.charOffset = 0;
+            m.charLength = queryUtf8.size();
+            m.snippetUtf8 = (searchable.size() <= 160) ? searchable : SliceUtf8SafeSnippet(searchable, 0, 80);
+            m.hasBox = true;
+            m.boxNormalized = { 0.0, 0.0, 1.0, 1.0 };
+            m.worldBox = obj.bounds;
+            out.push_back(std::move(m));
         }
     }
     return out;

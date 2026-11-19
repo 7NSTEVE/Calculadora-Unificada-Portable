@@ -64,6 +64,7 @@ set(DOC_CORE_SOURCES
     pdf/interop_openxml.cpp
     pdf/table_interop.cpp
     interop/notebook_migration_engine.cpp
+    interop/printout_engine.cpp
     render/d2d_renderer.cpp
 )
 
@@ -81,6 +82,7 @@ target_link_libraries(DocumentCore PUBLIC
     windowscodecs
     crypt32
     ole32
+    oleaut32
     comdlg32
     shell32
     user32
@@ -163,3 +165,12 @@ if(MSVC)
 endif()
 target_link_libraries(CuadernuInteropTest PRIVATE DocumentCore tinta_nucleo)
 add_test(NAME CuadernuInteropTest COMMAND CuadernuInteropTest)
+
+add_executable(PrintoutTest tests/printout_test.cpp)
+target_compile_definitions(PrintoutTest PRIVATE _UNICODE UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+if(MSVC)
+    target_compile_options(PrintoutTest PRIVATE /W4 /utf-8 /EHsc)
+endif()
+target_link_libraries(PrintoutTest PRIVATE DocumentCore tinta_nucleo)
+add_test(NAME PrintoutTest COMMAND PrintoutTest "${CMAKE_CURRENT_BINARY_DIR}/printout_fixtures")
+

@@ -160,6 +160,11 @@ struct NormalizedCropRect {
     }
 };
 
+struct PdfTextRunBox {
+    std::string textUtf8;
+    DocRect rectNorm{}; // [0..1] top-left normalized on page
+};
+
 struct AnnotationObject {
     std::uint64_t id = 0;
     std::uint64_t zOrder = 0;
@@ -198,6 +203,14 @@ struct AnnotationObject {
     std::string pdfSourcePathUtf8;
     std::string pdfSourceAssetKey;
     int pdfSourcePageIndex0 = 0;
+
+    // Printout (copia impresa): searchable text layer, provenance and background lock
+    std::string printoutTextUtf8;                // full page text (embedded PDF text or OCR)
+    std::vector<PdfTextRunBox> printoutTextRuns; // text runs with [0..1] boxes relative to bounds
+    bool printoutTextFromOcr = false;
+    std::string printoutSourceKindUtf8;          // "pdf" | "docx" | "pptx"
+    std::string printoutSourceNameUtf8;          // original file name (no directory)
+    bool lockedInPlace = false;                  // pinned to background: ignored by move/lasso/eraser hits
 
     // Layers, Ink physics, Anchor, Study Tape, Audio timeline & STEM card extensions
     std::uint64_t layerId = 1;
@@ -286,11 +299,6 @@ struct PdfFormField {
     DocRect rectNorm{};
     bool checked = false;
     bool readOnly = false;
-};
-
-struct PdfTextRunBox {
-    std::string textUtf8;
-    DocRect rectNorm{}; // [0..1] top-left normalized on page
 };
 
 struct EmbeddedAttachment {
@@ -403,6 +411,9 @@ struct SearchMatch {
     std::string snippetUtf8;
     bool hasBox = false;
     DocRect boxNormalized{}; // [0..1] in page coordinates if layout box matched
+    bool onCanvas = false;      // match located on the Infinite Canvas
+    std::uint64_t objectId = 0; // object containing the match (0 = page text layer)
+    DocRect worldBox{};         // match box in canvas world coordinates when onCanvas
 };
 
 } // namespace DocStudio

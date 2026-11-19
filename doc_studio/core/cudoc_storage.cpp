@@ -182,7 +182,22 @@ json ObjectToJson(
         j["pdfQuads"] = std::move(qp);
     }
     if (obj.isRedaction) j["isRedaction"] = true;
+    if (obj.lockedInPlace) j["lockedInPlace"] = true;
     if (!obj.codeLanguageUtf8.empty()) j["codeLanguage"] = obj.codeLanguageUtf8;
+    if (!obj.printoutTextUtf8.empty()) j["printoutText"] = obj.printoutTextUtf8;
+    if (obj.printoutTextFromOcr) j["printoutTextFromOcr"] = true;
+    if (!obj.printoutSourceKindUtf8.empty()) j["printoutSourceKind"] = obj.printoutSourceKindUtf8;
+    if (!obj.printoutSourceNameUtf8.empty()) j["printoutSourceName"] = obj.printoutSourceNameUtf8;
+    if (!obj.printoutTextRuns.empty()) {
+        json trArr = json::array();
+        for (const auto& tr : obj.printoutTextRuns) {
+            trArr.push_back({
+                {"rect", { tr.rectNorm.x, tr.rectNorm.y, tr.rectNorm.w, tr.rectNorm.h }},
+                {"text", tr.textUtf8}
+            });
+        }
+        j["printoutTextRuns"] = std::move(trArr);
+    }
 
     if (obj.kind == ObjectKind::InkStroke) {
         j["penStyle"] = static_cast<int>(obj.penStyle);
@@ -220,10 +235,18 @@ json ObjectToJson(
             j["inlineAssetPath"] = inlinePath;
         }
     } else if (obj.kind == ObjectKind::PdfCard) {
+        j["assetKey"] = obj.assetKey;
+        j["imagePixelW"] = obj.imagePixelW;
+        j["imagePixelH"] = obj.imagePixelH;
         j["pdfSourcePath"] = obj.pdfSourcePathUtf8;
         j["pdfSourceAssetKey"] = obj.pdfSourceAssetKey;
         j["pdfSourcePageIndex0"] = obj.pdfSourcePageIndex0;
         j["caption"] = obj.captionUtf8;
+        if (!obj.pngBytes.empty()) {
+            const std::string inlinePath = "assets/_inline/" + scopeTag + "_pdfcard_" + std::to_string(idx) + ".bin";
+            zip.SetEntry(inlinePath, obj.pngBytes);
+            j["inlineAssetPath"] = inlinePath;
+        }
     } else if (obj.kind == ObjectKind::StudyTape) {
         j["tapeRevealed"] = obj.tapeRevealed;
         j["text"] = obj.textUtf8;
@@ -382,13 +405,40 @@ bool JsonToObject(const json& j, const ZipArchive& zip, AnnotationObject& out, s
         }
     }
     out.isRedaction = j.value("isRedaction", false);
+    out.lockedInPlace = j.value("lockedInPlace", false);
     out.codeLanguageUtf8 = j.value("codeLanguage", "");
+    out.printoutTextUtf8 = j.value("printoutText", "");
+    out.printoutTextFromOcr = j.value("printoutTextFromOcr", false);
+    out.printoutSourceKindUtf8 = j.value("printoutSourceKind", "");
+    out.printoutSourceNameUtf8 = j.value("printoutSourceName", "");
+    if (j.contains("printoutTextRuns") && j["printoutTextRuns"].is_array()) {
+        for (const auto& tj : j["printoutTextRuns"]) {
+            if (!tj.is_object()) continue;
+            PdfTextRunBox tr{};
+            tr.textUtf8 = tj.value("text", "");
+            if (tj.contains("rect") && tj["rect"].is_array() && tj["rect"].size() >= 4) {
+                tr.rectNorm.x = tj["rect"][0].get<double>();
+                tr.rectNorm.y = tj["rect"][1].get<double>();
+                tr.rectNorm.w = tj["rect"][2].get<double>();
+                tr.rectNorm.h = tj["rect"][3].get<double>();
+            }
+            if (!tr.textUtf8.empty()) out.printoutTextRuns.push_back(std::move(tr));
+        }
+    }
 
     if (out.kind == ObjectKind::PdfCard) {
+        out.assetKey = j.value("assetKey", "");
+        out.imagePixelW = j.value("imagePixelW", 0);
+        out.imagePixelH = j.value("imagePixelH", 0);
         out.pdfSourcePathUtf8 = j.value("pdfSourcePath", "");
         out.pdfSourceAssetKey = j.value("pdfSourceAssetKey", "");
         out.pdfSourcePageIndex0 = j.value("pdfSourcePageIndex0", 0);
         out.captionUtf8 = j.value("caption", "");
+        const std::string inlinePath = j.value("inlineAssetPath", "");
+        if (!inlinePath.empty()) {
+            const auto* entry = zip.FindEntry(inlinePath);
+            if (entry) out.pngBytes = *entry;
+        }
     } else if (out.kind == ObjectKind::StudyTape) {
         out.tapeRevealed = j.value("tapeRevealed", false);
         out.textUtf8 = j.value("text", "");
@@ -687,7 +737,7 @@ bool CudocStorage::SerializeToBytes(
         json canvasObjsJson = json::array();
         for (std::size_t i = 0; i < doc.CanvasObjects().size(); ++i) {
             AnnotationObject copyObj = doc.CanvasObjects()[i];
-            if (copyObj.kind == ObjectKind::PdfCard) {
+            if (copyObj.kind == ObjectKind::PdfCard && copyObj.assetKey.empty() && copyObj.pngBytes.empty()) {
                 ensurePdfAssetEmbedded(copyObj.pdfSourcePathUtf8, copyObj.pdfSourceAssetKey);
             }
             canvasObjsJson.push_back(ObjectToJson(copyObj, "canvas", i, zip));

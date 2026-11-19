@@ -36,6 +36,7 @@
 #include "../pdf/pdf_writer.hpp"
 #include "../pdf/table_interop.hpp"
 #include "../interop/notebook_migration_engine.hpp"
+#include "../interop/printout_engine.hpp"
 
 #ifdef DOC_STUDIO_HAS_ACADEMIC
 #include "academic/horarios_tec/exporter.hpp"
@@ -102,6 +103,12 @@ struct StudioCliOptions {
 
     // Input / import flags
     std::string migratePathUtf8;
+    std::string insertPrintoutPathUtf8;
+    std::string printoutTargetUtf8 = "canvas";
+    std::string printoutRangeUtf8;
+    std::string printoutLayoutUtf8 = "column";
+    std::string printoutConverterUtf8 = "auto";
+    bool printoutLockInPlace = true;
     std::string outReportUtf8;
     std::string importCsvUtf8;
     std::string importMdUtf8;
@@ -195,7 +202,7 @@ struct StudioCliOptions {
                !outVaultUtf8.empty() || !exportEffectiveKeymapUtf8.empty() ||
                !dumpA11yTreeUtf8.empty() || !dumpLayoutBoundsUtf8.empty() ||
                !importCsvUtf8.empty() || !importMdUtf8.empty() || !importAudioUtf8.empty() ||
-               !migratePathUtf8.empty() || !outReportUtf8.empty() ||
+               !migratePathUtf8.empty() || !insertPrintoutPathUtf8.empty() || !outReportUtf8.empty() ||
                !warpScanOcrUtf8.empty() || calcBridgeSync || checkMyWork || !casExprUtf8.empty() ||
                !localQaQueryUtf8.empty() || aiOffVerifyCore || examMode || hasGenerateVariants ||
                quizMe || studySessionE2e || examWeekSession || presenterConsole || replayMacro ||
@@ -502,6 +509,12 @@ inline StudioCliOptions ParseArgsUtf8(const std::vector<std::string>& args) {
 
         else if (a == "--import-csv" && hasNext(i)) o.importCsvUtf8 = args[++i];
         else if (a == "--migrate" && hasNext(i)) o.migratePathUtf8 = args[++i];
+        else if (a == "--insert-printout" && hasNext(i)) o.insertPrintoutPathUtf8 = args[++i];
+        else if (a == "--printout-target" && hasNext(i)) o.printoutTargetUtf8 = args[++i];
+        else if (a == "--printout-range" && hasNext(i)) o.printoutRangeUtf8 = args[++i];
+        else if (a == "--printout-layout" && hasNext(i)) o.printoutLayoutUtf8 = args[++i];
+        else if (a == "--printout-converter" && hasNext(i)) o.printoutConverterUtf8 = args[++i];
+        else if (a == "--printout-lock" && hasNext(i)) o.printoutLockInPlace = (args[++i] != "0" && args[i] != "false");
         else if (a == "--out-report" && hasNext(i)) o.outReportUtf8 = args[++i];
         else if (a == "--import-md" && hasNext(i)) o.importMdUtf8 = args[++i];
         else if (a == "--import-audio" && hasNext(i)) o.importAudioUtf8 = args[++i];
@@ -669,6 +682,10 @@ inline DispatchResult ExecuteWorkflow(
                 if (!CudocCrypto::LoadEncryptedCudocFile(opts.openPathUtf8, opts.decryptPassUtf8, doc, &err)) {
                     return fail(4, err);
                 }
+            } else {
+                if (!CudocStorage::LoadFromFileWithRecovery(Utf8ToWide(opts.openPathUtf8), doc, nullptr, &err)) {
+                    return fail(4, err);
+                }
             }
         } else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg") {
             std::string err;
@@ -680,6 +697,92 @@ inline DispatchResult ExecuteWorkflow(
 
     if (opts.mode == "canvas" && doc.Mode() != DocumentMode::InfiniteCanvas) {
         doc.ResetToBlank(DocumentMode::InfiniteCanvas);
+    }
+
+    // 1b. Insert File Printout (--insert-printout <file>)
+    if (!opts.insertPrintoutPathUtf8.empty()) {
+        Printout::Options pOpts{};
+        pOpts.target = (opts.printoutTargetUtf8 == "pages" || opts.printoutTargetUtf8 == "notebook")
+            ? Printout::Target::NotebookPages
+            : Printout::Target::InfiniteCanvas;
+        pOpts.layout = (opts.printoutLayoutUtf8 == "grid")
+            ? Printout::CanvasLayout::Grid
+            : Printout::CanvasLayout::VerticalColumn;
+        pOpts.lockInPlace = opts.printoutLockInPlace;
+        if (opts.printoutConverterUtf8 == "office" || opts.printoutConverterUtf8 == "msoffice") {
+            pOpts.converter = Printout::ConverterChoice::MicrosoftOffice;
+        } else if (opts.printoutConverterUtf8 == "libreoffice" || opts.printoutConverterUtf8 == "lo") {
+            pOpts.converter = Printout::ConverterChoice::LibreOffice;
+        } else if (opts.printoutConverterUtf8 == "native") {
+            pOpts.converter = Printout::ConverterChoice::NativeEditable;
+        } else {
+            pOpts.converter = Printout::ConverterChoice::Automatic;
+        }
+        if (!opts.printoutRangeUtf8.empty()) {
+            const auto dash = opts.printoutRangeUtf8.find('-');
+            if (dash != std::string::npos) {
+                const int a = std::atoi(opts.printoutRangeUtf8.substr(0, dash).c_str());
+                const int b = std::atoi(opts.printoutRangeUtf8.substr(dash + 1).c_str());
+                if (a >= 1) pOpts.firstPage1 = a;
+                if (b >= pOpts.firstPage1) pOpts.lastPage1 = b;
+            } else {
+                const int single = std::atoi(opts.printoutRangeUtf8.c_str());
+                if (single >= 1) { pOpts.firstPage1 = single; pOpts.lastPage1 = single; }
+            }
+        }
+        CommandStack tmpStack;
+        Printout::Report pRep{};
+        if (!Printout::InsertPrintoutFromFile(
+                doc, tmpStack, Utf8ToWide(opts.insertPrintoutPathUtf8),
+                pOpts, 0, { 60.0, 60.0 }, pRep)) {
+            return fail(2, "Insert printout failed: " + pRep.errorUtf8);
+        }
+        if (!opts.outReportUtf8.empty()) {
+            nlohmann::json rj = {
+                {"ok", true},
+                {"sourceName", pRep.sourceNameUtf8},
+                {"sourceKind", pRep.sourceKindUtf8},
+                {"converterUsed", pRep.converterUsedUtf8},
+                {"visualFidelityExact", pRep.visualFidelityExact},
+                {"ocrEngineAvailable", pRep.ocrEngineAvailable},
+                {"totalSourcePages", pRep.totalSourcePages},
+                {"pagesInserted", pRep.pagesInserted},
+                {"pagesWithText", pRep.pagesWithText},
+                {"pagesWithOcr", pRep.pagesWithOcr},
+                {"sourceSha256Before", pRep.sourceSha256Before},
+                {"sourceSha256After", pRep.sourceSha256After},
+                {"warnings", pRep.warningsUtf8}
+            };
+            std::string wErr;
+            if (!detail::WriteTextFile(opts.outReportUtf8, rj.dump(2), &wErr)) return fail(3, wErr);
+        }
+        res.statusBannerUtf8 = std::to_string(pRep.pagesInserted) + " p\xC3\xA1gina(s) insertadas (" +
+            pRep.converterUsedUtf8 + ", " + std::to_string(pRep.pagesWithText) + " con texto buscable)";
+    }
+
+    // 1c. Standalone Document Search (--search <query> --out-json <matches.json>)
+    if (!opts.searchQueryUtf8.empty() && !opts.outJsonUtf8.empty() && opts.warpScanOcrUtf8.empty()) {
+        const auto matches = doc.SearchText(opts.searchQueryUtf8, false, true);
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& m : matches) {
+            arr.push_back({
+                {"onCanvas", m.onCanvas},
+                {"pageIndex", m.pageIndex},
+                {"objectId", m.objectId},
+                {"hasBox", m.hasBox},
+                {"boxNormalized", { m.boxNormalized.x, m.boxNormalized.y, m.boxNormalized.w, m.boxNormalized.h }},
+                {"worldBox", { m.worldBox.x, m.worldBox.y, m.worldBox.w, m.worldBox.h }},
+                {"snippet", m.snippetUtf8}
+            });
+        }
+        nlohmann::json root = {
+            {"ok", true},
+            {"query", opts.searchQueryUtf8},
+            {"matchCount", matches.size()},
+            {"matches", std::move(arr)}
+        };
+        std::string wErr;
+        if (!detail::WriteTextFile(opts.outJsonUtf8, root.dump(2), &wErr)) return fail(2, wErr);
     }
 
     // 2. CSV / Markdown / Whiteboard Warp+OCR imports

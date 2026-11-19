@@ -499,6 +499,8 @@ void VaultFullTextIndex::IndexDocument(const std::string& docKeyUtf8, const Docu
         indexString(p, 0, "ocr", pg.ocrTextUtf8);
         for (const auto& obj : pg.objects) {
             if (!obj.textUtf8.empty()) indexString(p, obj.id, "textbox", obj.textUtf8);
+            if (!obj.printoutTextUtf8.empty()) indexString(p, obj.id, "printout", obj.printoutTextUtf8);
+            if (!obj.htrRecognizedTextUtf8.empty()) indexString(p, obj.id, "htr", obj.htrRecognizedTextUtf8);
             if (!obj.formulaExprUtf8.empty() || !obj.evaluatedResultUtf8.empty()) {
                 indexString(p, obj.id, "math", obj.formulaExprUtf8 + " = " + obj.evaluatedResultUtf8);
             }
@@ -510,6 +512,8 @@ void VaultFullTextIndex::IndexDocument(const std::string& docKeyUtf8, const Docu
 
     for (const auto& obj : doc.CanvasObjects()) {
         if (!obj.textUtf8.empty()) indexString(0, obj.id, "textbox", obj.textUtf8);
+        if (!obj.printoutTextUtf8.empty()) indexString(0, obj.id, "printout", obj.printoutTextUtf8);
+        if (!obj.htrRecognizedTextUtf8.empty()) indexString(0, obj.id, "htr", obj.htrRecognizedTextUtf8);
         if (!obj.formulaExprUtf8.empty() || !obj.evaluatedResultUtf8.empty()) {
             indexString(0, obj.id, "math", obj.formulaExprUtf8 + " = " + obj.evaluatedResultUtf8);
         }

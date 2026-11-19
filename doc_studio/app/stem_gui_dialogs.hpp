@@ -17,6 +17,7 @@
 #include "../core/utf_conv.hpp"
 #include "../core/zip_container.hpp"
 #include "../interop/notebook_migration_engine.hpp"
+#include "../interop/printout_engine.hpp"
 #include "../math/advanced_math_engine.hpp"
 #include "../math/cas_ai_pedagogy.hpp"
 #include "../math/engineering_cas.hpp"
@@ -434,6 +435,343 @@ inline bool RunNotebookMigrationDialog(
         std::to_string(migRes.report.editableStrokeCount) + " trazos editables, " +
         std::to_string(migRes.report.tableCount) + " tablas, " +
         std::to_string(migRes.report.mathBlockCount) + " ecuaciones).";
+    return true;
+}
+
+// Insert File Printout (PDF / Word .docx / PowerPoint .pptx) into Notebook Pages or Infinite Canvas
+// with synchronized Apple HIG Light/Dark/High-Contrast modal + PerMonitorV2 DPI scaling.
+inline bool RunInsertPrintoutDialog(
+    HWND owner,
+    DocumentModel& doc,
+    CommandStack& cmdStack,
+    std::size_t activePageIndex,
+    DocPoint canvasOrigin,
+    std::string& outStatus,
+    const std::wstring& presetFilePath = L"")
+{
+    std::wstring chosenPath = presetFilePath;
+    if (chosenPath.empty()) {
+        wchar_t fileBuf[MAX_PATH * 2]{};
+        OPENFILENAMEW ofn{};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = owner;
+        ofn.lpstrTitle = L"Insertar copia impresa (PDF / Word / PowerPoint)";
+        ofn.lpstrFilter =
+            L"Documentos compatibles (*.pdf;*.docx;*.pptx;*.doc;*.ppt)\0*.pdf;*.docx;*.pptx;*.doc;*.ppt\0"
+            L"Archivos PDF (*.pdf)\0*.pdf\0"
+            L"Microsoft Word (*.docx;*.doc)\0*.docx;*.doc\0"
+            L"Microsoft PowerPoint (*.pptx;*.ppt)\0*.pptx;*.ppt\0"
+            L"Todos (*.*)\0*.*\0\0";
+        ofn.lpstrFile = fileBuf;
+        ofn.nMaxFile = static_cast<DWORD>(std::size(fileBuf));
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+        if (!GetOpenFileNameW(&ofn)) return false;
+        chosenPath = fileBuf;
+    }
+
+    struct PrintoutDlgState {
+        Printout::Options opts{};
+        bool accepted = false;
+        bool done = false;
+        HFONT hFont = nullptr;
+        HFONT hBoldFont = nullptr;
+        HBRUSH hBgBrush = nullptr;
+        COLORREF bgCol = RGB(247, 249, 252);
+        COLORREF textCol = RGB(18, 24, 34);
+        HWND hTargetCombo = nullptr;
+        HWND hRangeEdit = nullptr;
+        HWND hLayoutCombo = nullptr;
+        HWND hQualityCombo = nullptr;
+        HWND hLockCheck = nullptr;
+        HWND hConvCombo = nullptr;
+    } st;
+
+    st.opts.target = (doc.Mode() == DocumentMode::InfiniteCanvas)
+        ? Printout::Target::InfiniteCanvas
+        : Printout::Target::NotebookPages;
+    st.opts.lockInPlace = true;
+    st.opts.rasterDpi = 192;
+
+    UiGlass::GlassSettings gs{};
+    UiGlass::LoadGlassSettings(gs);
+    const UiGlass::GlassPalette pal = UiGlass::GetPalette(gs);
+    const bool isDark = gs.IsDark();
+    st.bgCol = pal.sidebarBg.ToColorRef();
+    st.textCol = pal.labelPrimary.ToColorRef();
+    st.hBgBrush = CreateSolidBrush(st.bgCol);
+
+    static bool reg = false;
+    static const wchar_t* kCls = L"CuadernUInsertPrintoutModal";
+    if (!reg) {
+        WNDCLASSEXW wc{ sizeof(wc) };
+        wc.lpfnWndProc = [](HWND h, UINT m, WPARAM w, LPARAM l) -> LRESULT {
+            auto* s = reinterpret_cast<PrintoutDlgState*>(GetWindowLongPtrW(h, GWLP_USERDATA));
+            if (m == WM_NCCREATE) {
+                auto* cs = reinterpret_cast<CREATESTRUCTW*>(l);
+                SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+                return TRUE;
+            }
+            if (m == WM_CTLCOLORSTATIC || m == WM_CTLCOLORBTN) {
+                if (s && s->hBgBrush) {
+                    HDC hdc = reinterpret_cast<HDC>(w);
+                    SetTextColor(hdc, s->textCol);
+                    SetBkColor(hdc, s->bgCol);
+                    return reinterpret_cast<LRESULT>(s->hBgBrush);
+                }
+            }
+            if (m == WM_DPICHANGED) {
+                const RECT* prc = reinterpret_cast<const RECT*>(l);
+                if (prc) {
+                    SetWindowPos(h, nullptr, prc->left, prc->top,
+                        prc->right - prc->left, prc->bottom - prc->top,
+                        SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+                return 0;
+            }
+            if (m == WM_COMMAND) {
+                const WORD id = LOWORD(w);
+                if (id == IDOK && s) {
+                    if (s->hTargetCombo) {
+                        const LRESULT sel = SendMessageW(s->hTargetCombo, CB_GETCURSEL, 0, 0);
+                        s->opts.target = (sel == 1) ? Printout::Target::NotebookPages : Printout::Target::InfiniteCanvas;
+                    }
+                    if (s->hRangeEdit) {
+                        wchar_t rbuf[64]{};
+                        GetWindowTextW(s->hRangeEdit, rbuf, 64);
+                        std::string rs = WideToUtf8(rbuf);
+                        s->opts.firstPage1 = 1;
+                        s->opts.lastPage1 = 0;
+                        const auto dash = rs.find('-');
+                        if (dash != std::string::npos) {
+                            const int a = std::atoi(rs.substr(0, dash).c_str());
+                            const int b = std::atoi(rs.substr(dash + 1).c_str());
+                            if (a >= 1) s->opts.firstPage1 = a;
+                            if (b >= s->opts.firstPage1) s->opts.lastPage1 = b;
+                        } else if (!rs.empty() && std::isdigit(static_cast<unsigned char>(rs[0]))) {
+                            const int single = std::atoi(rs.c_str());
+                            if (single >= 1) {
+                                s->opts.firstPage1 = single;
+                                s->opts.lastPage1 = single;
+                            }
+                        }
+                    }
+                    if (s->hLayoutCombo) {
+                        const LRESULT sel = SendMessageW(s->hLayoutCombo, CB_GETCURSEL, 0, 0);
+                        s->opts.layout = (sel == 1) ? Printout::CanvasLayout::Grid : Printout::CanvasLayout::VerticalColumn;
+                        s->opts.gridColumns = 3;
+                    }
+                    if (s->hQualityCombo) {
+                        const LRESULT sel = SendMessageW(s->hQualityCombo, CB_GETCURSEL, 0, 0);
+                        s->opts.rasterDpi = (sel == 0) ? 144 : ((sel == 2) ? 288 : 192);
+                    }
+                    if (s->hLockCheck) {
+                        s->opts.lockInPlace = (SendMessageW(s->hLockCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                    }
+                    if (s->hConvCombo) {
+                        const LRESULT sel = SendMessageW(s->hConvCombo, CB_GETCURSEL, 0, 0);
+                        s->opts.converter = (sel == 1) ? Printout::ConverterChoice::MicrosoftOffice
+                                          : (sel == 2) ? Printout::ConverterChoice::LibreOffice
+                                          : (sel == 3) ? Printout::ConverterChoice::NativeEditable
+                                                       : Printout::ConverterChoice::Automatic;
+                    }
+                    s->accepted = true;
+                    s->done = true;
+                    DestroyWindow(h);
+                    return 0;
+                }
+                if (id == IDCANCEL && s) {
+                    s->accepted = false;
+                    s->done = true;
+                    DestroyWindow(h);
+                    return 0;
+                }
+            }
+            if (m == WM_CLOSE && s) {
+                s->done = true;
+                DestroyWindow(h);
+                return 0;
+            }
+            return DefWindowProcW(h, m, w, l);
+        };
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        wc.lpszClassName = kCls;
+        RegisterClassExW(&wc);
+        reg = true;
+    }
+
+    const UINT dpi = GetSafeWindowDpi(owner);
+    auto sc = [&](int v) { return MulDiv(v, static_cast<int>(dpi), 96); };
+
+    HWND hDlg = CreateWindowExW(
+        WS_EX_DLGMODALFRAME, kCls, L"Insertar copia impresa \u2014 CuadernU",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, sc(480), sc(350),
+        owner, nullptr, GetModuleHandleW(nullptr), &st);
+    if (!hDlg) {
+        if (st.hBgBrush) DeleteObject(st.hBgBrush);
+        return false;
+    }
+    UiGlass::ApplyGoldenGateWindowFrame(hDlg, isDark);
+
+    if (owner && IsWindow(owner)) {
+        RECT orc{}, drc{};
+        GetWindowRect(owner, &orc);
+        GetWindowRect(hDlg, &drc);
+        const int dw = drc.right - drc.left;
+        const int dh = drc.bottom - drc.top;
+        const int cx = orc.left + ((orc.right - orc.left) - dw) / 2;
+        const int cy = orc.top + ((orc.bottom - orc.top) - dh) / 2;
+        SetWindowPos(hDlg, nullptr, cx, cy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    st.hFont = CreateFontW(-sc(13), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    st.hBoldFont = CreateFontW(-sc(13), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+    auto makeLbl = [&](const wchar_t* txt, int x, int y, int w, int h, bool bold = false) {
+        HWND hl = CreateWindowExW(0, L"STATIC", txt, WS_CHILD | WS_VISIBLE,
+            sc(x), sc(y), sc(w), sc(h), hDlg, nullptr, GetModuleHandleW(nullptr), nullptr);
+        SendMessageW(hl, WM_SETFONT, reinterpret_cast<WPARAM>(bold ? st.hBoldFont : st.hFont), TRUE);
+        return hl;
+    };
+
+    const std::wstring fname = std::filesystem::path(chosenPath).filename().wstring();
+    makeLbl((L"Archivo: " + fname).c_str(), 18, 14, 430, 20, true);
+
+    makeLbl(L"Destino:", 18, 46, 150, 20);
+    st.hTargetCombo = CreateWindowExW(0, L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+        sc(175), sc(42), sc(270), sc(120), hDlg, nullptr, GetModuleHandleW(nullptr), nullptr);
+    SendMessageW(st.hTargetCombo, WM_SETFONT, reinterpret_cast<WPARAM>(st.hFont), TRUE);
+    SendMessageW(st.hTargetCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Pizarra / Lienzo Infinito"));
+    SendMessageW(st.hTargetCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"P\u00E1ginas nuevas en este Cuaderno"));
+    SendMessageW(st.hTargetCombo, CB_SETCURSEL, (st.opts.target == Printout::Target::NotebookPages) ? 1 : 0, 0);
+
+    makeLbl(L"P\u00E1ginas (vac\u00EDo = todas):", 18, 82, 155, 20);
+    st.hRangeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        sc(175), sc(78), sc(140), sc(24), hDlg, nullptr, GetModuleHandleW(nullptr), nullptr);
+    SendMessageW(st.hRangeEdit, WM_SETFONT, reinterpret_cast<WPARAM>(st.hFont), TRUE);
+    makeLbl(L"(ej. 1-200)", 322, 82, 120, 20);
+
+    makeLbl(L"Disposici\u00F3n en Lienzo:", 18, 118, 155, 20);
+    st.hLayoutCombo = CreateWindowExW(0, L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+        sc(175), sc(114), sc(270), sc(120), hDlg, nullptr, GetModuleHandleW(nullptr), nullptr);
+    SendMessageW(st.hLayoutCombo, WM_SETFONT, reinterpret_cast<WPARAM>(st.hFont), TRUE);
+    SendMessageW(st.hLayoutCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Columna vertical"));
+    SendMessageW(st.hLayoutCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Cuadr\u00EDcula (3 columnas)"));
+    SendMessageW(st.hLayoutCombo, CB_SETCURSEL, 0, 0);
+
+    makeLbl(L"Calidad de imagen:", 18, 154, 155, 20);
+    st.hQualityCombo = CreateWindowExW(0, L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+        sc(175), sc(150), sc(270), sc(120), hDlg, nullptr, GetModuleHandleW(nullptr), nullptr);
+    SendMessageW(st.hQualityCombo, WM_SETFONT, reinterpret_cast<WPARAM>(st.hFont), TRUE);
+    SendMessageW(st.hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Est\u00E1ndar (144 ppp)"));
+    SendMessageW(st.hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Alta (192 ppp \u2014 recomendado)"));
+    SendMessageW(st.hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"M\u00E1xima (288 ppp)"));
+    SendMessageW(st.hQualityCombo, CB_SETCURSEL, 1, 0);
+
+    st.hLockCheck = CreateWindowExW(0, L"BUTTON",
+        L"Fijar copia impresa al fondo (anotar encima sin moverla)",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        sc(18), sc(190), sc(425), sc(24), hDlg, nullptr, GetModuleHandleW(nullptr), nullptr);
+    SendMessageW(st.hLockCheck, WM_SETFONT, reinterpret_cast<WPARAM>(st.hFont), TRUE);
+    SendMessageW(st.hLockCheck, BM_SETCHECK, BST_CHECKED, 0);
+
+    makeLbl(L"Conversi\u00F3n Office:", 18, 226, 155, 20);
+    st.hConvCombo = CreateWindowExW(0, L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+        sc(175), sc(222), sc(270), sc(140), hDlg, nullptr, GetModuleHandleW(nullptr), nullptr);
+    SendMessageW(st.hConvCombo, WM_SETFONT, reinterpret_cast<WPARAM>(st.hFont), TRUE);
+    SendMessageW(st.hConvCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Autom\u00E1tica (Office -> LibreOffice -> Nativo)"));
+    SendMessageW(st.hConvCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Microsoft Office (Word / PowerPoint)"));
+    SendMessageW(st.hConvCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"LibreOffice (headless)"));
+    SendMessageW(st.hConvCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Motor nativo editable (vista aproximada)"));
+    SendMessageW(st.hConvCombo, CB_SETCURSEL, 0, 0);
+
+    HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Cancelar",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        sc(235), sc(268), sc(100), sc(32), hDlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)),
+        GetModuleHandleW(nullptr), nullptr);
+    SendMessageW(hCancel, WM_SETFONT, reinterpret_cast<WPARAM>(st.hFont), TRUE);
+
+    HWND hOk = CreateWindowExW(0, L"BUTTON", L"Insertar",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        sc(345), sc(268), sc(100), sc(32), hDlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)),
+        GetModuleHandleW(nullptr), nullptr);
+    SendMessageW(hOk, WM_SETFONT, reinterpret_cast<WPARAM>(st.hBoldFont), TRUE);
+
+    if (owner && IsWindow(owner)) EnableWindow(owner, FALSE);
+    ShowWindow(hDlg, SW_SHOW);
+    UpdateWindow(hDlg);
+
+    bool hadQuit = false;
+    int quitCode = 0;
+    MSG msg{};
+    while (!st.done && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (msg.message == WM_KEYDOWN && IsWindow(hDlg)) {
+            if (msg.wParam == VK_ESCAPE) {
+                SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
+                continue;
+            }
+            if (msg.wParam == VK_RETURN) {
+                SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), 0);
+                continue;
+            }
+        }
+        if (!IsDialogMessageW(hDlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    if (msg.message == WM_QUIT) {
+        hadQuit = true;
+        quitCode = static_cast<int>(msg.wParam);
+    }
+    if (owner && IsWindow(owner)) {
+        EnableWindow(owner, TRUE);
+        SetForegroundWindow(owner);
+    }
+    if (IsWindow(hDlg)) DestroyWindow(hDlg);
+    if (st.hFont) DeleteObject(st.hFont);
+    if (st.hBoldFont) DeleteObject(st.hBoldFont);
+    if (st.hBgBrush) DeleteObject(st.hBgBrush);
+    if (hadQuit) PostQuitMessage(quitCode);
+
+    if (!st.accepted) {
+        outStatus = "Inserci\xC3\xB3n de copia impresa cancelada.";
+        return false;
+    }
+
+    HCURSOR hOldCur = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    Printout::Report rep{};
+    const bool ok = Printout::InsertPrintoutFromFile(
+        doc, cmdStack, chosenPath, st.opts, activePageIndex, canvasOrigin, rep);
+    SetCursor(hOldCur);
+
+    if (!ok) {
+        ShowReportDialog(owner, L"Error al insertar copia impresa", Utf8ToWide(rep.errorUtf8));
+        outStatus = "Error copia impresa: " + rep.errorUtf8;
+        return false;
+    }
+
+    outStatus = std::to_string(rep.pagesInserted) + " p\xC3\xA1gina(s) insertadas (" +
+                rep.converterUsedUtf8 + ", " +
+                std::to_string(rep.pagesWithText) + " con texto buscable";
+    if (rep.pagesWithOcr > 0) {
+        outStatus += ", " + std::to_string(rep.pagesWithOcr) + " v\xC3\xAD" "a OCR";
+    }
+    outStatus += ")";
+    if (!rep.visualFidelityExact) {
+        outStatus += " \xC2\xB7 Vista aproximada: no se encontr\xC3\xB3 Office";
+    }
     return true;
 }
 

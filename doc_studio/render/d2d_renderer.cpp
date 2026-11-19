@@ -947,23 +947,46 @@ struct D2DRenderer::Impl {
             }
         } else if (obj.kind == ObjectKind::PdfCard) {
             const D2D1_RECT_F sr = rectToScreen(obj.bounds);
-            brush->SetColor(ToD2DColor(DocColor::RGBA(255, 255, 255, 255)));
+            const bool isDarkCard = (overlay && overlay->darkTheme);
+            const bool isHcCard = (overlay && overlay->highContrast);
+            // Subtle Apple HIG sheet elevation shadow
+            brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(
+                isDarkCard ? DocColor::RGBA(0, 0, 0, 76) : DocColor::RGBA(15, 23, 42, 24), layerOpacity)));
+            rt->FillRoundedRectangle(D2D1::RoundedRect(
+                D2D1::RectF(sr.left + 1.0f, sr.top + 2.5f, sr.right + 1.5f, sr.bottom + 3.0f), 3.0f, 3.0f), brush);
+
+            brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(DocColor::RGBA(255, 255, 255, 255), layerOpacity)));
             rt->FillRectangle(sr, brush);
             const std::vector<std::uint8_t>* bytesPtr = !obj.pngBytes.empty() ? &obj.pngBytes : doc.FindAsset(obj.assetKey);
             if (bytesPtr && !bytesPtr->empty()) {
                 const std::string tag = !obj.assetKey.empty() ? obj.assetKey : ("pdfcard_" + std::to_string(obj.id));
                 if (ComPtr<ID2D1Bitmap> bmp = AcquireGpuBitmapForEncodedAsset(rt, tag, *bytesPtr, cacheGpuAssets)) {
-                    rt->DrawBitmap(bmp.Get(), sr);
+                    rt->DrawBitmap(bmp.Get(), sr, static_cast<FLOAT>(layerOpacity));
                 }
             }
-            brush->SetColor(ToD2DColor(DocColor::RGBA(59, 130, 246, 255)));
-            rt->DrawRectangle(sr, brush, 1.5f);
-            if (!bytesPtr && dwFactory) {
+            // Neutral 1px paper border (high-contrast aware)
+            brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(
+                isHcCard ? DocColor::RGBA(25, 32, 44, 235) : DocColor::RGBA(198, 208, 222, 185), layerOpacity)));
+            rt->DrawRectangle(sr, brush, isHcCard ? 1.35f : 1.0f);
+
+            // Vector padlock indicator in top-right corner when pinned and selected
+            if (isSelected && obj.lockedInPlace) {
+                const float bx = sr.right - 22.0f;
+                const float by = sr.top + 6.0f;
+                brush->SetColor(ToD2DColor(DocColor::RGBA(15, 23, 42, 185)));
+                rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx, by, bx + 16.0f, by + 16.0f), 4.0f, 4.0f), brush);
+                brush->SetColor(ToD2DColor(DocColor::RGBA(255, 255, 255, 245)));
+                rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx + 4.0f, by + 7.5f, bx + 12.0f, by + 13.5f), 1.5f, 1.5f), brush);
+                rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(bx + 8.0f, by + 6.5f), 2.6f, 2.8f), brush, 1.3f);
+            }
+            if ((!bytesPtr || bytesPtr->empty()) && dwFactory) {
                 ComPtr<IDWriteTextFormat> fmt;
                 if (SUCCEEDED(dwFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, (std::max)(8.0f, static_cast<float>(12.0 * cam.zoom)), L"es-ES", &fmt)) && fmt) {
                     brush->SetColor(ToD2DColor(DocColor::RGBA(30, 41, 59, 255)));
-                    const std::wstring title = L"PDF p." + std::to_wstring(obj.pdfSourcePageIndex0 + 1) + L"\n" + Utf8ToWide(obj.captionUtf8);
+                    const std::wstring title = Utf8ToWide(obj.captionUtf8.empty()
+                        ? ("P\xC3\xA1g. " + std::to_string(obj.pdfSourcePageIndex0 + 1))
+                        : obj.captionUtf8);
                     rt->DrawTextW(title.c_str(), static_cast<UINT32>(title.size()), fmt.Get(),
                         D2D1::RectF(sr.left + 8.0f, sr.top + 8.0f, sr.right - 8.0f, sr.bottom - 8.0f), brush);
                 }
@@ -1190,7 +1213,7 @@ struct D2DRenderer::Impl {
             rt->SetTransform(savedTransform);
         }
 
-        if (isSelected) {
+        if (isSelected && !obj.lockedInPlace) {
             const D2D1_RECT_F sr = rectToScreen(obj.bounds);
             brush->SetColor(ToD2DColor(DocColor::RGBA(0, 122, 255, 255)));
             rt->DrawRectangle(D2D1::RectF(sr.left - 3.0f, sr.top - 3.0f, sr.right + 3.0f, sr.bottom + 3.0f),
@@ -1262,6 +1285,7 @@ struct D2DRenderer::Impl {
                 if (const auto* o = doc.FindCanvasObject(id)) drawList.push_back(o);
             }
             std::sort(drawList.begin(), drawList.end(), [](const AnnotationObject* a, const AnnotationObject* b) {
+                if (a->lockedInPlace != b->lockedInPlace) return a->lockedInPlace;
                 return a->zOrder < b->zOrder;
             });
 
@@ -1271,6 +1295,22 @@ struct D2DRenderer::Impl {
             }
             if (overlay && overlay->draftObject) {
                 DrawAnnotationObject(rt, brush.Get(), doc, *overlay->draftObject, cam, 0.0, 0.0, false, !synchronousOffscreen, overlay);
+            }
+            // Search match highlights on Infinite Canvas (including inside pinned PdfCard printouts)
+            if (overlay && overlay->searchMatches) {
+                for (std::size_t mi = 0; mi < overlay->searchMatches->size(); ++mi) {
+                    const auto& m = (*overlay->searchMatches)[mi];
+                    if (!m.onCanvas || !m.hasBox || m.worldBox.Empty()) continue;
+                    const bool isActive = (mi == overlay->activeSearchMatchIndex);
+                    const D2D1_RECT_F sr = ToD2DRect(cam.WorldRectToScreen(m.worldBox));
+                    const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(sr, 3.0f, 3.0f);
+                    brush->SetColor(ToD2DColor(isActive ? DocColor::RGBA(251, 146, 60, 125) : DocColor::RGBA(250, 204, 21, 95)));
+                    rt->FillRoundedRectangle(rr, brush.Get());
+                    if (isActive) {
+                        brush->SetColor(ToD2DColor(DocColor::RGBA(234, 88, 12, 235)));
+                        rt->DrawRoundedRectangle(rr, brush.Get(), 1.6f);
+                    }
+                }
             }
             if (overlay && overlay->laserPointer.active) {
                 const auto& lp = overlay->laserPointer;
@@ -1429,7 +1469,7 @@ struct D2DRenderer::Impl {
             if (overlay && overlay->searchMatches) {
                 for (std::size_t mi = 0; mi < overlay->searchMatches->size(); ++mi) {
                     const auto& m = (*overlay->searchMatches)[mi];
-                    if (m.pageIndex != p) continue;
+                    if (m.onCanvas || m.pageIndex != p) continue;
                     const bool isActive = (mi == overlay->activeSearchMatchIndex);
                     brush->SetColor(ToD2DColor(isActive ? DocColor::RGBA(251, 146, 60, 120) : DocColor::RGBA(250, 204, 21, 90)));
                     if (m.hasBox) {

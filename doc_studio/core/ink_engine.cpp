@@ -433,7 +433,7 @@ std::vector<std::uint64_t> FindObjectsForScribbleErase(
     if (!objs) return ids;
     for (const auto& obj : *objs) {
         if (skipLockedOrHiddenLayers) {
-            if (!doc.IsLayerVisible(obj.layerId) || doc.IsLayerLocked(obj.layerId)) continue;
+            if (obj.lockedInPlace || !doc.IsLayerVisible(obj.layerId) || doc.IsLayerLocked(obj.layerId)) continue;
         }
         if (ObjectIntersectsTrace(obj, scribble, false)) {
             ids.push_back(obj.id);
@@ -453,7 +453,7 @@ std::vector<std::uint64_t> SelectObjectsInsideLasso(
     if (!objs) return ids;
     for (const auto& obj : *objs) {
         if (skipLockedOrHiddenLayers) {
-            if (!doc.IsLayerVisible(obj.layerId) || doc.IsLayerLocked(obj.layerId)) continue;
+            if (obj.lockedInPlace || !doc.IsLayerVisible(obj.layerId) || doc.IsLayerLocked(obj.layerId)) continue;
         }
         if (ObjectIntersectsTrace(obj, lassoLoop, true)) {
             ids.push_back(obj.id);
