@@ -35,6 +35,8 @@ struct Options {
     int lastPage1 = 0; // 0 = all pages up to the end (no 6-page cap)
     CanvasLayout layout = CanvasLayout::VerticalColumn;
     int gridColumns = 3;
+    double pageGapPt = 32.0; // Custom vertical spacing between sheets on Infinite Canvas (pt)
+    double colGapPt = 36.0;  // Custom horizontal spacing between grid columns on Infinite Canvas (pt)
     int rasterDpi = 192; // 144 (Standard), 192 (High), 288 (Max)
     bool lockInPlace = true;
     bool ocrWhenNoText = true;

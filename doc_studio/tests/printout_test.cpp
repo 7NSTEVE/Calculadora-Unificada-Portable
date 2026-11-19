@@ -66,8 +66,8 @@ int main(int argc, char** argv) {
         !std::filesystem::exists(pptxPath, ec)) {
         const std::filesystem::path scriptPath =
             std::filesystem::path(__FILE__).parent_path() / L"fixtures" / L"make_printout_fixtures.py";
-        std::wstring cmd = L"\"D:\\DevTools\\Python311\\python.exe\" \"" +
-                           scriptPath.wstring() + L"\" --out \"" + fixDir.wstring() + L"\"";
+        std::wstring cmd = L"\"\"D:\\DevTools\\Python311\\python.exe\" \"" +
+                           scriptPath.wstring() + L"\" --out \"" + fixDir.wstring() + L"\"\"";
         const int pyRc = _wsystem(cmd.c_str());
         EXPECT(pyRc == 0);
     }
@@ -111,8 +111,10 @@ int main(int argc, char** argv) {
     for (const auto& obj : canvasDoc.CanvasObjects()) {
         EXPECT(obj.kind == ObjectKind::PdfCard);
         EXPECT(obj.lockedInPlace);
-        EXPECT(!obj.assetKey.empty());
-        EXPECT(canvasDoc.FindAsset(obj.assetKey) != nullptr);
+        EXPECT(!obj.pdfSourcePathUtf8.empty() || !obj.pdfSourceAssetKey.empty() || !obj.assetKey.empty());
+        if (!obj.pdfSourceAssetKey.empty()) {
+            EXPECT(canvasDoc.FindAsset(obj.pdfSourceAssetKey) != nullptr);
+        }
     }
     std::cout << "[INFO] 200-page PDF printout inserted in " << elapsed200Ms << " ms ("
               << rep200.pagesWithText << " pages with text, "
@@ -428,6 +430,105 @@ int main(int argc, char** argv) {
             EXPECT(!legOut.CanvasObjects()[0].lockedInPlace);
             EXPECT(legOut.CanvasObjects()[0].printoutTextUtf8.empty());
         }
+    }
+
+    // =========================================================================
+    // Test 16: 1,600-page full-book Infinite Canvas scalability, Quadtree > 1e6 pt & search
+    // =========================================================================
+    {
+        DocumentModel book1600Doc;
+        book1600Doc.ResetToBlank(DocumentMode::InfiniteCanvas);
+        CommandStack book1600Stack;
+        Printout::Options bOpts = opts200;
+        bOpts.ocrWhenNoText = false; // Pure vector text extraction speed for 1,600 pages
+
+        const auto tStart1600 = std::chrono::steady_clock::now();
+        double nextY = 60.0;
+        for (int batch = 0; batch < 8; ++batch) {
+            Printout::Report bRep{};
+            EXPECT(Printout::InsertPrintoutFromFile(
+                book1600Doc, book1600Stack, pdf200Path.wstring(), bOpts, 0, { 60.0, nextY }, bRep));
+            EXPECT(bRep.pagesInserted == 200);
+            if (!book1600Doc.CanvasObjects().empty()) {
+                nextY = book1600Doc.CanvasObjects().back().bounds.Bottom() + 32.0;
+            }
+        }
+        const auto insert1600Ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - tStart1600).count();
+
+        EXPECT(book1600Doc.CanvasObjects().size() == 1600);
+        const auto& lastCard = book1600Doc.CanvasObjects().back();
+        EXPECT(lastCard.bounds.y > 1100000.0); // Exceeds old 1e6 Quadtree boundary
+
+        // Verify Quadtree spatial query at page 1,600 (y > 1,100,000 pt)
+        const auto visAt1600 = book1600Doc.QueryCanvasRect(lastCard.bounds);
+        bool foundLastInQuadtree = false;
+        for (std::uint64_t vid : visAt1600) {
+            if (vid == lastCard.id) { foundLastInQuadtree = true; break; }
+        }
+        EXPECT(foundLastInQuadtree);
+
+        const auto tSearch0 = std::chrono::steady_clock::now();
+        const auto hits1600 = book1600Doc.SearchText("Clave-200", false, true);
+        const auto search1600Ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - tSearch0).count();
+
+        EXPECT(hits1600.size() == 8);
+        if (!hits1600.empty()) {
+            EXPECT(hits1600.back().objectId == lastCard.id);
+            EXPECT(hits1600.back().worldBox.y > 1100000.0);
+        }
+        std::cout << "[INFO] 1,600-page Infinite Canvas printout inserted in " << insert1600Ms
+                  << " ms; search across 1,600 sheets completed in " << search1600Ms << " ms." << std::endl;
+    }
+
+    // =========================================================================
+    // Test 17: Multi-format Canvas Printout (PDF + DOCX + PPTX + Excel CSV)
+    // on the SAME Infinite Canvas with custom pageGapPt = 140.0 pt
+    // =========================================================================
+    {
+        const std::filesystem::path csvPath = fixDir / L"fixture_excel.csv";
+        {
+            std::ofstream ofs(csvPath, std::ios::binary | std::ios::trunc);
+            ofs << "Experimento,Frecuencia_Hz,Amplitud_V,Comentario\r\n"
+                << "EXP-EXCEL-01,60.0,120.5,ResonanciaFourier\r\n"
+                << "EXP-EXCEL-02,120.0,240.0,ArmonicoSegundo\r\n";
+        }
+        DocumentModel multiDoc;
+        multiDoc.ResetToBlank(DocumentMode::InfiniteCanvas);
+        CommandStack multiStack;
+
+        Printout::Options mOpts{};
+        mOpts.target = Printout::Target::InfiniteCanvas;
+        mOpts.layout = Printout::CanvasLayout::VerticalColumn;
+        mOpts.firstPage1 = 1;
+        mOpts.lastPage1 = 3;
+        mOpts.pageGapPt = 140.0; // Custom 140 pt spacing between sheets!
+        mOpts.colGapPt = 80.0;
+        mOpts.lockInPlace = true;
+        mOpts.ocrWhenNoText = false;
+
+        Printout::Report rPdf{}, rDocx{}, rPptx{}, rExcel{};
+        EXPECT(Printout::InsertPrintoutFromFile(multiDoc, multiStack, pdf200Path.wstring(), mOpts, 0, { 60.0, 60.0 }, rPdf));
+        EXPECT(rPdf.pagesInserted == 3);
+        // Verify custom 140 pt vertical gap between page 1 and page 2
+        if (multiDoc.CanvasObjects().size() >= 2) {
+            const double actualGap = multiDoc.CanvasObjects()[1].bounds.y - multiDoc.CanvasObjects()[0].bounds.Bottom();
+            EXPECT(std::abs(actualGap - 140.0) < 0.5);
+        }
+
+        mOpts.firstPage1 = 1;
+        mOpts.lastPage1 = 0; // All pages
+        EXPECT(Printout::InsertPrintoutFromFile(multiDoc, multiStack, docxPath.wstring(), mOpts, 0, { 680.0, 60.0 }, rDocx));
+        EXPECT(Printout::InsertPrintoutFromFile(multiDoc, multiStack, pptxPath.wstring(), mOpts, 0, { 1300.0, 60.0 }, rPptx));
+        EXPECT(Printout::InsertPrintoutFromFile(multiDoc, multiStack, csvPath.wstring(),  mOpts, 0, { 2020.0, 60.0 }, rExcel));
+        EXPECT(rExcel.pagesInserted >= 1);
+
+        // Search across all 4 formats on the SAME Infinite Canvas
+        EXPECT(!multiDoc.SearchText("Clave-002", false, true).empty());              // From PDF
+        EXPECT(!multiDoc.SearchText("Celda_Fourier_42", false, true).empty());       // From Word DOCX
+        EXPECT(!multiDoc.SearchText("Diapositiva_Maxwell_04", false, true).empty()); // From PowerPoint PPTX
+        EXPECT(!multiDoc.SearchText("ResonanciaFourier", false, true).empty());      // From Excel/CSV
     }
 
     std::cout << "PrintoutTest: " << gPassed << " passed, " << gFailed << " failed." << std::endl;

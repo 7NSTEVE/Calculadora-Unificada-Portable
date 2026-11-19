@@ -64,20 +64,24 @@ std::uint64_t HashBytesFnv1a64(const std::vector<std::uint8_t>& bytes) noexcept 
 // Materializes embedded PDF asset bytes (from migrated .goodnotes / .note / portable .cudoc)
 // into a deterministic %TEMP%\CuadernU\pdf_cache\<key>.pdf file so WinRT PDF rendering works
 // even when sourcePdfPathUtf8 is empty or originated on another device.
-std::string ResolvePdfSourcePathForRender(const DocumentModel& doc, const PageModel& pg) {
-    if (!pg.sourcePdfPathUtf8.empty()) {
+std::string ResolvePdfSourcePathForRender(
+    const DocumentModel& doc,
+    const std::string& sourcePdfPathUtf8,
+    const std::string& sourcePdfAssetKey)
+{
+    if (!sourcePdfPathUtf8.empty()) {
         std::error_code ec;
-        if (std::filesystem::exists(std::filesystem::path(Utf8ToWide(pg.sourcePdfPathUtf8)), ec)) {
-            return pg.sourcePdfPathUtf8;
+        if (std::filesystem::exists(std::filesystem::path(Utf8ToWide(sourcePdfPathUtf8)), ec)) {
+            return sourcePdfPathUtf8;
         }
     }
-    if (pg.sourcePdfAssetKey.empty()) return pg.sourcePdfPathUtf8;
-    const auto* bytes = doc.FindAsset(pg.sourcePdfAssetKey);
-    if (!bytes || bytes->empty()) return pg.sourcePdfPathUtf8;
+    if (sourcePdfAssetKey.empty()) return sourcePdfPathUtf8;
+    const auto* bytes = doc.FindAsset(sourcePdfAssetKey);
+    if (!bytes || bytes->empty()) return sourcePdfPathUtf8;
 
     static std::mutex sCacheMtx;
     static std::unordered_map<std::string, std::string> sMaterialized;
-    const std::string cacheKey = pg.sourcePdfAssetKey + "#" + std::to_string(bytes->size()) + "#" + std::to_string(HashBytesFnv1a64(*bytes));
+    const std::string cacheKey = sourcePdfAssetKey + "#" + std::to_string(bytes->size()) + "#" + std::to_string(HashBytesFnv1a64(*bytes));
     {
         std::lock_guard<std::mutex> lk(sCacheMtx);
         auto it = sMaterialized.find(cacheKey);
@@ -111,6 +115,10 @@ std::string ResolvePdfSourcePathForRender(const DocumentModel& doc, const PageMo
         sMaterialized[cacheKey] = utf8Out;
     }
     return utf8Out;
+}
+
+std::string ResolvePdfSourcePathForRender(const DocumentModel& doc, const PageModel& pg) {
+    return ResolvePdfSourcePathForRender(doc, pg.sourcePdfPathUtf8, pg.sourcePdfAssetKey);
 }
 
 class D2DMathBackend final : public MathTypeset::IMathDrawBackend {
@@ -436,6 +444,11 @@ struct D2DRenderer::Impl {
         ComPtr<ID2D1Bitmap> bmp;
     };
     std::vector<CachedGpuAsset> assetGpuBitmaps;
+
+    PageRenderCache* activePageCache = nullptr;
+    std::uint64_t activeAsyncGen = 0;
+    std::function<void()> activeOnAsyncReady;
+    bool activeSyncOffscreen = false;
 
     bool factoriesReady = false;
     bool didCoInit = false;
@@ -957,11 +970,60 @@ struct D2DRenderer::Impl {
 
             brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(DocColor::RGBA(255, 255, 255, 255), layerOpacity)));
             rt->FillRectangle(sr, brush);
+            bool drewCardRaster = false;
             const std::vector<std::uint8_t>* bytesPtr = !obj.pngBytes.empty() ? &obj.pngBytes : doc.FindAsset(obj.assetKey);
             if (bytesPtr && !bytesPtr->empty()) {
                 const std::string tag = !obj.assetKey.empty() ? obj.assetKey : ("pdfcard_" + std::to_string(obj.id));
                 if (ComPtr<ID2D1Bitmap> bmp = AcquireGpuBitmapForEncodedAsset(rt, tag, *bytesPtr, cacheGpuAssets)) {
                     rt->DrawBitmap(bmp.Get(), sr, static_cast<FLOAT>(layerOpacity));
+                    drewCardRaster = true;
+                }
+            } else if (!obj.pdfSourcePathUtf8.empty() || !obj.pdfSourceAssetKey.empty()) {
+                const std::string resolvedPdfPath = ResolvePdfSourcePathForRender(doc, obj.pdfSourcePathUtf8, obj.pdfSourceAssetKey);
+                if (!resolvedPdfPath.empty()) {
+                    const int targetW = static_cast<int>(std::lround((std::max)(80.0, static_cast<double>(sr.right - sr.left))));
+                    PageCacheKey key{};
+                    key.pageId = 0x8000000000000000ull | obj.id;
+                    key.sourcePdfPath = resolvedPdfPath;
+                    key.sourcePageIndex0 = obj.pdfSourcePageIndex0;
+                    key.widthBucketPx = QuantizeBucketPx(targetW);
+                    key.rotationDeg = 0;
+                    key.cropL = static_cast<int>(std::lround(obj.imageCrop.left * 1000.0));
+                    key.cropT = static_cast<int>(std::lround(obj.imageCrop.top * 1000.0));
+                    key.cropR = static_cast<int>(std::lround(obj.imageCrop.right * 1000.0));
+                    key.cropB = static_cast<int>(std::lround(obj.imageCrop.bottom * 1000.0));
+
+                    RasterImageBgra32 img;
+                    bool haveRaster = activePageCache && activePageCache->TryGet(key, img);
+                    if (!haveRaster && activeSyncOffscreen) {
+                        NormalizedCropRect c = obj.imageCrop;
+                        c.Clamp();
+                        haveRaster = WinRtPdfRenderer::RenderPageToBgra32(
+                            Utf8ToWide(resolvedPdfPath), obj.pdfSourcePageIndex0,
+                            key.widthBucketPx, key.rotationDeg, c, img);
+                        if (haveRaster && activePageCache) activePageCache->PutDirect(key, img);
+                    }
+                    if (haveRaster && img.Valid()) {
+                        ComPtr<ID2D1Bitmap> gpuBmp;
+                        if (!activeSyncOffscreen) {
+                            for (const auto& entry : pageGpuBitmaps) {
+                                if (entry.key == key) { gpuBmp = entry.bmp; break; }
+                            }
+                        }
+                        if (!gpuBmp) {
+                            gpuBmp.Attach(UploadBgra32(rt, img));
+                            if (gpuBmp && !activeSyncOffscreen) {
+                                if (pageGpuBitmaps.size() > 64) pageGpuBitmaps.erase(pageGpuBitmaps.begin());
+                                pageGpuBitmaps.push_back({ key, gpuBmp });
+                            }
+                        }
+                        if (gpuBmp) {
+                            rt->DrawBitmap(gpuBmp.Get(), sr, static_cast<FLOAT>(layerOpacity));
+                            drewCardRaster = true;
+                        }
+                    } else if (activePageCache && !activeSyncOffscreen) {
+                        activePageCache->RequestAsync(key, activeAsyncGen, activeOnAsyncReady);
+                    }
                 }
             }
             // Neutral 1px paper border (high-contrast aware)
@@ -979,7 +1041,7 @@ struct D2DRenderer::Impl {
                 rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx + 4.0f, by + 7.5f, bx + 12.0f, by + 13.5f), 1.5f, 1.5f), brush);
                 rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(bx + 8.0f, by + 6.5f), 2.6f, 2.8f), brush, 1.3f);
             }
-            if ((!bytesPtr || bytesPtr->empty()) && dwFactory) {
+            if (!drewCardRaster && dwFactory) {
                 ComPtr<IDWriteTextFormat> fmt;
                 if (SUCCEEDED(dwFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, (std::max)(8.0f, static_cast<float>(12.0 * cam.zoom)), L"es-ES", &fmt)) && fmt) {
@@ -1260,6 +1322,11 @@ struct D2DRenderer::Impl {
     {
         if (!rt) return;
         EnsureStrokeStyles();
+
+        activePageCache = pageCache;
+        activeAsyncGen = asyncGen;
+        activeOnAsyncReady = onAsyncPageReady;
+        activeSyncOffscreen = synchronousOffscreen;
 
         ComPtr<ID2D1SolidColorBrush> brush;
         if (FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 1), &brush)) || !brush) return;

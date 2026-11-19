@@ -279,6 +279,11 @@ enum CmdId : WORD {
     CMD_INSERT_PRINTOUT,
     CMD_TOGGLE_LOCK_IN_PLACE,
     CMD_SEARCH_IN_THIS_SHEET,
+    CMD_CLIPBOARD_COPY,
+    CMD_CLIPBOARD_CUT,
+    CMD_ADJUST_SHEET_SPACING,
+    CMD_INSERT_VERTICAL_SPACE,
+    CMD_EDIT_SHEET_CONTENT,
     CMD_INLINE_EDIT_CTRL = 2599
 };
 
@@ -352,6 +357,9 @@ struct StudioAppState {
     PageRenderCache pageCache{ 256ull * 1024ull * 1024ull };
     D2DRenderer renderer;
     std::uint64_t asyncGen = 1;
+    std::vector<AnnotationObject> objectClipboard;
+    DocPoint lastContextWorldPt{ 80.0, 80.0 };
+    bool hasLastContextWorldPt = false;
 
     std::wstring currentDocPath;
     std::string activePdfSourcePathUtf8;
@@ -3131,9 +3139,31 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
     case CMD_INSERT_PRINTOUT:
     case CMD_IMPORT_PDF_TO_CANVAS: {
         double cx = 60.0, cy = 60.0;
-        for (const auto& o : st->doc.CanvasObjects()) {
-            if (o.kind == ObjectKind::PdfCard) {
-                cy = (std::max)(cy, o.bounds.Bottom() + 36.0);
+        if (st->hasLastContextWorldPt && st->doc.Mode() == DocumentMode::InfiniteCanvas) {
+            cx = st->lastContextWorldPt.x;
+            cy = st->lastContextWorldPt.y;
+            st->hasLastContextWorldPt = false;
+            // Avoid overlapping an existing column directly if user right-clicked on top of an existing sheet
+            for (const auto& o : st->doc.CanvasObjects()) {
+                if (o.kind == ObjectKind::PdfCard && o.bounds.Contains(cx, cy, 4.0)) {
+                    cx = o.bounds.Right() + 48.0;
+                    cy = o.bounds.y;
+                    break;
+                }
+            }
+        } else {
+            double maxRight = 0.0;
+            bool anyCards = false;
+            for (const auto& o : st->doc.CanvasObjects()) {
+                if (o.kind == ObjectKind::PdfCard) {
+                    maxRight = (std::max)(maxRight, o.bounds.Right());
+                    anyCards = true;
+                }
+            }
+            if (anyCards) {
+                // Place new document in the next column to the right at the current camera Y
+                cx = maxRight + 64.0;
+                cy = (std::max)(60.0, st->camera.panY + 40.0);
             }
         }
         if (GuiDialogs::RunInsertPrintoutDialog(
@@ -3147,19 +3177,205 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         break;
     }
     case CMD_TOGGLE_LOCK_IN_PLACE: {
-        if (st->selectedObjectId != 0) {
+        std::vector<std::uint64_t> ids = st->lassoSelectedIds;
+        if (ids.empty() && st->selectedObjectId != 0) ids.push_back(st->selectedObjectId);
+        if (!ids.empty()) {
             const ObjectTarget tgt{ st->selectedIsCanvas, st->selectedPageIndex };
-            if (const auto* cur = CanvasManip::FindObjectConst(st->doc, tgt, st->selectedObjectId)) {
-                AnnotationObject before = *cur;
-                AnnotationObject after = before;
-                after.lockedInPlace = !before.lockedInPlace;
-                if (st->cmdStack.Execute(st->doc, std::make_unique<ModifyObjectCommand>(tgt, std::move(before), std::move(after)))) {
-                    st->statusBannerUtf8 = after.lockedInPlace
-                        ? "Copia impresa fijada al fondo"
-                        : "Copia impresa desfijada";
-                    AppendWalMutation(st, "lock_in_place");
+            std::vector<AnnotationObject> beforeVec, afterVec;
+            bool newLockState = false;
+            for (std::uint64_t oid : ids) {
+                if (const auto* cur = CanvasManip::FindObjectConst(st->doc, tgt, oid)) {
+                    beforeVec.push_back(*cur);
+                    AnnotationObject after = *cur;
+                    after.lockedInPlace = !cur->lockedInPlace;
+                    newLockState = after.lockedInPlace;
+                    afterVec.push_back(std::move(after));
                 }
             }
+            if (!beforeVec.empty() &&
+                st->cmdStack.Execute(st->doc, std::make_unique<BatchModifyObjectsCommand>(
+                    tgt, std::move(beforeVec), std::move(afterVec), "Fijar/Desfijar copia impresa"))) {
+                st->statusBannerUtf8 = newLockState
+                    ? "Copia impresa fijada al fondo"
+                    : "Copia impresa desfijada (lista para seleccionar, arrastrar, mover o editar)";
+                AppendWalMutation(st, "lock_in_place");
+            }
+        }
+        break;
+    }
+    case CMD_ADJUST_SHEET_SPACING: {
+        std::wstring vGapW = L"96";
+        std::wstring hGapW = L"48";
+        if (!ShowTextPrompt(st->hwndMain, L"Espacio personalizado entre hojas",
+                L"Espacio vertical entre hoja y hoja (pt):", vGapW,
+                L"Espacio horizontal entre columnas (pt):", &hGapW)) {
+            break;
+        }
+        const double rowGap = std::clamp(_wtof(vGapW.c_str()), 0.0, 4000.0);
+        const double colGap = std::clamp(_wtof(hGapW.c_str()), 0.0, 4000.0);
+
+        // Collect target PdfCard sheets (if a specific document's card is selected, re-space that document's cards; otherwise all PdfCards)
+        std::string filterSource;
+        if (st->selectedObjectId != 0) {
+            if (const auto* sel = st->doc.FindCanvasObject(st->selectedObjectId)) {
+                if (sel->kind == ObjectKind::PdfCard && !sel->printoutSourceNameUtf8.empty()) {
+                    filterSource = sel->printoutSourceNameUtf8;
+                }
+            }
+        }
+        std::vector<const AnnotationObject*> cards;
+        for (const auto& o : st->doc.CanvasObjects()) {
+            if (o.kind == ObjectKind::PdfCard) {
+                if (filterSource.empty() || o.printoutSourceNameUtf8 == filterSource) {
+                    cards.push_back(&o);
+                }
+            }
+        }
+        if (cards.size() < 2) {
+            st->statusBannerUtf8 = "Se necesitan al menos 2 hojas en el Lienzo Infinito para ajustar el espacio";
+            break;
+        }
+        // Preserve reading order (sort by original row Y, then X, or page index within same source)
+        std::sort(cards.begin(), cards.end(), [](const AnnotationObject* a, const AnnotationObject* b) {
+            if (std::abs(a->bounds.y - b->bounds.y) > 20.0) return a->bounds.y < b->bounds.y;
+            return a->bounds.x < b->bounds.x;
+        });
+
+        // Detect number of columns from initial row
+        int cols = 1;
+        const double firstRowY = cards[0]->bounds.y;
+        for (std::size_t i = 1; i < cards.size(); ++i) {
+            if (std::abs(cards[i]->bounds.y - firstRowY) <= 20.0) ++cols;
+            else break;
+        }
+        const double originX = cards[0]->bounds.x;
+        const double originY = cards[0]->bounds.y;
+
+        std::vector<AnnotationObject> beforeVec;
+        std::vector<AnnotationObject> afterVec;
+        double curX = originX;
+        double curY = originY;
+        double rowMaxH = 0.0;
+        int colIdx = 0;
+
+        for (const auto* c : cards) {
+            const double dx = curX - c->bounds.x;
+            const double dy = curY - c->bounds.y;
+            if (std::abs(dx) > 1e-3 || std::abs(dy) > 1e-3) {
+                beforeVec.push_back(*c);
+                AnnotationObject movedCard = *c;
+                movedCard.Translate(dx, dy);
+                afterVec.push_back(std::move(movedCard));
+
+                // Also shift any ink strokes or notes drawn on or anchored to this sheet
+                for (const auto& o : st->doc.CanvasObjects()) {
+                    if (o.id == c->id || o.kind == ObjectKind::PdfCard) continue;
+                    const DocPoint center{ o.bounds.x + o.bounds.w * 0.5, o.bounds.y + o.bounds.h * 0.5 };
+                    if (o.anchorObjectId == c->id || c->bounds.Contains(center.x, center.y, 4.0)) {
+                        const bool alreadyAdded = std::any_of(beforeVec.begin(), beforeVec.end(),
+                            [&](const AnnotationObject& b) { return b.id == o.id; });
+                        if (!alreadyAdded) {
+                            beforeVec.push_back(o);
+                            AnnotationObject movedAnn = o;
+                            movedAnn.Translate(dx, dy);
+                            afterVec.push_back(std::move(movedAnn));
+                        }
+                    }
+                }
+            }
+            rowMaxH = (std::max)(rowMaxH, c->bounds.h);
+            ++colIdx;
+            if (colIdx >= cols) {
+                colIdx = 0;
+                curX = originX;
+                curY += rowMaxH + rowGap;
+                rowMaxH = 0.0;
+            } else {
+                curX += c->bounds.w + colGap;
+            }
+        }
+        if (!beforeVec.empty()) {
+            st->cmdStack.Execute(st->doc, std::make_unique<BatchModifyObjectsCommand>(
+                ObjectTarget{ true, 0 }, std::move(beforeVec), std::move(afterVec), "Ajustar espacio entre hojas"));
+            AppendWalMutation(st, "adjust_sheet_spacing");
+            st->statusBannerUtf8 = "Espacio entre hojas actualizado a " + std::to_string(static_cast<int>(rowGap)) +
+                " pt vertical / " + std::to_string(static_cast<int>(colGap)) + " pt horizontal (" +
+                std::to_string(cards.size()) + " hojas)";
+        }
+        break;
+    }
+    case CMD_INSERT_VERTICAL_SPACE: {
+        std::wstring deltaW = L"160";
+        if (!ShowTextPrompt(st->hwndMain, L"Insertar / Quitar espacio vertical",
+                L"Desplazamiento vertical en puntos (ej. 160 o -80):", deltaW) || deltaW.empty()) {
+            break;
+        }
+        const double dy = std::clamp(_wtof(deltaW.c_str()), -10000.0, 10000.0);
+        if (std::abs(dy) < 0.5) break;
+        double splitY = st->hasLastContextWorldPt ? st->lastContextWorldPt.y : (st->camera.panY + 120.0);
+        st->hasLastContextWorldPt = false;
+        if (st->selectedObjectId != 0) {
+            if (const auto* sel = st->doc.FindCanvasObject(st->selectedObjectId)) {
+                splitY = sel->bounds.Bottom() + 2.0;
+            }
+        }
+        std::vector<AnnotationObject> beforeVec, afterVec;
+        for (const auto& o : st->doc.CanvasObjects()) {
+            if (o.bounds.y >= splitY) {
+                beforeVec.push_back(o);
+                AnnotationObject after = o;
+                after.Translate(0.0, dy);
+                afterVec.push_back(std::move(after));
+            }
+        }
+        if (!beforeVec.empty()) {
+            st->cmdStack.Execute(st->doc, std::make_unique<BatchModifyObjectsCommand>(
+                ObjectTarget{ true, 0 }, std::move(beforeVec), std::move(afterVec), "Insertar espacio vertical"));
+            AppendWalMutation(st, "insert_vertical_space");
+            st->statusBannerUtf8 = "Espacio vertical de " + std::to_string(static_cast<int>(dy)) +
+                " pt aplicado a " + std::to_string(beforeVec.size()) + " objeto(s)";
+        }
+        break;
+    }
+    case CMD_EDIT_SHEET_CONTENT: {
+        const ObjectTarget tgt = CurrentTarget(st);
+        const AnnotationObject* obj = CanvasManip::FindObjectConst(st->doc, tgt, st->selectedObjectId);
+        if (!obj) break;
+        if (obj->kind == ObjectKind::TextBox) {
+            BeginInlineTextEdit(st, tgt, *obj);
+        } else if (obj->kind == ObjectKind::TableBlock) {
+            ExecuteToolbarCommand(st, CMD_ADD_TABLE);
+        } else if (obj->kind == ObjectKind::MathBlock) {
+            std::wstring exprW = Utf8ToWide(obj->formulaExprUtf8);
+            if (ShowTextPrompt(st->hwndMain, L"Editar F\u00F3rmula 2D", L"Expresi\u00F3n:", exprW) && !exprW.empty()) {
+                AnnotationObject before = *obj;
+                AnnotationObject after = *obj;
+                after.formulaExprUtf8 = WideToUtf8(exprW);
+                const auto ev = Cas::EvaluateExpression(after.formulaExprUtf8);
+                if (ev.ok) after.evaluatedResultUtf8 = ev.formattedResultUtf8;
+                st->cmdStack.Execute(st->doc, std::make_unique<ModifyObjectCommand>(tgt, std::move(before), std::move(after)));
+                st->statusBannerUtf8 = "F\xC3\xB3rmula recalculada";
+            }
+        } else if (obj->kind == ObjectKind::PdfCard) {
+            // Extract editable text block right next to the printed sheet so user can edit the slide/page text directly
+            AnnotationObject tb{};
+            tb.kind = ObjectKind::TextBox;
+            tb.layerId = st->doc.ActiveLayerId();
+            tb.bounds = { obj->bounds.Right() + 24.0, obj->bounds.y, 420.0, (std::min)(520.0, obj->bounds.h) };
+            tb.textUtf8 = !obj->printoutTextUtf8.empty() ? obj->printoutTextUtf8 : obj->captionUtf8;
+            tb.fontSizePt = 12.0;
+            tb.strokeColor = DocColor::RGBA(20, 26, 36, 255);
+            st->cmdStack.Execute(st->doc, std::make_unique<AddObjectCommand>(tgt, std::move(tb)));
+            const std::uint64_t newId = AppActions::LastInsertedId(st->doc, tgt);
+            if (newId != 0) {
+                st->selectedObjectId = newId;
+                st->selectedIsCanvas = tgt.isCanvas;
+                st->selectedPageIndex = tgt.pageIndex;
+                if (const auto* created = CanvasManip::FindObjectConst(st->doc, tgt, newId)) {
+                    BeginInlineTextEdit(st, tgt, *created);
+                }
+            }
+            st->statusBannerUtf8 = "Texto de la hoja extra\xC3\xAD" "do como bloque editable junto a la p\xC3\xA1gina";
         }
         break;
     }
@@ -3310,11 +3526,92 @@ void ExecuteToolbarCommand(StudioAppState* st, WORD id) {
         }
         break;
     }
+    case CMD_CLIPBOARD_COPY:
+    case CMD_CLIPBOARD_CUT: {
+        std::vector<std::uint64_t> ids = st->lassoSelectedIds;
+        if (ids.empty() && st->selectedObjectId != 0) ids.push_back(st->selectedObjectId);
+        const ObjectTarget tgt = CurrentTarget(st);
+        if (!ids.empty()) {
+            st->objectClipboard.clear();
+            std::string combinedTxt;
+            for (std::uint64_t oid : ids) {
+                if (const auto* o = CanvasManip::FindObjectConst(st->doc, tgt, oid)) {
+                    st->objectClipboard.push_back(*o);
+                    const std::string t = !o->textUtf8.empty() ? o->textUtf8
+                        : (!o->formulaExprUtf8.empty() ? o->formulaExprUtf8
+                        : (!o->printoutTextUtf8.empty() ? o->printoutTextUtf8 : o->evaluatedResultUtf8));
+                    if (!t.empty()) {
+                        if (!combinedTxt.empty()) combinedTxt += "\r\n";
+                        combinedTxt += t;
+                    }
+                }
+            }
+            if (!combinedTxt.empty()) {
+                CanvasManip::CopyTextToClipboardWin32(st->hwndMain, combinedTxt);
+            }
+            if (id == CMD_CLIPBOARD_CUT) {
+                if (ids.size() > 1) {
+                    st->cmdStack.Execute(st->doc, std::make_unique<BatchEraseObjectsCommand>(tgt, ids));
+                } else {
+                    st->cmdStack.Execute(st->doc, std::make_unique<RemoveObjectCommand>(tgt, ids[0]));
+                }
+                st->lassoSelectedIds.clear();
+                st->selectedObjectId = 0;
+                st->statusBannerUtf8 = "Cortado(s) " + std::to_string(st->objectClipboard.size()) + " objeto(s) al portapapeles";
+                AppendWalMutation(st, "clipboard_cut");
+            } else {
+                st->statusBannerUtf8 = "Copiado(s) " + std::to_string(st->objectClipboard.size()) + " objeto(s) al portapapeles";
+            }
+        } else if (!st->lastSelectedPdfTextUtf8.empty()) {
+            CanvasManip::CopyTextToClipboardWin32(st->hwndMain, st->lastSelectedPdfTextUtf8);
+            st->statusBannerUtf8 = "Texto PDF copiado";
+        }
+        break;
+    }
     case CMD_CLIPBOARD_PASTE: {
         double x = 80.0, y = 80.0;
-        NextCardPlacement(st, x, y);
-        if (!CanvasManip::PasteClipboardIntoDocument(st->hwndMain, st->doc, st->cmdStack, CurrentTarget(st), x, y, st->statusBannerUtf8)) {
-            st->statusBannerUtf8 = "No hay imagen ni texto compatible en el portapapeles";
+        if (st->hasLastContextWorldPt && st->doc.Mode() == DocumentMode::InfiniteCanvas) {
+            x = st->lastContextWorldPt.x;
+            y = st->lastContextWorldPt.y;
+            st->hasLastContextWorldPt = false;
+        } else {
+            NextCardPlacement(st, x, y);
+        }
+        const ObjectTarget tgt = CurrentTarget(st);
+        if (!st->objectClipboard.empty()) {
+            DocRect unionBox = st->objectClipboard[0].bounds;
+            for (std::size_t i = 1; i < st->objectClipboard.size(); ++i) {
+                const auto& b = st->objectClipboard[i].bounds;
+                unionBox = DocRect::FromMinMax(
+                    (std::min)(unionBox.x, b.x),
+                    (std::min)(unionBox.y, b.y),
+                    (std::max)(unionBox.Right(), b.Right()),
+                    (std::max)(unionBox.Bottom(), b.Bottom()));
+            }
+            const double dx = x - unionBox.x;
+            const double dy = y - unionBox.y;
+            std::vector<std::uint64_t> newIds;
+            for (const auto& src : st->objectClipboard) {
+                AnnotationObject clone = src;
+                clone.id = 0;
+                clone.zOrder = 0;
+                clone.Translate(dx, dy);
+                st->cmdStack.Execute(st->doc, std::make_unique<AddObjectCommand>(tgt, std::move(clone)));
+                const std::uint64_t nid = AppActions::LastInsertedId(st->doc, tgt);
+                if (nid != 0) newIds.push_back(nid);
+            }
+            if (!newIds.empty()) {
+                st->selectedIsCanvas = tgt.isCanvas;
+                st->selectedPageIndex = tgt.pageIndex;
+                st->selectedObjectId = newIds.back();
+                st->lassoSelectedIds = (newIds.size() > 1) ? newIds : std::vector<std::uint64_t>{};
+                st->statusBannerUtf8 = "Pegado(s) " + std::to_string(newIds.size()) + " objeto(s)";
+                AppendWalMutation(st, "clipboard_paste_objs");
+            }
+            break;
+        }
+        if (!CanvasManip::PasteClipboardIntoDocument(st->hwndMain, st->doc, st->cmdStack, tgt, x, y, st->statusBannerUtf8)) {
+            st->statusBannerUtf8 = "No hay objeto, imagen ni texto compatible en el portapapeles";
         }
         break;
     }
@@ -3847,15 +4144,17 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 UpdateWindowTitle(st);
                 InvalidateViews(st);
             }
-        } else if (obj->kind == ObjectKind::AudioClip) {
-            const std::string audioKey = !obj->audioAssetKey.empty() ? obj->audioAssetKey : obj->assetKey;
-            if (!audioKey.empty()) {
-                if (const auto* bytes = st->doc.FindAsset(audioKey)) {
-                    st->audioSession.LoadFromWavBytes(bytes->data(), bytes->size());
+            } else if (obj->kind == ObjectKind::AudioClip) {
+                const std::string audioKey = !obj->audioAssetKey.empty() ? obj->audioAssetKey : obj->assetKey;
+                if (!audioKey.empty()) {
+                    if (const auto* bytes = st->doc.FindAsset(audioKey)) {
+                        st->audioSession.LoadFromWavBytes(bytes->data(), bytes->size());
+                    }
                 }
+                ExecuteToolbarCommand(st, CMD_REPLAY_TOGGLE);
+            } else if (obj->kind == ObjectKind::PdfCard) {
+                ExecuteToolbarCommand(st, CMD_EDIT_SHEET_CONTENT);
             }
-            ExecuteToolbarCommand(st, CMD_REPLAY_TOGGLE);
-        }
         return 0;
     }
     case WM_KEYDOWN:
@@ -3944,6 +4243,8 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (msg == WM_RBUTTONUP && !st->rbuttonMoved) {
                 // Auto-select object under right-click cursor so context menu immediately exposes object actions
                 const DocPoint wpWorld = st->camera.ScreenToWorld(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                st->lastContextWorldPt = wpWorld;
+                st->hasLastContextWorldPt = true;
                 const bool isCanvas = (st->doc.Mode() == DocumentMode::InfiniteCanvas);
                 std::size_t pgIdx = st->activePageIndex;
                 double lx = wpWorld.x, ly = wpWorld.y;
@@ -3962,15 +4263,24 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     }
                 }
                 HMENU cm = CreatePopupMenu();
+                if (st->selectedObjectId != 0 || !st->lassoSelectedIds.empty()) {
+                    AppendMenuW(cm, MF_STRING, CMD_CLIPBOARD_CUT,   L"Cortar (Ctrl+X)");
+                    AppendMenuW(cm, MF_STRING, CMD_CLIPBOARD_COPY,  L"Copiar (Ctrl+C)");
+                }
                 AppendMenuW(cm, MF_STRING, CMD_CLIPBOARD_PASTE, L"Pegar (Ctrl+V)");
-                AppendMenuW(cm, MF_STRING, CMD_INSERT_PRINTOUT, L"Insertar copia impresa (PDF / Word / PowerPoint)...");
+                AppendMenuW(cm, MF_STRING, CMD_INSERT_PRINTOUT, L"Insertar copia impresa (PDF / Word / PowerPoint / Excel)...");
+                if (isCanvas) {
+                    AppendMenuW(cm, MF_STRING, CMD_ADJUST_SHEET_SPACING,  L"Espacio personalizado entre hojas...");
+                    AppendMenuW(cm, MF_STRING, CMD_INSERT_VERTICAL_SPACE, L"Insertar / quitar espacio vertical desde aqu\u00ED...");
+                }
                 if (st->selectedObjectId != 0 || !st->lassoSelectedIds.empty()) {
                     const ObjectTarget selTgt{ st->selectedIsCanvas, st->selectedPageIndex };
                     const auto* selObj = CanvasManip::FindObjectConst(st->doc, selTgt, st->selectedObjectId);
                     const bool isLocked = selObj && selObj->lockedInPlace;
                     AppendMenuW(cm, MF_SEPARATOR, 0, nullptr);
                     AppendMenuW(cm, MF_STRING, CMD_TOGGLE_LOCK_IN_PLACE,
-                        isLocked ? L"Desfijar copia impresa del fondo" : L"Fijar copia impresa al fondo");
+                        isLocked ? L"Desfijar copia impresa del fondo (para arrastrar/mover)" : L"Fijar copia impresa al fondo");
+                    AppendMenuW(cm, MF_STRING, CMD_EDIT_SHEET_CONTENT,  L"Editar hoja / Extraer texto editable...");
                     AppendMenuW(cm, MF_STRING, CMD_SEARCH_IN_THIS_SHEET, L"Buscar en esta hoja...");
                     AppendMenuW(cm, MF_SEPARATOR, 0, nullptr);
                     AppendMenuW(cm, MF_STRING, CMD_DUPLICATE_OBJECTS, L"Duplicar (Ctrl+D)");
@@ -4182,8 +4492,20 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
 
             // 5. Direct object hit -> Drag-to-move, Multi-lasso drag, 3D surface rotation (F-237), or Audio Seek (F-156)
+            // Holding Alt with Hand tool (or clicking an already-selected PdfCard) allows dragging even a pinned sheet directly
             const double tol = std::clamp(8.0 / (std::max)(0.25, st->camera.zoom), 3.0, 18.0);
-            const auto hits = CollectHits(st, isCanvas, pgIdx, lx, ly, tol);
+            const bool altHeld = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            auto hits = CollectHits(st, isCanvas, pgIdx, lx, ly, tol, altHeld);
+            if (hits.empty() && st->selectedObjectId != 0) {
+                // If user already selected a sheet via right-click and now drags it with Hand tool
+                auto lockedHits = CollectHits(st, isCanvas, pgIdx, lx, ly, tol, true);
+                if (!lockedHits.empty() && lockedHits.back() == st->selectedObjectId) {
+                    const auto* selO = CanvasManip::FindObjectConst(st->doc, tgt, st->selectedObjectId);
+                    if (selO && (!selO->lockedInPlace || altHeld)) {
+                        hits = std::move(lockedHits);
+                    }
+                }
+            }
             const bool shiftHeld = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             if (!hits.empty()) {
                 const std::uint64_t hitId = hits.back();
@@ -4207,6 +4529,18 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 } else {
                     dragIds = { hitId };
                     CanvasManip::ExpandSelectionWithGroupIds(st->doc, tgt, dragIds);
+                    // When dragging a printed PdfCard sheet, automatically carry along any ink strokes / annotations drawn on top of it
+                    if (hitObj && hitObj->kind == ObjectKind::PdfCard && tgt.isCanvas) {
+                        for (const auto& o : st->doc.CanvasObjects()) {
+                            if (o.id == hitId || o.kind == ObjectKind::PdfCard) continue;
+                            const DocPoint c{ o.bounds.x + o.bounds.w * 0.5, o.bounds.y + o.bounds.h * 0.5 };
+                            if (o.anchorObjectId == hitId || hitObj->bounds.Contains(c.x, c.y, 4.0)) {
+                                if (std::find(dragIds.begin(), dragIds.end(), o.id) == dragIds.end()) {
+                                    dragIds.push_back(o.id);
+                                }
+                            }
+                        }
+                    }
                     st->lassoSelectedIds = (dragIds.size() > 1) ? dragIds : std::vector<std::uint64_t>{};
                 }
                 st->selectedObjectId = hitId;
@@ -5798,7 +6132,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         wchar_t path[4096]{};
         if (DragQueryFileW(hDrop, 0, path, 4096) > 0) {
             const std::wstring ext = GetFileExtLower(path);
-            const bool isPrintoutExt = (ext == L".pdf" || ext == L".docx" || ext == L".pptx" || ext == L".doc" || ext == L".ppt");
+            const bool isPrintoutExt = (ext == L".pdf" || ext == L".docx" || ext == L".pptx" ||
+                                        ext == L".xlsx" || ext == L".doc" || ext == L".ppt" ||
+                                        ext == L".xls" || ext == L".csv");
             if (isPrintoutExt && st->doc.Mode() == DocumentMode::InfiniteCanvas) {
                 POINT dpt{ 120, 120 };
                 DragQueryPoint(hDrop, &dpt);
@@ -5912,20 +6248,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'Z') { ExecuteToolbarCommand(st, CMD_UNDO); return 0; }
         if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'Y') { ExecuteToolbarCommand(st, CMD_REDO); return 0; }
         if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'V') { ExecuteToolbarCommand(st, CMD_CLIPBOARD_PASTE); return 0; }
+        if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'X') { ExecuteToolbarCommand(st, CMD_CLIPBOARD_CUT); return 0; }
         if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'C') {
-            const ObjectTarget tgt = CurrentTarget(st);
-            if (const auto* o = CanvasManip::FindObjectConst(st->doc, tgt, st->selectedObjectId)) {
-                const std::string txt = !o->textUtf8.empty() ? o->textUtf8 : (!o->formulaExprUtf8.empty() ? o->formulaExprUtf8 : o->evaluatedResultUtf8);
-                if (!txt.empty()) {
-                    CanvasManip::CopyTextToClipboardWin32(st->hwndMain, txt);
-                    st->statusBannerUtf8 = "Texto copiado al portapapeles";
-                    InvalidateViews(st);
-                }
-            } else if (!st->lastSelectedPdfTextUtf8.empty()) {
-                CanvasManip::CopyTextToClipboardWin32(st->hwndMain, st->lastSelectedPdfTextUtf8);
-                st->statusBannerUtf8 = "Texto PDF copiado";
-                InvalidateViews(st);
-            }
+            ExecuteToolbarCommand(st, CMD_CLIPBOARD_COPY);
             return 0;
         }
         if (ctrl && !inSearchEdit && !inInlineEdit && wp == 'G') { ExecuteToolbarCommand(st, shift ? CMD_UNGROUP_OBJECTS : CMD_GROUP_OBJECTS); return 0; }
@@ -6309,6 +6634,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
             }
             st->lastSearchQueryUtf8.clear();
             ExecuteToolbarCommand(st.get(), CMD_SEARCH_NEXT);
+            if (cliOpts.searchMatchIndex1Based > 1 && !st->searchMatches.empty()) {
+                const std::size_t targetIdx = (std::min)(
+                    static_cast<std::size_t>(cliOpts.searchMatchIndex1Based - 1),
+                    st->searchMatches.size() - 1);
+                while (st->activeSearchIdx != targetIdx) {
+                    ExecuteToolbarCommand(st.get(), CMD_SEARCH_NEXT);
+                }
+            }
             // If we have an active canvas match and screenshotOutPath is requested, add a live annotation over the sheet
             if (!st->screenshotOutPath.empty() && !st->searchMatches.empty() && st->searchMatches[st->activeSearchIdx].onCanvas) {
                 const auto& m = st->searchMatches[st->activeSearchIdx];
@@ -6345,8 +6678,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
                     AppActions::AddFormulaNodeAction(
                         st->doc, st->cmdStack, ObjectTarget{ true, 0 },
                         card->bounds.Right() + 14.0, m.worldBox.y - 10.0,
-                        "F_net = 12 kg * 9.81 m/s^2", "", st->statusBannerUtf8);
-                    st->statusBannerUtf8 = "Coincidencia 1/" + std::to_string(st->searchMatches.size()) +
+                        "dy_dt = 45 * (3 - 2)^8 / (2*3 + 1)^4", "", st->statusBannerUtf8);
+                    st->statusBannerUtf8 = "Coincidencia " + std::to_string(st->activeSearchIdx + 1) + "/" +
+                        std::to_string(st->searchMatches.size()) +
                         " en Lienzo Infinito \xC2\xB7 \"" + cliOpts.searchQueryUtf8 + "\"";
                 }
             }

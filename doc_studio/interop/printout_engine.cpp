@@ -5,6 +5,7 @@
 #include "../pdf/interop_openxml.hpp"
 #include "../pdf/pdf_parser.hpp"
 #include "../pdf/pdf_writer.hpp"
+#include "../pdf/table_interop.hpp"
 #include "../pdf/winrt_adapters.hpp"
 
 #include <algorithm>
@@ -54,6 +55,7 @@ std::string DetectSourceKind(const std::wstring& ext) {
     if (ext == L".pdf") return "pdf";
     if (ext == L".docx" || ext == L".doc") return "docx";
     if (ext == L".pptx" || ext == L".ppt") return "pptx";
+    if (ext == L".xlsx" || ext == L".xls" || ext == L".csv") return "xlsx";
     return "unknown";
 }
 
@@ -355,6 +357,57 @@ bool TryConvertPowerPointComInWorker(const std::wstring& srcCopyPath, const std:
     return ok && std::filesystem::exists(outPdfPath, ec) && std::filesystem::file_size(outPdfPath, ec) > 64;
 }
 
+bool TryConvertExcelComInWorker(const std::wstring& srcCopyPath, const std::wstring& outPdfPath) {
+    CLSID clsid{};
+    if (FAILED(CLSIDFromProgID(L"Excel.Application", &clsid))) return false;
+
+    IDispatch* pApp = nullptr;
+    if (FAILED(CoCreateInstance(clsid, nullptr, CLSCTX_LOCAL_SERVER, IID_IDispatch, reinterpret_cast<void**>(&pApp))) || !pApp) {
+        return false;
+    }
+
+    bool ok = false;
+    {
+        std::vector<VARIANT> aVis = { ScopedVariant::MakeBool(false) };
+        ComInvoke(pApp, DISPATCH_PROPERTYPUT, L"Visible", aVis);
+        std::vector<VARIANT> aAlerts = { ScopedVariant::MakeBool(false) };
+        ComInvoke(pApp, DISPATCH_PROPERTYPUT, L"DisplayAlerts", aAlerts);
+
+        ScopedVariant vWbs;
+        std::vector<VARIANT> noArgs;
+        if (SUCCEEDED(ComInvoke(pApp, DISPATCH_PROPERTYGET, L"Workbooks", noArgs, &vWbs.v)) &&
+            vWbs.v.vt == VT_DISPATCH && vWbs.v.pdispVal) {
+            IDispatch* pWbs = vWbs.v.pdispVal;
+            ScopedVariant vWb;
+            // Workbooks.Open(Filename, UpdateLinks=0, ReadOnly=True)
+            std::vector<VARIANT> openArgs = {
+                ScopedVariant::MakeBstr(srcCopyPath),
+                ScopedVariant::MakeInt(0),
+                ScopedVariant::MakeBool(true)
+            };
+            if (SUCCEEDED(ComInvoke(pWbs, DISPATCH_METHOD, L"Open", openArgs, &vWb.v)) &&
+                vWb.v.vt == VT_DISPATCH && vWb.v.pdispVal) {
+                IDispatch* pWb = vWb.v.pdispVal;
+                // Workbook.ExportAsFixedFormat(Type=0 [xlTypePDF], Filename=outPdfPath)
+                std::vector<VARIANT> expArgs = {
+                    ScopedVariant::MakeInt(0),
+                    ScopedVariant::MakeBstr(outPdfPath)
+                };
+                const HRESULT hrExp = ComInvoke(pWb, DISPATCH_METHOD, L"ExportAsFixedFormat", expArgs);
+                ok = SUCCEEDED(hrExp);
+
+                std::vector<VARIANT> closeArgs = { ScopedVariant::MakeBool(false) };
+                ComInvoke(pWb, DISPATCH_METHOD, L"Close", closeArgs);
+            }
+        }
+        std::vector<VARIANT> quitArgs;
+        ComInvoke(pApp, DISPATCH_METHOD, L"Quit", quitArgs);
+    }
+    pApp->Release();
+    std::error_code ec;
+    return ok && std::filesystem::exists(outPdfPath, ec) && std::filesystem::file_size(outPdfPath, ec) > 64;
+}
+
 bool TryConvertWithMicrosoftOfficeCom(
     const std::wstring& srcCopyPath,
     const std::string& kind,
@@ -373,6 +426,8 @@ bool TryConvertWithMicrosoftOfficeCom(
                 ok = TryConvertWordComInWorker(srcCopyPath, outPdfPath);
             } else if (kind == "pptx") {
                 ok = TryConvertPowerPointComInWorker(srcCopyPath, outPdfPath);
+            } else if (kind == "xlsx") {
+                ok = TryConvertExcelComInWorker(srcCopyPath, outPdfPath);
             }
         } catch (...) {
             ok = false;
@@ -386,7 +441,9 @@ bool TryConvertWithMicrosoftOfficeCom(
     if (fut.wait_for(std::chrono::milliseconds(timeoutMs)) == std::future_status::ready) {
         if (worker.joinable()) worker.join();
         if (fut.get()) {
-            rep.converterUsedUtf8 = (kind == "docx") ? "Microsoft Word" : "Microsoft PowerPoint";
+            rep.converterUsedUtf8 = (kind == "docx") ? "Microsoft Word"
+                                  : (kind == "pptx") ? "Microsoft PowerPoint"
+                                                     : "Microsoft Excel";
             rep.visualFidelityExact = true;
             return true;
         }
@@ -472,6 +529,13 @@ bool TryConvertWithNativeOpenXml(
         imported = OpenXmlInterop::ImportFromDocxFile(srcCopyPath, tmpDoc, &err);
     } else if (kind == "pptx") {
         imported = OpenXmlInterop::ImportFromPptxFile(srcCopyPath, tmpDoc, &err);
+    } else if (kind == "xlsx") {
+        const std::wstring ext = GetLowerExtW(srcCopyPath);
+        if (ext == L".csv") {
+            imported = DocStudioApp::ImportFromCsvFile(WideToUtf8(srcCopyPath), tmpDoc, &err);
+        } else {
+            imported = DocStudioApp::ImportFromXlsxFile(WideToUtf8(srcCopyPath), tmpDoc, &err);
+        }
     }
     if (!imported) {
         rep.errorUtf8 = err.empty() ? "No se pudo importar archivo Office con el motor nativo." : err;
@@ -636,7 +700,7 @@ bool ConvertOfficeToPdf(
 
     const std::wstring ext = GetLowerExtW(srcPath);
     const std::string kind = DetectSourceKind(ext);
-    if (kind != "docx" && kind != "pptx") {
+    if (kind != "docx" && kind != "pptx" && kind != "xlsx") {
         rep.errorUtf8 = "Formato Office no soportado para conversi\xC3\xB3n: " + WideToUtf8(ext);
         return false;
     }
@@ -749,6 +813,8 @@ bool BuildPages(
     outPages.reserve(countToBuild);
 
     const int effDpi = std::clamp(opts.rasterDpi, 72, 300);
+    const std::size_t maxSyncOcrPages = (countToBuild <= 250) ? 16u : 2u;
+    std::size_t ocrPagesAttempted = 0;
 
     for (int p1 = first1; p1 <= last1; ++p1) {
         if (cancel && cancel->load(std::memory_order_acquire)) {
@@ -764,6 +830,7 @@ bool BuildPages(
         pr.sourcePageIndex0 = static_cast<int>(idx0);
         pr.widthPt = 595.0;
         pr.heightPt = 842.0;
+        bool havePageBox = false;
 
         if (parsedOk && idx0 < pdf.PageCount()) {
             const auto& pi = pdf.PageAt(idx0);
@@ -771,35 +838,35 @@ bool BuildPages(
             if (box.w > 18.0 && box.h > 18.0) {
                 pr.widthPt = box.w;
                 pr.heightPt = box.h;
+                havePageBox = true;
             }
             pr.text = pi.extractedTextUtf8;
             pr.runs = pi.textBoxes;
         }
 
-        int dummyTotal = 0;
-        double wrW = 0.0, wrH = 0.0;
-        if (WinRtPdfRenderer::GetPageCountAndSize(pdfPath, static_cast<int>(idx0), dummyTotal, wrW, wrH) &&
-            wrW > 18.0 && wrH > 18.0) {
-            pr.widthPt = wrW;
-            pr.heightPt = wrH;
+        if (!havePageBox) {
+            int dummyTotal = 0;
+            double wrW = 0.0, wrH = 0.0;
+            if (WinRtPdfRenderer::GetPageCountAndSize(pdfPath, static_cast<int>(idx0), dummyTotal, wrW, wrH) &&
+                wrW > 18.0 && wrH > 18.0) {
+                pr.widthPt = wrW;
+                pr.heightPt = wrH;
+            }
         }
 
         const std::size_t nonWs = CountNonWhitespace(pr.text);
-        const bool needsOcr = (nonWs < 8) && opts.ocrWhenNoText;
-        const bool needsCanvasPng = (opts.target == Target::InfiniteCanvas);
+        const bool needsOcr = (nonWs < 8) && opts.ocrWhenNoText && rep.ocrEngineAvailable && (ocrPagesAttempted < maxSyncOcrPages);
 
-        if (needsCanvasPng || needsOcr) {
+        if (needsOcr) {
+            ++ocrPagesAttempted;
             const int targetW = std::clamp(
                 static_cast<int>(std::lround((pr.widthPt / 72.0) * effDpi)),
-                360, 2200);
+                360, 1800);
             RasterImageBgra32 bgra{};
             if (WinRtPdfRenderer::RenderPageToBgra32(pdfPath, static_cast<int>(idx0), targetW, 0, {}, bgra, cancel)) {
                 pr.pixelW = bgra.width;
                 pr.pixelH = bgra.height;
-                if (needsCanvasPng) {
-                    WinRtPdfRenderer::EncodeBgra32ToPngBytes(bgra, pr.png);
-                }
-                if (needsOcr && rep.ocrEngineAvailable && bgra.width > 0 && bgra.height > 0) {
+                if (bgra.width > 0 && bgra.height > 0) {
                     const OcrOutput ocr = WinRtOcrAdapter::RecognizeBgra32(
                         bgra.width, bgra.height, bgra.pixels.data());
                     if (ocr.engineAvailable && CountNonWhitespace(ocr.fullTextUtf8) > 0) {
@@ -857,23 +924,31 @@ bool InsertIntoDocument(
         return false;
     }
 
-    // Embed the working PDF once into DocumentModel::Assets() when inserting vector NotebookPages
-    // (on InfiniteCanvas, each PdfCard already stores its high-DPI PNG assetKey, avoiding duplicating
-    // a 50+ MB textbook PDF inside .cudoc when only a subset of pages is printed to the canvas).
+    // Embed the working PDF once into DocumentModel::Assets() when its size is <= 20 MB
+    // (covers Office conversions and standard PDFs portably inside .cudoc, while large
+    // 30-100 MB textbooks stream directly from workingPdfPath via PageRenderCache without
+    // duplicating 50+ MB into .cudoc RAM).
     std::string sharedPdfAssetKey;
-    if (opts.target == Target::NotebookPages) {
-        std::vector<std::uint8_t> pdfBytes;
-        if (ReadFileBytes(workingPdfPath, pdfBytes) && !pdfBytes.empty()) {
-            std::uint64_t h = 14695981039346656037ull;
-            for (std::uint8_t b : pdfBytes) {
-                h ^= b;
+    {
+        std::error_code ecSize;
+        const auto fsz = std::filesystem::file_size(std::filesystem::path(workingPdfPath), ecSize);
+        if (!ecSize && fsz > 0 && fsz <= 20ull * 1024ull * 1024ull) {
+            std::vector<std::uint8_t> pdfBytes;
+            if (ReadFileBytes(workingPdfPath, pdfBytes) && !pdfBytes.empty()) {
+                std::uint64_t h = 14695981039346656037ull;
+                const std::size_t step = (pdfBytes.size() > 65536u) ? (pdfBytes.size() / 16384u) : 1u;
+                for (std::size_t bi = 0; bi < pdfBytes.size(); bi += step) {
+                    h ^= pdfBytes[bi];
+                    h *= 1099511628211ull;
+                }
+                h ^= static_cast<std::uint64_t>(pdfBytes.size());
                 h *= 1099511628211ull;
-            }
-            char hex[40]{};
-            std::snprintf(hex, sizeof(hex), "src_pdf_%016llx", static_cast<unsigned long long>(h));
-            sharedPdfAssetKey = hex;
-            if (!doc.FindAsset(sharedPdfAssetKey)) {
-                doc.SetNamedAsset(sharedPdfAssetKey, std::move(pdfBytes));
+                char hex[40]{};
+                std::snprintf(hex, sizeof(hex), "src_pdf_%016llx", static_cast<unsigned long long>(h));
+                sharedPdfAssetKey = hex;
+                if (!doc.FindAsset(sharedPdfAssetKey)) {
+                    doc.SetNamedAsset(sharedPdfAssetKey, std::move(pdfBytes));
+                }
             }
         }
     }
@@ -921,8 +996,8 @@ bool InsertIntoDocument(
     cards.reserve(pages.size());
 
     const int cols = (opts.layout == CanvasLayout::Grid) ? (std::max)(1, opts.gridColumns) : 1;
-    constexpr double kColGapPt = 36.0;
-    constexpr double kRowGapPt = 32.0;
+    const double colGapPt = std::clamp(opts.colGapPt, 0.0, 4000.0);
+    const double rowGapPt = std::clamp(opts.pageGapPt, 0.0, 4000.0);
 
     double curX = canvasOrigin.x;
     double curY = canvasOrigin.y;
@@ -966,10 +1041,10 @@ bool InsertIntoDocument(
         if (colIdx >= cols) {
             colIdx = 0;
             curX = canvasOrigin.x;
-            curY += rowMaxH + kRowGapPt;
+            curY += rowMaxH + rowGapPt;
             rowMaxH = 0.0;
         } else {
-            curX += dispW + kColGapPt;
+            curX += dispW + colGapPt;
         }
     }
 

@@ -283,6 +283,20 @@ struct AnnotationObject {
             bounds = { minX - pad, minY - pad, (maxX - minX) + pad * 2.0, (maxY - minY) + pad * 2.0 };
         }
     }
+
+    void Translate(double dx, double dy) noexcept {
+        bounds.x += dx;
+        bounds.y += dy;
+        for (auto& pt : inkPoints) {
+            pt.x += dx;
+            pt.y += dy;
+        }
+        shapeStart.x += dx;
+        shapeStart.y += dy;
+        shapeEnd.x += dx;
+        shapeEnd.y += dy;
+        RecomputeBounds();
+    }
 };
 
 struct PdfLinkRect {

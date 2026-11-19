@@ -292,7 +292,7 @@ std::string DocumentModel::GenerateDurableUuid() {
 }
 
 DocumentModel::DocumentModel()
-    : canvasIndex_({ -1e6, -1e6, 2e6, 2e6 }, 10, 24)
+    : canvasIndex_({ -1e7, -1e7, 2e7, 2e7 }, 14, 24)
 {
     ResetToBlank(DocumentMode::PaginatedPdf);
 }

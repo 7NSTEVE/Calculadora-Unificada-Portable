@@ -104,17 +104,21 @@ struct StudioCliOptions {
     // Input / import flags
     std::string migratePathUtf8;
     std::string insertPrintoutPathUtf8;
+    std::vector<std::string> insertPrintoutPathsUtf8;
     std::string printoutTargetUtf8 = "canvas";
     std::string printoutRangeUtf8;
     std::string printoutLayoutUtf8 = "column";
     std::string printoutConverterUtf8 = "auto";
     bool printoutLockInPlace = true;
+    double printoutGapPt = 32.0;
+    double printoutColGapPt = 36.0;
     std::string outReportUtf8;
     std::string importCsvUtf8;
     std::string importMdUtf8;
     std::string importAudioUtf8;
     std::string warpScanOcrUtf8;
     std::string searchQueryUtf8;
+    int searchMatchIndex1Based = 1;
     std::string rosterCsvUtf8;
     std::string keymapConfigUtf8;
     std::string scaleRatioUtf8 = "1:1";
@@ -509,17 +513,24 @@ inline StudioCliOptions ParseArgsUtf8(const std::vector<std::string>& args) {
 
         else if (a == "--import-csv" && hasNext(i)) o.importCsvUtf8 = args[++i];
         else if (a == "--migrate" && hasNext(i)) o.migratePathUtf8 = args[++i];
-        else if (a == "--insert-printout" && hasNext(i)) o.insertPrintoutPathUtf8 = args[++i];
+        else if (a == "--insert-printout" && hasNext(i)) {
+            const std::string p = args[++i];
+            if (o.insertPrintoutPathUtf8.empty()) o.insertPrintoutPathUtf8 = p;
+            o.insertPrintoutPathsUtf8.push_back(p);
+        }
         else if (a == "--printout-target" && hasNext(i)) o.printoutTargetUtf8 = args[++i];
         else if (a == "--printout-range" && hasNext(i)) o.printoutRangeUtf8 = args[++i];
         else if (a == "--printout-layout" && hasNext(i)) o.printoutLayoutUtf8 = args[++i];
         else if (a == "--printout-converter" && hasNext(i)) o.printoutConverterUtf8 = args[++i];
         else if (a == "--printout-lock" && hasNext(i)) o.printoutLockInPlace = (args[++i] != "0" && args[i] != "false");
+        else if (a == "--printout-gap" && hasNext(i)) o.printoutGapPt = std::clamp(std::atof(args[++i].c_str()), 0.0, 4000.0);
+        else if (a == "--printout-col-gap" && hasNext(i)) o.printoutColGapPt = std::clamp(std::atof(args[++i].c_str()), 0.0, 4000.0);
         else if (a == "--out-report" && hasNext(i)) o.outReportUtf8 = args[++i];
         else if (a == "--import-md" && hasNext(i)) o.importMdUtf8 = args[++i];
         else if (a == "--import-audio" && hasNext(i)) o.importAudioUtf8 = args[++i];
         else if (a == "--warp-scan-ocr" && hasNext(i)) o.warpScanOcrUtf8 = args[++i];
         else if (a == "--search" && hasNext(i)) o.searchQueryUtf8 = args[++i];
+        else if (a == "--search-match-index" && hasNext(i)) o.searchMatchIndex1Based = (std::max)(1, std::atoi(args[++i].c_str()));
         else if (a == "--roster" && hasNext(i)) o.rosterCsvUtf8 = args[++i];
         else if (a == "--keymap-config" && hasNext(i)) o.keymapConfigUtf8 = args[++i];
         else if (a == "--scale" && hasNext(i)) o.scaleRatioUtf8 = args[++i];
@@ -699,8 +710,12 @@ inline DispatchResult ExecuteWorkflow(
         doc.ResetToBlank(DocumentMode::InfiniteCanvas);
     }
 
-    // 1b. Insert File Printout (--insert-printout <file>)
-    if (!opts.insertPrintoutPathUtf8.empty()) {
+    // 1b. Insert File Printout (--insert-printout <file> [can be specified multiple times])
+    if (!opts.insertPrintoutPathsUtf8.empty() || !opts.insertPrintoutPathUtf8.empty()) {
+        std::vector<std::string> printoutFiles = opts.insertPrintoutPathsUtf8;
+        if (printoutFiles.empty() && !opts.insertPrintoutPathUtf8.empty()) {
+            printoutFiles.push_back(opts.insertPrintoutPathUtf8);
+        }
         Printout::Options pOpts{};
         pOpts.target = (opts.printoutTargetUtf8 == "pages" || opts.printoutTargetUtf8 == "notebook")
             ? Printout::Target::NotebookPages
@@ -709,6 +724,8 @@ inline DispatchResult ExecuteWorkflow(
             ? Printout::CanvasLayout::Grid
             : Printout::CanvasLayout::VerticalColumn;
         pOpts.lockInPlace = opts.printoutLockInPlace;
+        pOpts.pageGapPt = opts.printoutGapPt;
+        pOpts.colGapPt = opts.printoutColGapPt;
         if (opts.printoutConverterUtf8 == "office" || opts.printoutConverterUtf8 == "msoffice") {
             pOpts.converter = Printout::ConverterChoice::MicrosoftOffice;
         } else if (opts.printoutConverterUtf8 == "libreoffice" || opts.printoutConverterUtf8 == "lo") {
@@ -731,33 +748,71 @@ inline DispatchResult ExecuteWorkflow(
             }
         }
         CommandStack tmpStack;
-        Printout::Report pRep{};
-        if (!Printout::InsertPrintoutFromFile(
-                doc, tmpStack, Utf8ToWide(opts.insertPrintoutPathUtf8),
-                pOpts, 0, { 60.0, 60.0 }, pRep)) {
-            return fail(2, "Insert printout failed: " + pRep.errorUtf8);
-        }
-        if (!opts.outReportUtf8.empty()) {
-            nlohmann::json rj = {
-                {"ok", true},
+        Printout::Report lastRep{};
+        std::size_t totalInsertedAll = 0;
+        std::size_t totalWithTextAll = 0;
+        std::size_t totalWithOcrAll = 0;
+        nlohmann::json filesArr = nlohmann::json::array();
+
+        for (std::size_t fi = 0; fi < printoutFiles.size(); ++fi) {
+            double originX = 60.0;
+            const double originY = 60.0;
+            if (pOpts.target == Printout::Target::InfiniteCanvas && !doc.CanvasObjects().empty()) {
+                double maxRight = 0.0;
+                for (const auto& o : doc.CanvasObjects()) {
+                    maxRight = (std::max)(maxRight, o.bounds.Right());
+                }
+                originX = maxRight + pOpts.colGapPt + 32.0;
+            }
+            const std::size_t activePg = doc.Pages().empty() ? 0u : (doc.Pages().size() - 1u);
+            Printout::Report pRep{};
+            if (!Printout::InsertPrintoutFromFile(
+                    doc, tmpStack, Utf8ToWide(printoutFiles[fi]),
+                    pOpts, activePg, { originX, originY }, pRep)) {
+                return fail(2, "Insert printout failed (" + printoutFiles[fi] + "): " + pRep.errorUtf8);
+            }
+            totalInsertedAll += pRep.pagesInserted;
+            totalWithTextAll += pRep.pagesWithText;
+            totalWithOcrAll  += pRep.pagesWithOcr;
+            filesArr.push_back({
                 {"sourceName", pRep.sourceNameUtf8},
                 {"sourceKind", pRep.sourceKindUtf8},
                 {"converterUsed", pRep.converterUsedUtf8},
                 {"visualFidelityExact", pRep.visualFidelityExact},
-                {"ocrEngineAvailable", pRep.ocrEngineAvailable},
                 {"totalSourcePages", pRep.totalSourcePages},
                 {"pagesInserted", pRep.pagesInserted},
                 {"pagesWithText", pRep.pagesWithText},
                 {"pagesWithOcr", pRep.pagesWithOcr},
                 {"sourceSha256Before", pRep.sourceSha256Before},
-                {"sourceSha256After", pRep.sourceSha256After},
-                {"warnings", pRep.warningsUtf8}
+                {"sourceSha256After", pRep.sourceSha256After}
+            });
+            lastRep = std::move(pRep);
+        }
+        if (!opts.outReportUtf8.empty()) {
+            nlohmann::json rj = {
+                {"ok", true},
+                {"sourceName", lastRep.sourceNameUtf8},
+                {"sourceKind", lastRep.sourceKindUtf8},
+                {"converterUsed", lastRep.converterUsedUtf8},
+                {"visualFidelityExact", lastRep.visualFidelityExact},
+                {"ocrEngineAvailable", lastRep.ocrEngineAvailable},
+                {"totalSourcePages", lastRep.totalSourcePages},
+                {"pagesInserted", totalInsertedAll},
+                {"pagesWithText", totalWithTextAll},
+                {"pagesWithOcr", totalWithOcrAll},
+                {"pageGapPt", pOpts.pageGapPt},
+                {"colGapPt", pOpts.colGapPt},
+                {"sourceSha256Before", lastRep.sourceSha256Before},
+                {"sourceSha256After", lastRep.sourceSha256After},
+                {"warnings", lastRep.warningsUtf8},
+                {"files", std::move(filesArr)}
             };
             std::string wErr;
             if (!detail::WriteTextFile(opts.outReportUtf8, rj.dump(2), &wErr)) return fail(3, wErr);
         }
-        res.statusBannerUtf8 = std::to_string(pRep.pagesInserted) + " p\xC3\xA1gina(s) insertadas (" +
-            pRep.converterUsedUtf8 + ", " + std::to_string(pRep.pagesWithText) + " con texto buscable)";
+        res.statusBannerUtf8 = std::to_string(totalInsertedAll) + " p\xC3\xA1gina(s) insertadas (" +
+            std::to_string(printoutFiles.size()) + " archivo(s), " +
+            std::to_string(totalWithTextAll) + " con texto buscable)";
     }
 
     // 1c. Standalone Document Search (--search <query> --out-json <matches.json>)

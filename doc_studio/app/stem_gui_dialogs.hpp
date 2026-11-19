@@ -455,12 +455,13 @@ inline bool RunInsertPrintoutDialog(
         OPENFILENAMEW ofn{};
         ofn.lStructSize = sizeof(ofn);
         ofn.hwndOwner = owner;
-        ofn.lpstrTitle = L"Insertar copia impresa (PDF / Word / PowerPoint)";
+        ofn.lpstrTitle = L"Insertar copia impresa (PDF / Word / PowerPoint / Excel)";
         ofn.lpstrFilter =
-            L"Documentos compatibles (*.pdf;*.docx;*.pptx;*.doc;*.ppt)\0*.pdf;*.docx;*.pptx;*.doc;*.ppt\0"
+            L"Documentos compatibles (*.pdf;*.docx;*.pptx;*.xlsx;*.doc;*.ppt;*.xls;*.csv)\0*.pdf;*.docx;*.pptx;*.xlsx;*.doc;*.ppt;*.xls;*.csv\0"
             L"Archivos PDF (*.pdf)\0*.pdf\0"
             L"Microsoft Word (*.docx;*.doc)\0*.docx;*.doc\0"
             L"Microsoft PowerPoint (*.pptx;*.ppt)\0*.pptx;*.ppt\0"
+            L"Microsoft Excel / CSV (*.xlsx;*.xls;*.csv)\0*.xlsx;*.xls;*.csv\0"
             L"Todos (*.*)\0*.*\0\0";
         ofn.lpstrFile = fileBuf;
         ofn.nMaxFile = static_cast<DWORD>(std::size(fileBuf));
@@ -480,6 +481,7 @@ inline bool RunInsertPrintoutDialog(
         COLORREF textCol = RGB(18, 24, 34);
         HWND hTargetCombo = nullptr;
         HWND hRangeEdit = nullptr;
+        HWND hGapEdit = nullptr;
         HWND hLayoutCombo = nullptr;
         HWND hQualityCombo = nullptr;
         HWND hLockCheck = nullptr;
@@ -559,6 +561,15 @@ inline bool RunInsertPrintoutDialog(
                         const LRESULT sel = SendMessageW(s->hLayoutCombo, CB_GETCURSEL, 0, 0);
                         s->opts.layout = (sel == 1) ? Printout::CanvasLayout::Grid : Printout::CanvasLayout::VerticalColumn;
                         s->opts.gridColumns = 3;
+                    }
+                    if (s->hGapEdit) {
+                        wchar_t gbuf[64]{};
+                        GetWindowTextW(s->hGapEdit, gbuf, 64);
+                        const double gVal = _wtof(gbuf);
+                        if (std::isfinite(gVal) && gVal >= 0.0 && gVal <= 4000.0) {
+                            s->opts.pageGapPt = gVal;
+                            s->opts.colGapPt = (std::max)(24.0, gVal);
+                        }
                     }
                     if (s->hQualityCombo) {
                         const LRESULT sel = SendMessageW(s->hQualityCombo, CB_GETCURSEL, 0, 0);
@@ -655,9 +666,13 @@ inline bool RunInsertPrintoutDialog(
     makeLbl(L"P\u00E1ginas (vac\u00EDo = todas):", 18, 82, 155, 20);
     st.hRangeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-        sc(175), sc(78), sc(140), sc(24), hDlg, nullptr, GetModuleHandleW(nullptr), nullptr);
+        sc(175), sc(78), sc(96), sc(24), hDlg, nullptr, GetModuleHandleW(nullptr), nullptr);
     SendMessageW(st.hRangeEdit, WM_SETFONT, reinterpret_cast<WPARAM>(st.hFont), TRUE);
-    makeLbl(L"(ej. 1-200)", 322, 82, 120, 20);
+    makeLbl(L"Espacio (pt):", 280, 82, 88, 20);
+    st.hGapEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"32",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        sc(370), sc(78), sc(75), sc(24), hDlg, nullptr, GetModuleHandleW(nullptr), nullptr);
+    SendMessageW(st.hGapEdit, WM_SETFONT, reinterpret_cast<WPARAM>(st.hFont), TRUE);
 
     makeLbl(L"Disposici\u00F3n en Lienzo:", 18, 118, 155, 20);
     st.hLayoutCombo = CreateWindowExW(0, L"COMBOBOX", L"",
