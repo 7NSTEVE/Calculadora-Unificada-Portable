@@ -1195,29 +1195,34 @@ inline LRESULT CALLBACK LearningStudioWndProc(HWND hWnd, UINT msg, WPARAM wParam
                 }
                 y += 32;
 
-                int ix = left;
-                int rowH = 66;
+                const int cols = (cardW >= 820) ? 3 : 2;
+                const int gapX = 8;
+                const int iw = (cardW - (cols - 1) * gapX) / cols;
+                int colIdx = 0;
+                int rowH = 84;
+                bool drewAnyInd = false;
                 for (const auto& ind : cat.indicators) {
                     if (ind.calcIdx != targetModel) continue;
                     std::wstring corpus = ind.symbol + L" " + ind.title + L" " + ind.meaning + L" " + ind.whenAppears;
                     if (!g_studioSearchQuery.empty() && CasioKnowledge::ScoreKnowledgeMatch(corpus, g_studioSearchQuery) == 0) continue;
 
-                    int iw = 232;
-                    if (ix + iw > left + cardW) { ix = left; y += rowH + 6; }
-                    RECT rcI = { ix, y, ix + iw, y + rowH };
+                    if (colIdx >= cols) { colIdx = 0; y += rowH + 8; }
+                    const int ix = left + colIdx * (iw + gapX);
+                    RECT rcI = { ix, y, (colIdx == cols - 1) ? (left + cardW) : (ix + iw), y + rowH };
+                    drewAnyInd = true;
                     if (drawBox(rcI, CasioTheme::StudioSurface(), CasioTheme::StudioBorder())) {
-                        RECT rSym = { rcI.left + 6, rcI.top + 7, rcI.left + 60, rcI.top + 28 };
+                        RECT rSym = { rcI.left + 8, rcI.top + 8, rcI.left + 64, rcI.top + 30 };
                         CasioTheme::FillRoundRectAA(hdc, rSym, 6.0f, CasioTheme::StudioAccentSoft());
                         DrawLatexRichTextCentered(hdc, ind.symbol, rSym, CasioTheme::StudioAccentText(), CasioTheme::StudioAccentText(), 13);
-                        RECT rTit = { rcI.left + 66, rcI.top + 5, rcI.right - 6, rcI.top + 38 };
-                        DrawLatexRichText(hdc, ind.title, rTit, CasioTheme::StudioText(), CasioTheme::StudioAccentText(), 13, false);
-                        RECT rM = { rcI.left + 8, rcI.top + 40, rcI.right - 6, rcI.bottom - 4 };
-                        DrawLatexRichText(hdc, ind.meaning, rM, CasioTheme::StudioTextSec(), CasioTheme::StudioAccentText(), 11, true);
+                        RECT rTit = { rcI.left + 72, rcI.top + 7, rcI.right - 8, rcI.top + 33 };
+                        DrawLatexRichText(hdc, ind.title, rTit, CasioTheme::StudioText(), CasioTheme::StudioAccentText(), 13, true);
+                        RECT rM = { rcI.left + 8, rcI.top + 38, rcI.right - 8, rcI.bottom - 6 };
+                        DrawLatexRichText(hdc, ind.meaning, rM, CasioTheme::StudioTextSec(), CasioTheme::StudioAccentText(), 11, false);
                         pushAct(rcI, StudioHitAction::ACT_OPEN_PDF, ind.pdfPage, 0, {}, ind.pdfFile);
                     }
-                    ix += iw + 8;
+                    ++colIdx;
                 }
-                y += rowH + 14;
+                if (drewAnyInd) y += rowH + 14;
             }
 
             // Subseccion B: 50 Teclas con 3 capas (Normal / SHIFT / ALPHA)

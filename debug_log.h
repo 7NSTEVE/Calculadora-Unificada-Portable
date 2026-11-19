@@ -8,6 +8,6 @@ inline void log_msg(const char* msg) {
     char* slash = strrchr(path, '\\');
     if (slash) *(slash + 1) = '\0';
     strcat_s(path, "calc_debug.log");
-    FILE* f = fopen(path, "a");
-    if (f) { fprintf(f, "%s\n", msg); fclose(f); }
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "a") == 0 && f) { fprintf(f, "%s\n", msg); fclose(f); }
 }

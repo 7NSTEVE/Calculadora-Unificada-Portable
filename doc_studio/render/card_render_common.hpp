@@ -66,7 +66,7 @@ struct CardTextLayout {
     std::string bodyUtf8;
 };
 
-inline CardTextLayout BuildStemCardLayout(const AnnotationObject& obj) {
+inline CardTextLayout BuildStemCardLayout(const AnnotationObject& obj, bool isDark = false, bool isHc = false) {
     CardTextLayout out{};
     std::string tagSuffix;
     if (!obj.tags.empty()) {
@@ -80,17 +80,17 @@ inline CardTextLayout BuildStemCardLayout(const AnnotationObject& obj) {
 
     if (obj.kind == ObjectKind::StudyTape) {
         if (!obj.tapeRevealed) {
-            out.bg = DocColor::RGBA(245, 158, 11, 240);
-            out.border = DocColor::RGBA(180, 83, 9, 255);
+            out.bg = isDark ? DocColor::RGBA(180, 106, 12, 240) : DocColor::RGBA(245, 158, 11, 240);
+            out.border = isHc ? DocColor::RGBA(15, 20, 28, 255) : DocColor::RGBA(180, 83, 9, 255);
             out.titleColor = DocColor::RGBA(255, 255, 255, 255);
             out.bodyColor = DocColor::RGBA(255, 251, 235, 255);
             out.headerUtf8 = "STUDY TAPE (Clic para revelar)" + tagSuffix;
             out.bodyUtf8 = obj.captionUtf8.empty() ? "Contenido oculto para estudio activo" : obj.captionUtf8;
         } else {
-            out.bg = DocColor::RGBA(254, 243, 199, 130);
-            out.border = DocColor::RGBA(217, 119, 6, 220);
-            out.titleColor = DocColor::RGBA(146, 64, 14, 255);
-            out.bodyColor = DocColor::RGBA(15, 23, 42, 255);
+            out.bg = isDark ? DocColor::RGBA(52, 42, 24, 235) : (isHc ? DocColor::RGBA(255, 255, 255, 255) : DocColor::RGBA(254, 243, 199, 130));
+            out.border = isHc ? DocColor::RGBA(15, 20, 28, 255) : DocColor::RGBA(217, 119, 6, 220);
+            out.titleColor = isDark ? DocColor::RGBA(251, 191, 36, 255) : DocColor::RGBA(146, 64, 14, 255);
+            out.bodyColor = isDark ? DocColor::RGBA(241, 245, 249, 255) : DocColor::RGBA(15, 23, 42, 255);
             out.headerUtf8 = "REVELADO" + tagSuffix;
             out.bodyUtf8 = obj.textUtf8;
         }
@@ -98,13 +98,24 @@ inline CardTextLayout BuildStemCardLayout(const AnnotationObject& obj) {
     }
 
     if (obj.kind == ObjectKind::MathBlock) {
-        out.bg = DocColor::RGBA(239, 246, 255, 245);
-        out.border = (obj.stepCheckStatusUtf8.find("ERR") != std::string::npos ||
-                      obj.stepCheckStatusUtf8.find("DIFF") != std::string::npos)
-            ? DocColor::RGBA(220, 38, 38, 255)
-            : DocColor::RGBA(37, 99, 235, 255);
-        out.titleColor = DocColor::RGBA(29, 78, 216, 255);
-        out.bodyColor = DocColor::RGBA(15, 23, 42, 255);
+        const bool isErr = (obj.stepCheckStatusUtf8.find("ERR") != std::string::npos ||
+                            obj.stepCheckStatusUtf8.find("DIFF") != std::string::npos);
+        if (isDark) {
+            out.bg = DocColor::RGBA(30, 38, 54, 246);
+            out.border = isErr ? DocColor::RGBA(248, 113, 113, 255) : DocColor::RGBA(96, 165, 250, 235);
+            out.titleColor = DocColor::RGBA(147, 197, 253, 255);
+            out.bodyColor = DocColor::RGBA(241, 245, 249, 255);
+        } else if (isHc) {
+            out.bg = DocColor::RGBA(255, 255, 255, 255);
+            out.border = isErr ? DocColor::RGBA(196, 18, 48, 255) : DocColor::RGBA(0, 64, 221, 255);
+            out.titleColor = DocColor::RGBA(0, 50, 185, 255);
+            out.bodyColor = DocColor::RGBA(0, 0, 0, 255);
+        } else {
+            out.bg = DocColor::RGBA(239, 246, 255, 245);
+            out.border = isErr ? DocColor::RGBA(220, 38, 38, 255) : DocColor::RGBA(37, 99, 235, 255);
+            out.titleColor = DocColor::RGBA(29, 78, 216, 255);
+            out.bodyColor = DocColor::RGBA(15, 23, 42, 255);
+        }
         std::string modeBadge;
         if (obj.mathSubMode == MathSubMode::NoSub) modeBadge = " [#nosub]";
         else if (obj.mathSubMode == MathSubMode::NoVar) modeBadge = " [#novar]";
@@ -123,10 +134,22 @@ inline CardTextLayout BuildStemCardLayout(const AnnotationObject& obj) {
     }
 
     if (obj.kind == ObjectKind::CircuitBlock) {
-        out.bg = DocColor::RGBA(240, 253, 250, 245);
-        out.border = DocColor::RGBA(13, 148, 136, 255);
-        out.titleColor = DocColor::RGBA(15, 118, 110, 255);
-        out.bodyColor = DocColor::RGBA(15, 23, 42, 255);
+        if (isDark) {
+            out.bg = DocColor::RGBA(24, 42, 46, 246);
+            out.border = DocColor::RGBA(45, 212, 191, 235);
+            out.titleColor = DocColor::RGBA(94, 234, 212, 255);
+            out.bodyColor = DocColor::RGBA(240, 253, 250, 255);
+        } else if (isHc) {
+            out.bg = DocColor::RGBA(255, 255, 255, 255);
+            out.border = DocColor::RGBA(0, 104, 134, 255);
+            out.titleColor = DocColor::RGBA(0, 92, 118, 255);
+            out.bodyColor = DocColor::RGBA(0, 0, 0, 255);
+        } else {
+            out.bg = DocColor::RGBA(240, 253, 250, 245);
+            out.border = DocColor::RGBA(13, 148, 136, 255);
+            out.titleColor = DocColor::RGBA(15, 118, 110, 255);
+            out.bodyColor = DocColor::RGBA(15, 23, 42, 255);
+        }
         out.headerUtf8 = (obj.captionUtf8.empty() ? std::string("CIRCUITO MNA AC/DC") : obj.captionUtf8) + tagSuffix;
         if (!obj.evaluatedResultUtf8.empty()) {
             out.bodyUtf8 = obj.evaluatedResultUtf8;
@@ -138,10 +161,22 @@ inline CardTextLayout BuildStemCardLayout(const AnnotationObject& obj) {
     }
 
     if (obj.kind == ObjectKind::CalcSessionCard) {
-        out.bg = DocColor::RGBA(240, 253, 244, 245);
-        out.border = DocColor::RGBA(22, 163, 74, 255);
-        out.titleColor = DocColor::RGBA(21, 128, 61, 255);
-        out.bodyColor = DocColor::RGBA(15, 23, 42, 255);
+        if (isDark) {
+            out.bg = DocColor::RGBA(24, 42, 34, 246);
+            out.border = DocColor::RGBA(74, 222, 128, 230);
+            out.titleColor = DocColor::RGBA(134, 239, 172, 255);
+            out.bodyColor = DocColor::RGBA(240, 253, 244, 255);
+        } else if (isHc) {
+            out.bg = DocColor::RGBA(255, 255, 255, 255);
+            out.border = DocColor::RGBA(16, 112, 56, 255);
+            out.titleColor = DocColor::RGBA(14, 96, 48, 255);
+            out.bodyColor = DocColor::RGBA(0, 0, 0, 255);
+        } else {
+            out.bg = DocColor::RGBA(240, 253, 244, 245);
+            out.border = DocColor::RGBA(22, 163, 74, 255);
+            out.titleColor = DocColor::RGBA(21, 128, 61, 255);
+            out.bodyColor = DocColor::RGBA(15, 23, 42, 255);
+        }
         out.headerUtf8 = "CASIO " + (obj.calcModelIdUtf8.empty() ? std::string("ClassWiz") : obj.calcModelIdUtf8) + tagSuffix;
         std::string body = !obj.calcKeySeqUtf8.empty() ? ("Teclas: " + obj.calcKeySeqUtf8 + "\n") : "";
         if (!obj.calcLatexUtf8.empty()) body += obj.calcLatexUtf8 + "\n";
@@ -151,10 +186,22 @@ inline CardTextLayout BuildStemCardLayout(const AnnotationObject& obj) {
     }
 
     // PlotBlock
-    out.bg = DocColor::RGBA(248, 250, 252, 250);
-    out.border = DocColor::RGBA(99, 102, 241, 255);
-    out.titleColor = DocColor::RGBA(67, 56, 202, 255);
-    out.bodyColor = DocColor::RGBA(30, 41, 59, 255);
+    if (isDark) {
+        out.bg = DocColor::RGBA(30, 34, 48, 248);
+        out.border = DocColor::RGBA(129, 140, 248, 235);
+        out.titleColor = DocColor::RGBA(199, 210, 254, 255);
+        out.bodyColor = DocColor::RGBA(226, 232, 240, 255);
+    } else if (isHc) {
+        out.bg = DocColor::RGBA(255, 255, 255, 255);
+        out.border = DocColor::RGBA(54, 52, 163, 255);
+        out.titleColor = DocColor::RGBA(40, 38, 138, 255);
+        out.bodyColor = DocColor::RGBA(0, 0, 0, 255);
+    } else {
+        out.bg = DocColor::RGBA(248, 250, 252, 250);
+        out.border = DocColor::RGBA(99, 102, 241, 255);
+        out.titleColor = DocColor::RGBA(67, 56, 202, 255);
+        out.bodyColor = DocColor::RGBA(30, 41, 59, 255);
+    }
     out.headerUtf8 = (!obj.captionUtf8.empty() ? obj.captionUtf8
                    : (!obj.formulaExprUtf8.empty() ? obj.formulaExprUtf8 : std::string("GRAFICO 2D / 3D"))) + tagSuffix;
     out.bodyUtf8.clear();
@@ -492,9 +539,9 @@ inline MinimapOverlayData BuildMinimapOverlay(
     int viewHeightPx)
 {
     MinimapOverlayData mm{};
-    const double pw = 176.0;
-    const double ph = 122.0;
-    const double margin = 14.0;
+    const double pw = (viewWidthPx < 780) ? 124.0 : 148.0;
+    const double ph = (viewWidthPx < 780) ? 80.0 : 96.0;
+    const double margin = 12.0;
     mm.panelScreen = {
         (std::max)(8.0, static_cast<double>(viewWidthPx) - pw - margin),
         (std::max)(8.0, static_cast<double>(viewHeightPx) - ph - margin),
@@ -613,9 +660,10 @@ inline RulerOverlayData BuildRulerOverlay(const RulerState& r, const Camera2D& c
 
     const int degNorm = ((static_cast<int>(std::lround(r.angleDeg)) % 360) + 360) % 360;
     out.badgeUtf8 = "Regla " + std::to_string(degNorm) + "\xC2\xB0";
+    // Geometric center of the ruler band so a pill badge never clips across the bottom edge
     out.badgePos = cam.WorldToScreen(
-        r.centerX + nx * (widthW * 0.55) - ux * 28.0,
-        r.centerY + ny * (widthW * 0.55) - uy * 28.0);
+        r.centerX + nx * (widthW * 0.52),
+        r.centerY + ny * (widthW * 0.52));
     return out;
 }
 

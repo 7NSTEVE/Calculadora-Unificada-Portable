@@ -53,7 +53,7 @@ struct GlassSettings {
     bool IsDark() const noexcept { return mode == AppearanceMode::Dark; }
     bool IsHighContrast() const noexcept { return mode == AppearanceMode::HighContrast || increaseContrast; }
     float EffectiveOpacity() const noexcept {
-        if (reduceTransparency || mode == AppearanceMode::HighContrast) return 0.94f;
+        if (reduceTransparency) return 0.94f;
         return std::clamp(userOpacitySlider, 0.0f, 1.0f);
     }
 };

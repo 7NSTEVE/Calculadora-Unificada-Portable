@@ -133,7 +133,7 @@ inline void ApplyGuideFormatPreset(int preset) {
         g_expIncludeNotes = true; g_expIncludeStepNumbers = true; g_expIncludeLcdResult = true;
         g_expIncludeLatexFormula = true; g_expIncludeSummary = true; g_expHidePracticeAnswer = false;
         g_exportSheetLightTheme = true;
-        g_expStatusMsg = L"Formato: Gu\u00EDa explicada (notas, f\u00F3rmula LaTeX, pasos y LCD).";
+        g_expStatusMsg = L"Formato: Gu\u00EDa explicada (notas, f\u00F3rmula, pasos y LCD).";
     } else if (g_expFormatPreset == 1) {
         g_expIncludeNotes = false; g_expIncludeStepNumbers = true; g_expIncludeLcdResult = false;
         g_expIncludeLatexFormula = false; g_expIncludeSummary = true; g_expHidePracticeAnswer = false;
@@ -1190,7 +1190,7 @@ inline HBITMAP RenderPedagogicalSheetBitmap(
         ? (std::max)(44, MeasureLatexRichText(hdcMeasure, g_expNotesText, sheetW - 56, 15, false) + 20)
         : 0;
 
-    int formulaH = g_expIncludeLatexFormula ? (MeasureLatexRichText(hdcMeasure, L"F\u00F3rmula LaTeX 2D:  " + latexFormula, sheetW - 56, 17, false) + 22) : 0;
+    int formulaH = g_expIncludeLatexFormula ? (MeasureLatexRichText(hdcMeasure, L"F\u00F3rmula:  " + latexFormula, sheetW - 56, 17, false) + 22) : 0;
 
     // Calcular filas de tarjetas de botones
     int cardW = 86;
@@ -1964,39 +1964,39 @@ inline ExporterLayout ComputeExporterLayout(int cw, int ch) {
     int w = (std::max)(820, cw);
     int h = (std::max)(660, ch);
 
-    // Top form inputs (Title + 3-line Notes with comfortable vertical room)
+    // Top form inputs (Title + 3-line Notes with full headroom for \int and \frac)
     L.rcTitleChrome = { 172, 50, w - 28, 76 };
     L.rcTitleEdit   = { 180, 54, w - 36, 72 };
-    L.rcNotesChrome = { 172, 82, w - 28, 146 };
-    L.rcNotesEdit   = { 180, 86, w - 36, 142 };
+    L.rcNotesChrome = { 172, 82, w - 28, 174 };
+    L.rcNotesEdit   = { 180, 86, w - 36, 170 };
 
-    // Row 1 controls (Y = 160..192)
-    L.rcRangeStartMinus = { 66, 160, 92, 192 };
-    L.rcRangeStartVal   = { 94, 160, 134, 192 };
-    L.rcRangeStartPlus  = { 136, 160, 162, 192 };
+    // Row 1 controls (Y = 188..220)
+    L.rcRangeStartMinus = { 66, 188, 92, 220 };
+    L.rcRangeStartVal   = { 94, 188, 134, 220 };
+    L.rcRangeStartPlus  = { 136, 188, 162, 220 };
 
-    L.rcRangeEndMinus   = { 218, 160, 244, 192 };
-    L.rcRangeEndVal     = { 246, 160, 286, 192 };
-    L.rcRangeEndPlus    = { 288, 160, 314, 192 };
+    L.rcRangeEndMinus   = { 218, 188, 244, 220 };
+    L.rcRangeEndVal     = { 246, 188, 286, 220 };
+    L.rcRangeEndPlus    = { 288, 188, 314, 220 };
 
-    L.rcBtnSyncHist     = { 326, 160, 446, 192 };
-    L.rcBtnPresetCycle  = { 454, 160, 558, 192 };
-    L.rcBtnEquivModel   = { 566, 160, 686, 192 };
+    L.rcBtnSyncHist     = { 326, 188, 446, 220 };
+    L.rcBtnPresetCycle  = { 454, 188, 558, 220 };
+    L.rcBtnEquivModel   = { 566, 188, 686, 220 };
 
-    L.rcThemeSegTrack   = { w - 208, 160, w - 18, 192 };
+    L.rcThemeSegTrack   = { w - 208, 188, w - 18, 220 };
     int tw = (L.rcThemeSegTrack.right - L.rcThemeSegTrack.left - 8) / 2;
     L.rcThemeSeg[0]     = { L.rcThemeSegTrack.left + 4, L.rcThemeSegTrack.top + 3,
                             L.rcThemeSegTrack.left + 4 + tw, L.rcThemeSegTrack.bottom - 3 };
     L.rcThemeSeg[1]     = { L.rcThemeSeg[0].right + 2, L.rcThemeSegTrack.top + 3,
                             L.rcThemeSegTrack.right - 4, L.rcThemeSegTrack.bottom - 3 };
 
-    // Row 2 Format Segmented Bar & Toggle Chips (Y = 198..230)
+    // Row 2 Format Segmented Bar & Toggle Chips (Y = 226..258)
     int fmtRight = (std::min)(436, w * 43 / 100);
-    L.rcFmtSegTrack = { 18, 198, fmtRight, 230 };
+    L.rcFmtSegTrack = { 18, 226, fmtRight, 258 };
     int fw = (fmtRight - 18 - 14) / 4;
     for (int i = 0; i < 4; ++i) {
         int fx = 22 + i * (fw + 2);
-        L.rcFmtSeg[i] = { fx, 201, (i == 3) ? (fmtRight - 4) : (fx + fw), 227 };
+        L.rcFmtSeg[i] = { fx, 229, (i == 3) ? (fmtRight - 4) : (fx + fw), 255 };
     }
 
     int chipLeft = fmtRight + 10;
@@ -2005,7 +2005,7 @@ inline ExporterLayout ComputeExporterLayout(int cw, int ch) {
     int chipW = (chipAvail - 4 * chipGap) / 5;
     for (int i = 0; i < 5; ++i) {
         int cx = chipLeft + i * (chipW + chipGap);
-        L.rcToggleChips[i] = { cx, 199, (i == 4) ? (w - 18) : (cx + chipW), 229 };
+        L.rcToggleChips[i] = { cx, 227, (i == 4) ? (w - 18) : (cx + chipW), 257 };
     }
 
     // Bottom Dock anchor
@@ -2014,8 +2014,8 @@ inline ExporterLayout ComputeExporterLayout(int cw, int ch) {
     L.rcDockCard = { 18, dockTop, w - 18, dockBottom };
 
     // Preview Stage sits cleanly between row 2 caption and dock
-    L.rcPreviewStage = { 18, 254, w - 18, dockTop - 8 };
-    L.rcPreviewInner = { 28, 262, w - 28, dockTop - 16 };
+    L.rcPreviewStage = { 18, 282, w - 18, dockTop - 8 };
+    L.rcPreviewInner = { 28, 290, w - 28, dockTop - 16 };
 
     // Dock Left: 7-tool visual annotator (Off/Lapiz/Texto/Flecha/Circ./Marco/#N) + 4 ink swatches + Undo + Clear
     int annotY1 = dockTop + 14;
@@ -2715,7 +2715,7 @@ inline LRESULT CALLBACK SequenceExporterWndProc(HWND hwnd, UINT msg, WPARAM wPar
         );
 
         // Top Form Surface Panel
-        RECT rcFormPanel = { 18, 45, rc.right - 18, 152 };
+        RECT rcFormPanel = { 18, 45, rc.right - 18, 180 };
         CasioTheme::FillRoundRectAA(memDC, rcFormPanel, 9.0f, CasioTheme::StudioSurface(), CasioTheme::StudioBorder(), 1.0f);
 
         DrawLatexRichText(memDC, L"T\u00EDtulo:", { 30, 52, 166, 74 },
@@ -2750,8 +2750,8 @@ inline LRESULT CALLBACK SequenceExporterWndProc(HWND hwnd, UINT msg, WPARAM wPar
         // Row 1 controls: Range Steppers + Action Pills + Theme Segmented Switch
         SelectObject(memDC, hMetaF);
         SetTextColor(memDC, CasioTheme::StudioTextSec());
-        RECT rcLblDesde = { 18, 160, 64, 192 };
-        RECT rcLblHasta = { 170, 160, 216, 192 };
+        RECT rcLblDesde = { 18, 188, 64, 220 };
+        RECT rcLblHasta = { 170, 188, 216, 220 };
         DrawTextW(memDC, L"Desde:", -1, &rcLblDesde, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         DrawTextW(memDC, L"Hasta:", -1, &rcLblHasta, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -2805,7 +2805,7 @@ inline LRESULT CALLBACK SequenceExporterWndProc(HWND hwnd, UINT msg, WPARAM wPar
         struct ToggleChipInfo { bool val; const wchar_t* label; COLORREF accent; COLORREF softBg; } chips[5] = {
             { g_expIncludeNotes,        L"Notas",        CasioTheme::StudioAccent(),  CasioTheme::StudioAccentSoft() },
             { g_expIncludeStepNumbers,  L"Pasos #",      CasioTheme::StudioAccent(),  CasioTheme::StudioAccentSoft() },
-            { g_expIncludeLatexFormula, L"LaTeX",        CasioTheme::StudioAccent(),  CasioTheme::StudioAccentSoft() },
+            { g_expIncludeLatexFormula, L"F\u00F3rmula",      CasioTheme::StudioAccent(),  CasioTheme::StudioAccentSoft() },
             { g_expIncludeLcdResult,    L"Pantalla LCD", CasioTheme::StudioSuccess(), CasioTheme::StudioSuccessSoft() },
             { g_expHidePracticeAnswer,  L"Oculta Resp",  CasioTheme::StudioAmber(),   CasioTheme::StudioAmberSoft() }
         };
@@ -2830,7 +2830,7 @@ inline LRESULT CALLBACK SequenceExporterWndProc(HWND hwnd, UINT msg, WPARAM wPar
         // Caption above preview
         SelectObject(memDC, hSmallF);
         SetTextColor(memDC, CasioTheme::StudioTextMuted());
-        RECT rcPrevCap = { 18, 234, rc.right - 18, 252 };
+        RECT rcPrevCap = { 18, 262, rc.right - 18, 280 };
         DrawTextW(memDC,
                   L"Vista previa interactiva (clic en paso para omitir, o use L\u00E1piz mano alzada, Texto/Nota y formas sobre toda la hoja):",
                   -1, &rcPrevCap, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -2919,7 +2919,7 @@ inline LRESULT CALLBACK SequenceExporterWndProc(HWND hwnd, UINT msg, WPARAM wPar
         SelectObject(memDC, hMetaF);
         if (!latexVal.valid) {
             SetTextColor(memDC, CasioTheme::StudioRoseText());
-            std::wstring err = L"Sintaxis LaTeX: " + latexVal.diagnostic;
+            std::wstring err = L"Sintaxis matem\u00E1tica: " + latexVal.diagnostic;
             DrawTextW(memDC, err.c_str(), -1, &rcStatBar, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         } else {
             SetTextColor(memDC, CasioTheme::StudioSuccessText());

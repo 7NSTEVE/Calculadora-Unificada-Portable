@@ -1617,18 +1617,18 @@ inline void LayoutPdfViewer(PdfViewerState* st) {
 
     const int y0 = S(10);
     const int btnH = S(32);
-    int x = S(14);
+    int x = S(12);
 
-    st->btnRects[BTN_MANUALS] = RECT{ x, y0, x + S(108), y0 + btnH };
-    x += S(114);
-    st->btnRects[BTN_OPEN] = RECT{ x, y0, x + S(78), y0 + btnH };
-    x += S(84);
-    st->btnRects[BTN_TOPICS] = RECT{ x, y0, x + S(108), y0 + btnH };
-    x += S(124);
+    st->btnRects[BTN_MANUALS] = RECT{ x, y0, x + S(96), y0 + btnH };
+    x += S(100);
+    st->btnRects[BTN_OPEN] = RECT{ x, y0, x + S(70), y0 + btnH };
+    x += S(74);
+    st->btnRects[BTN_TOPICS] = RECT{ x, y0, x + S(98), y0 + btnH };
+    x += S(112);
 
-    st->btnRects[BTN_PREV] = RECT{ x, y0, x + S(38), y0 + btnH };
-    x += S(44);
-    st->editBoxChromeRc = RECT{ x, y0 + S(2), x + S(52), y0 + btnH - S(2) };
+    st->btnRects[BTN_PREV] = RECT{ x, y0, x + S(32), y0 + btnH };
+    x += S(36);
+    st->editBoxChromeRc = RECT{ x, y0 + S(2), x + S(46), y0 + btnH - S(2) };
     if (st->hPageEdit && IsWindow(st->hPageEdit)) {
         if (!st->hEditFont || std::fabs(st->editFontScale - sc) > 0.01f) {
             HFONT newF = CasioTheme::CreateUiFont(CasioTheme::UiToDevice(13, sc), true);
@@ -1648,22 +1648,22 @@ inline void LayoutPdfViewer(PdfViewerState* st) {
             (std::max)(18, static_cast<int>(st->editBoxChromeRc.bottom - st->editBoxChromeRc.top) - S(8)),
             TRUE);
     }
-    x += S(56);
-    st->pageTotalRc = RECT{ x, y0, x + S(64), y0 + btnH };
-    x += S(66);
-    st->btnRects[BTN_NEXT] = RECT{ x, y0, x + S(38), y0 + btnH };
+    x += S(50);
+    st->pageTotalRc = RECT{ x, y0, x + S(52), y0 + btnH };
     x += S(54);
+    st->btnRects[BTN_NEXT] = RECT{ x, y0, x + S(32), y0 + btnH };
+    x += S(46);
 
-    st->btnRects[BTN_ZOOM_OUT] = RECT{ x, y0, x + S(34), y0 + btnH };
+    st->btnRects[BTN_ZOOM_OUT] = RECT{ x, y0, x + S(30), y0 + btnH };
+    x += S(34);
+    st->btnRects[BTN_FIT] = RECT{ x, y0, x + S(74), y0 + btnH };
+    x += S(78);
+    st->btnRects[BTN_ZOOM_IN] = RECT{ x, y0, x + S(30), y0 + btnH };
     x += S(40);
-    st->btnRects[BTN_FIT] = RECT{ x, y0, x + S(82), y0 + btnH };
-    x += S(88);
-    st->btnRects[BTN_ZOOM_IN] = RECT{ x, y0, x + S(34), y0 + btnH };
-    x += S(44);
-    st->btnRects[BTN_STUDIO] = RECT{ x, y0, x + S(104), y0 + btnH };
-    x += S(114);
+    st->btnRects[BTN_STUDIO] = RECT{ x, y0, x + S(98), y0 + btnH };
+    x += S(106);
 
-    st->titleBadgeRc = RECT{ x, y0, (std::max)(x, cw - S(14)), y0 + btnH };
+    st->titleBadgeRc = RECT{ x, y0, (std::max)(x, cw - S(12)), y0 + btnH };
 
     if (st->hCanvas && IsWindow(st->hCanvas)) {
         MoveWindow(st->hCanvas, 0, tbH, cw, (std::max)(1, ch - tbH), TRUE);

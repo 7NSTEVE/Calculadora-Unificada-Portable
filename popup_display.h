@@ -232,29 +232,20 @@ static void DrawCompactViewIconGdi(HDC hdc, const RECT& rc, COLORREF color)
     DeleteObject(hPen);
 }
 
-// Draw crisp vector Always-on-Top window header bar icon inside `rc`
-static void DrawAlwaysOnTopIconGdi(HDC hdc, const RECT& rc, COLORREF color)
-{
-    int cx = (rc.left + rc.right) / 2;
-    int cy = (rc.top + rc.bottom) / 2;
-    HPEN hPen = CreatePen(PS_SOLID, 1, color);
-    HGDIOBJ oldPen = SelectObject(hdc, hPen);
-    HGDIOBJ oldBr = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-
-    Rectangle(hdc, cx - 7, cy - 5, cx + 7, cy + 5);
-    RECT topBar = { cx - 7, cy - 5, cx + 7, cy - 2 };
-    HBRUSH brTop = CreateSolidBrush(color);
-    FillRect(hdc, &topBar, brTop);
-    DeleteObject(brTop);
-
-    SelectObject(hdc, oldBr);
-    SelectObject(hdc, oldPen);
-    DeleteObject(hPen);
-}
-
 static LRESULT CALLBACK PopupDisplayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    static constexpr int POPUP_BAR_H = 34;
+    static constexpr int POPUP_BAR_H = 42;
+    static const RECT kRcToolsCap  = { 8, 5, 156, 37 };
+    static const RECT kRcModelsCap = { 164, 5, 434, 37 };
+    static const RECT kRcCam       = { 12, 8, 40, 34 };
+    static const RECT kRcGrid      = { 44, 8, 72, 34 };
+    static const RECT kRcZoom      = { 76, 8, 152, 34 };
+    static const RECT kRcModels[4] = {
+        { 168, 8, 240, 34 },
+        { 242, 8, 294, 34 },
+        { 296, 8, 356, 34 },
+        { 358, 8, 430, 34 }
+    };
 
     switch (msg) {
     case WM_ERASEBKGND:
@@ -267,56 +258,36 @@ static LRESULT CALLBACK PopupDisplayWndProc(HWND hWnd, UINT msg, WPARAM wParam, 
     case WM_LBUTTONDOWN: {
         int mx = LOWORD(lParam);
         int my = HIWORD(lParam);
-        RECT rcCam = { 8, 4, 38, 30 };
-        RECT rcGrid = { 42, 4, 72, 30 };
-        RECT rcZoom = { 76, 5, 152, 29 };
-        RECT rcC0 = { 158, 5, 216, 29 };
-        RECT rcC1 = { 220, 5, 268, 29 };
-        RECT rcC2 = { 272, 5, 328, 29 };
-        RECT rcC3 = { 332, 5, 396, 29 };
 
-        if (PtInRect(&rcCam, POINT{ mx, my })) {
+        if (PtInRect(&kRcCam, POINT{ mx, my })) {
             CopyAndSaveActiveLcd(g_activeCalcIdx, g_captureZoomScale);
             InvalidateRect(hWnd, nullptr, FALSE);
             return 0;
         }
-        if (PtInRect(&rcGrid, POINT{ mx, my })) {
+        if (PtInRect(&kRcGrid, POINT{ mx, my })) {
             g_popupShowGrid = !g_popupShowGrid;
             InvalidateRect(hWnd, nullptr, FALSE);
             return 0;
         }
-        if (PtInRect(&rcZoom, POINT{ mx, my })) {
+        if (PtInRect(&kRcZoom, POINT{ mx, my })) {
             g_captureZoomScale = (g_captureZoomScale % 3) + 1;
             int baseW = (g_activeCalcIdx == 3) ? 209 : ((g_activeCalcIdx == 2) ? 384 : ((g_activeCalcIdx == 1) ? 288 : 192));
             int baseH = (g_activeCalcIdx == 3) ?  97 : ((g_activeCalcIdx == 2) ? 216 : ((g_activeCalcIdx == 1) ? 111 : 75));
             RECT rcWnd{};
             GetWindowRect(hWnd, &rcWnd);
             SetWindowPos(hWnd, nullptr, rcWnd.left, rcWnd.top,
-                         max(412, baseW * g_captureZoomScale / 2 + 220),
-                         max(195, baseH * g_captureZoomScale / 2 + 115),
+                         max(448, baseW * g_captureZoomScale / 2 + 220),
+                         max(210, baseH * g_captureZoomScale / 2 + 125),
                          SWP_NOZORDER | SWP_NOACTIVATE);
             InvalidateRect(hWnd, nullptr, FALSE);
             return 0;
         }
-        if (PtInRect(&rcC0, POINT{ mx, my })) {
-            g_activeCalcIdx = 0;
-            InvalidateRect(hWnd, nullptr, FALSE);
-            return 0;
-        }
-        if (PtInRect(&rcC1, POINT{ mx, my })) {
-            g_activeCalcIdx = 1;
-            InvalidateRect(hWnd, nullptr, FALSE);
-            return 0;
-        }
-        if (PtInRect(&rcC2, POINT{ mx, my })) {
-            g_activeCalcIdx = 2;
-            InvalidateRect(hWnd, nullptr, FALSE);
-            return 0;
-        }
-        if (PtInRect(&rcC3, POINT{ mx, my })) {
-            g_activeCalcIdx = 3;
-            InvalidateRect(hWnd, nullptr, FALSE);
-            return 0;
+        for (int i = 0; i < 4; ++i) {
+            if (PtInRect(&kRcModels[i], POINT{ mx, my })) {
+                g_activeCalcIdx = i;
+                InvalidateRect(hWnd, nullptr, FALSE);
+                return 0;
+            }
         }
         // Clic directo sobre un indicador LCD superior para explicarlo
         if (my >= POPUP_BAR_H) {
@@ -374,50 +345,30 @@ static LRESULT CALLBACK PopupDisplayWndProc(HWND hWnd, UINT msg, WPARAM wParam, 
         HBITMAP hBmp = CreateCompatibleBitmap(hdcWin, rc.right, rc.bottom);
         HGDIOBJ hOldBmp = SelectObject(hdc, hBmp);
 
-        // Top toolbar strip (authentic light gray/white style matching reference screenshot)
+        // Apple HIG Liquid Glass 2.0 floating toolbar strip (Light / Dark / High Contrast)
         RECT rcBar = { 0, 0, rc.right, POPUP_BAR_H };
-        HBRUSH brBar = CreateSolidBrush(RGB(242, 243, 245));
-        FillRect(hdc, &rcBar, brBar);
-        DeleteObject(brBar);
-
-        HPEN penLine = CreatePen(PS_SOLID, 1, RGB(205, 208, 214));
-        HGDIOBJ oldPen = SelectObject(hdc, penLine);
-        MoveToEx(hdc, 0, POPUP_BAR_H - 1, nullptr);
-        LineTo(hdc, rc.right, POPUP_BAR_H - 1);
-        SelectObject(hdc, oldPen);
-        DeleteObject(penLine);
+        CasioTheme::DrawLiquidGlassHeaderStrip(hdc, rcBar, true);
+        CasioTheme::DrawFloatingGlassCapsule(hdc, kRcToolsCap, 1.0f, -1.0f, false);
+        CasioTheme::DrawFloatingGlassCapsule(hdc, kRcModelsCap, 1.0f, -1.0f, false);
 
         // Camera capture button
-        RECT rcCam = { 8, 4, 38, 30 };
-        DrawCameraIconGdi(hdc, rcCam, RGB(85, 90, 98));
+        DrawCameraIconGdi(hdc, kRcCam, CasioTheme::StudioTextSec());
 
         // Grid / Frame toggle button
-        RECT rcGrid = { 42, 4, 72, 30 };
         if (g_popupShowGrid) {
-            CasioTheme::FillRoundRectAA(hdc, rcGrid, 5.0f, RGB(212, 232, 252), RGB(50, 130, 220), 1.0f);
+            CasioTheme::FillRoundRectAA(hdc, kRcGrid, 12.0f, CasioTheme::StudioAccentSoft(), CasioTheme::StudioAccent(), 1.0f);
         }
-        DrawGridIconGdi(hdc, rcGrid, g_popupShowGrid ? RGB(24, 98, 185) : RGB(85, 90, 98));
+        DrawGridIconGdi(hdc, kRcGrid, g_popupShowGrid ? CasioTheme::StudioAccentText() : CasioTheme::StudioTextSec());
 
         // Zoom badge [x1 / x2 / x3]
-        RECT rcZoom = { 76, 5, 152, 29 };
         std::wstring zoomTxt = L"Zoom x" + std::to_wstring(g_captureZoomScale);
-        CasioTheme::DrawModernPill(hdc, rcZoom, RGB(229, 233, 240), RGB(204, 210, 220), RGB(45, 52, 64), zoomTxt, g_fontSmall, 5.0f);
+        CasioTheme::DrawStudioButton(hdc, kRcZoom, zoomTxt, g_fontSmall, CasioTheme::BTN_TOOLBAR_GHOST, false, false, 12.0f);
 
-        // Model selector pills
+        // Model selector segmented pills inside floating Liquid Glass capsule
         const wchar_t* pillLabels[4] = { L"Blanca", L"Gris", L"CG50", L"991CW" };
-        RECT pillRects[4] = {
-            { 158, 5, 216, 29 },
-            { 220, 5, 268, 29 },
-            { 272, 5, 328, 29 },
-            { 332, 5, 396, 29 }
-        };
         for (int i = 0; i < 4; ++i) {
             bool active = (g_activeCalcIdx == i);
-            CasioTheme::DrawModernPill(hdc, pillRects[i],
-                active ? RGB(40, 118, 208) : RGB(229, 233, 240),
-                active ? RGB(30, 98, 180) : RGB(204, 210, 220),
-                active ? RGB(255, 255, 255) : RGB(55, 62, 74),
-                pillLabels[i], g_fontSmall, 5.0f);
+            CasioTheme::DrawStudioSegmentItem(hdc, kRcModels[i], pillLabels[i], g_fontSmall, active, false, true);
         }
 
         // Main magnified LCD display area (aspect-preserving, never squished)
@@ -466,7 +417,7 @@ static LRESULT CALLBACK PopupDisplayWndProc(HWND hWnd, UINT msg, WPARAM wParam, 
         if (g_popupShowGrid) {
             RECT rcFrame = rcLcd;
             InflateRect(&rcFrame, -2, -2);
-            HBRUSH brF = CreateSolidBrush(RGB(40, 120, 215));
+            HBRUSH brF = CreateSolidBrush(CasioTheme::StudioAccent());
             FrameRect(hdc, &rcFrame, brF);
             DeleteObject(brF);
         }
@@ -537,7 +488,10 @@ static void TogglePopupDisplayWindow()
         popX, popY, popW, popH,
         g_hMainWnd, nullptr, g_hInst, nullptr);
 
-    ShowWindow(g_hPopupDisplayWnd, SW_SHOWNOACTIVATE);
-    UpdateWindow(g_hPopupDisplayWnd);
+    if (g_hPopupDisplayWnd) {
+        CasioTheme::ApplyDwmDarkTitleBar(g_hPopupDisplayWnd, CasioTheme::g_studioDarkTheme);
+        ShowWindow(g_hPopupDisplayWnd, SW_SHOWNOACTIVATE);
+        UpdateWindow(g_hPopupDisplayWnd);
+    }
     if (g_hCanvasWnd) InvalidateRect(g_hCanvasWnd, nullptr, FALSE);
 }

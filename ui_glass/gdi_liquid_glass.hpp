@@ -93,13 +93,20 @@ inline void DrawLiquidGlassCapsuleOnHdc(
         FillRect(hdcCap, &rcCapAll, brPad);
         DeleteObject(brPad);
     }
-    // Capture live pixels already drawn behind the floating capsule (clamped safely to >= 0)
+    // Capture live pixels already drawn behind the floating capsule (clamped safely to [0, backdropSize])
     const int srcX = (std::max)(0, capX);
     const int srcY = (std::max)(0, capY);
     const int dstX = srcX - capX;
     const int dstY = srcY - capY;
-    const int copyW = bufW - dstX;
-    const int copyH = bufH - dstY;
+    int copyW = bufW - dstX;
+    int copyH = bufH - dstY;
+    if (HBITMAP hSrcBmp = static_cast<HBITMAP>(GetCurrentObject(hdcBackdrop, OBJ_BITMAP))) {
+        BITMAP bm{};
+        if (GetObject(hSrcBmp, sizeof(bm), &bm) == sizeof(bm) && bm.bmWidth > 0 && bm.bmHeight > 0) {
+            copyW = (std::min)(copyW, (std::max)(0, static_cast<int>(bm.bmWidth) - srcX));
+            copyH = (std::min)(copyH, (std::max)(0, static_cast<int>(bm.bmHeight) - srcY));
+        }
+    }
     if (copyW > 0 && copyH > 0) {
         BitBlt(hdcCap, dstX, dstY, copyW, copyH, hdcBackdrop, srcX, srcY, SRCCOPY);
     }
@@ -117,7 +124,7 @@ inline void DrawLiquidGlassCapsuleOnHdc(
     op.tintProminence = std::clamp(tintProminence, 0.0f, 0.78f);
     op.darkMode = settings.IsDark();
     op.highContrastBorder = settings.IsHighContrast();
-    op.reduceTransparency = settings.reduceTransparency || (settings.mode == AppearanceMode::HighContrast);
+    op.reduceTransparency = settings.reduceTransparency;
     op.blurPasses = (boxW * boxH > 120000) ? 1 : 2;
 
     CompositeLiquidGlassCapsuleBgra32(

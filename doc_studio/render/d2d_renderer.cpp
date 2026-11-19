@@ -702,18 +702,21 @@ struct D2DRenderer::Impl {
                    obj.kind == ObjectKind::CircuitBlock ||
                    obj.kind == ObjectKind::CalcSessionCard ||
                    obj.kind == ObjectKind::PlotBlock) {
+            const bool isDarkCard = (overlay && overlay->darkTheme);
+            const bool isHcCard = (overlay && overlay->highContrast);
             const D2D1_RECT_F sr = rectToScreen(obj.bounds);
-            const auto card = RenderCommon::BuildStemCardLayout(obj);
+            const auto card = RenderCommon::BuildStemCardLayout(obj, isDarkCard, isHcCard);
             const float cardRad = (std::max)(4.0f, static_cast<float>(10.0 * cam.zoom));
             const D2D1_ROUNDED_RECT cardRR = D2D1::RoundedRect(sr, cardRad, cardRad);
             // Subtle elevation shadow for content card (standard material, never Liquid Glass)
-            brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(DocColor::RGBA(15, 23, 42, 22), layerOpacity)));
+            brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(
+                isDarkCard ? DocColor::RGBA(0, 0, 0, 72) : DocColor::RGBA(15, 23, 42, 22), layerOpacity)));
             rt->FillRoundedRectangle(D2D1::RoundedRect(
                 D2D1::RectF(sr.left + 1.0f, sr.top + 2.5f, sr.right + 1.0f, sr.bottom + 2.5f), cardRad, cardRad), brush);
             brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(card.bg, layerOpacity)));
             rt->FillRoundedRectangle(cardRR, brush);
             brush->SetColor(ToD2DColor(RenderCommon::ApplyLayerOpacity(card.border, layerOpacity)));
-            rt->DrawRoundedRectangle(cardRR, brush, (std::max)(1.0f, static_cast<float>(1.25 * cam.zoom)));
+            rt->DrawRoundedRectangle(cardRR, brush, (std::max)(1.0f, static_cast<float>((isHcCard ? 1.55 : 1.25) * cam.zoom)));
 
             const float pad = static_cast<float>(6.0 * cam.zoom);
             if (dwFactory) {
@@ -727,7 +730,7 @@ struct D2DRenderer::Impl {
                     mbk, obj, cardBox, cam.zoom,
                     RenderCommon::ApplyLayerOpacity(card.titleColor, layerOpacity),
                     RenderCommon::ApplyLayerOpacity(card.bodyColor, layerOpacity),
-                    card.headerUtf8, card.bodyUtf8);
+                    card.headerUtf8, card.bodyUtf8, isDarkCard);
                 rt->PopAxisAlignedClip();
             }
 
@@ -746,9 +749,10 @@ struct D2DRenderer::Impl {
                 const float py0 = sr.top + pad * 4.2f;
                 const float px1 = (std::max)(px0 + 16.0f, sr.right - pad * 1.2f);
                 const float py1 = (std::max)(py0 + 16.0f, sr.bottom - pad * 3.0f);
-                brush->SetColor(ToD2DColor(DocColor::RGBA(255, 255, 255, 235)));
+                brush->SetColor(ToD2DColor(isDarkCard ? DocColor::RGBA(19, 23, 33, 245) : DocColor::RGBA(255, 255, 255, 240)));
                 rt->FillRectangle(D2D1::RectF(px0, py0, px1, py1), brush);
-                brush->SetColor(ToD2DColor(DocColor::RGBA(148, 163, 184, 255)));
+                brush->SetColor(ToD2DColor(isDarkCard ? DocColor::RGBA(71, 85, 105, 235)
+                                         : (isHcCard ? DocColor::RGBA(30, 41, 59, 255) : DocColor::RGBA(148, 163, 184, 255))));
                 rt->DrawRectangle(D2D1::RectF(px0, py0, px1, py1), brush, 1.0f);
 
                 auto mapPt = [&](double wx, double wy) -> D2D1_POINT_2F {
@@ -773,12 +777,13 @@ struct D2DRenderer::Impl {
                         const auto a = mapPt(plot.xMin, 0.0), b = mapPt(plot.xMax, 0.0);
                         rt->DrawLine(a, b, brush, 0.9f);
                     }
-                    brush->SetColor(ToD2DColor(DocColor::RGBA(79, 70, 229, 255)));
+                    brush->SetColor(ToD2DColor(isDarkCard ? DocColor::RGBA(129, 140, 248, 255)
+                                             : (isHcCard ? DocColor::RGBA(0, 64, 221, 255) : DocColor::RGBA(79, 70, 229, 255))));
                     for (std::size_t i = 1; i < plot.curvePoints.size(); ++i) {
                         rt->DrawLine(mapPt(plot.curvePoints[i - 1].x, plot.curvePoints[i - 1].y),
                                      mapPt(plot.curvePoints[i].x, plot.curvePoints[i].y), brush, (std::max)(1.3f, static_cast<float>(1.8 * cam.zoom)));
                     }
-                    brush->SetColor(ToD2DColor(DocColor::RGBA(220, 38, 38, 255)));
+                    brush->SetColor(ToD2DColor(isDarkCard ? DocColor::RGBA(248, 113, 113, 255) : DocColor::RGBA(220, 38, 38, 255)));
                     for (const auto& sp : plot.scatterPoints) {
                         rt->FillEllipse(D2D1::Ellipse(mapPt(sp.x, sp.y), 3.0f, 3.0f), brush);
                     }
@@ -1020,6 +1025,9 @@ struct D2DRenderer::Impl {
     {
         if (!overlay) return;
 
+        const bool isDark = overlay->darkTheme;
+        const bool isHc = overlay->highContrast;
+
         if (overlay->rulerState.visible && d2dFactory) {
             const auto rg = RenderCommon::BuildRulerOverlay(overlay->rulerState, cam);
             ComPtr<ID2D1PathGeometry> poly;
@@ -1035,12 +1043,15 @@ struct D2DRenderer::Impl {
                     sink->EndFigure(D2D1_FIGURE_END_CLOSED);
                     sink->Close();
                 }
-                brush->SetColor(ToD2DColor(DocColor::RGBA(224, 242, 254, 175)));
+                brush->SetColor(ToD2DColor(isDark ? DocColor::RGBA(30, 58, 86, 195)
+                                                  : DocColor::RGBA(224, 242, 254, 185)));
                 rt->FillGeometry(poly.Get(), brush);
-                brush->SetColor(ToD2DColor(DocColor::RGBA(2, 132, 199, 240)));
+                brush->SetColor(ToD2DColor(isDark ? DocColor::RGBA(56, 189, 248, 235)
+                                                  : DocColor::RGBA(2, 132, 199, 240)));
                 rt->DrawGeometry(poly.Get(), brush, 1.5f);
             }
-            brush->SetColor(ToD2DColor(DocColor::RGBA(3, 105, 161, 255)));
+            brush->SetColor(ToD2DColor(isDark ? DocColor::RGBA(125, 211, 252, 255)
+                                              : DocColor::RGBA(3, 105, 161, 255)));
             rt->DrawLine(
                 D2D1::Point2F(static_cast<FLOAT>(rg.activeEdge0.x), static_cast<FLOAT>(rg.activeEdge0.y)),
                 D2D1::Point2F(static_cast<FLOAT>(rg.activeEdge1.x), static_cast<FLOAT>(rg.activeEdge1.y)),
@@ -1053,30 +1064,63 @@ struct D2DRenderer::Impl {
             }
             if (dwFactory && !rg.badgeUtf8.empty()) {
                 ComPtr<IDWriteTextFormat> fmt;
-                if (SUCCEEDED(dwFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD,
-                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.5f, L"es-ES", &fmt)) && fmt) {
+                if (SUCCEEDED(dwFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.0f, L"es-ES", &fmt)) && fmt) {
+                    fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                    fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                     const std::wstring wb = Utf8ToWide(rg.badgeUtf8);
-                    brush->SetColor(ToD2DColor(DocColor::RGBA(12, 74, 110, 255)));
-                    rt->DrawTextW(wb.c_str(), static_cast<UINT32>(wb.size()), fmt.Get(),
-                        D2D1::RectF(static_cast<FLOAT>(rg.badgePos.x), static_cast<FLOAT>(rg.badgePos.y),
-                                    static_cast<FLOAT>(rg.badgePos.x + 110.0), static_cast<FLOAT>(rg.badgePos.y + 22.0)), brush);
+                    const float pillW = 74.0f;
+                    const float pillH = 20.0f;
+                    const D2D1_RECT_F pillR = D2D1::RectF(
+                        static_cast<FLOAT>(rg.badgePos.x) - pillW * 0.5f,
+                        static_cast<FLOAT>(rg.badgePos.y) - pillH * 0.5f,
+                        static_cast<FLOAT>(rg.badgePos.x) + pillW * 0.5f,
+                        static_cast<FLOAT>(rg.badgePos.y) + pillH * 0.5f);
+                    const D2D1_ROUNDED_RECT pillRR = D2D1::RoundedRect(pillR, 10.0f, 10.0f);
+                    brush->SetColor(ToD2DColor(isDark ? DocColor::RGBA(15, 23, 42, 235)
+                                                      : DocColor::RGBA(255, 255, 255, 238)));
+                    rt->FillRoundedRectangle(pillRR, brush);
+                    brush->SetColor(ToD2DColor(isDark ? DocColor::RGBA(56, 189, 248, 220)
+                                                      : DocColor::RGBA(2, 132, 199, 210)));
+                    rt->DrawRoundedRectangle(pillRR, brush, 1.0f);
+                    brush->SetColor(ToD2DColor(isDark ? DocColor::RGBA(224, 242, 254, 255)
+                                                      : DocColor::RGBA(12, 74, 110, 255)));
+                    rt->DrawTextW(wb.c_str(), static_cast<UINT32>(wb.size()), fmt.Get(), pillR, brush);
                 }
             }
         }
 
-        if (overlay->minimapVisible) {
+        if (overlay->minimapVisible && widthPx >= 640 && heightPx >= 420) {
             const auto mm = RenderCommon::BuildMinimapOverlay(doc, cam, widthPx, heightPx);
             const D2D1_RECT_F pr = ToD2DRect(mm.panelScreen);
-            brush->SetColor(ToD2DColor(DocColor::RGBA(15, 23, 42, 215)));
-            rt->FillRectangle(pr, brush);
-            brush->SetColor(ToD2DColor(DocColor::RGBA(100, 116, 139, 240)));
-            rt->DrawRectangle(pr, brush, 1.2f);
+            const D2D1_ROUNDED_RECT mmRR = D2D1::RoundedRect(pr, 10.0f, 10.0f);
+            // Soft HIG elevation shadow
+            brush->SetColor(ToD2DColor(isDark ? DocColor::RGBA(0, 0, 0, 88) : DocColor::RGBA(15, 23, 42, 28)));
+            rt->FillRoundedRectangle(D2D1::RoundedRect(
+                D2D1::RectF(pr.left, pr.top + 2.5f, pr.right, pr.bottom + 2.5f), 10.0f, 10.0f), brush);
+            // Frosted Apple HIG Light / Dark / HighContrast minimap card
+            brush->SetColor(ToD2DColor(isDark ? DocColor::RGBA(28, 32, 42, 228)
+                                     : (isHc ? DocColor::RGBA(255, 255, 255, 248) : DocColor::RGBA(248, 250, 253, 228))));
+            rt->FillRoundedRectangle(mmRR, brush);
+            brush->SetColor(ToD2DColor(isHc ? DocColor::RGBA(24, 30, 42, 255)
+                                     : (isDark ? DocColor::RGBA(94, 106, 128, 210) : DocColor::RGBA(186, 198, 216, 220))));
+            rt->DrawRoundedRectangle(mmRR, brush, isHc ? 1.4f : 1.0f);
             for (const auto& it : mm.items) {
                 brush->SetColor(ToD2DColor(it.color));
-                rt->FillRectangle(ToD2DRect(it.rectScreen), brush);
+                rt->FillRoundedRectangle(D2D1::RoundedRect(ToD2DRect(it.rectScreen), 2.0f, 2.0f), brush);
             }
-            brush->SetColor(ToD2DColor(DocColor::RGBA(250, 204, 21, 250)));
-            rt->DrawRectangle(ToD2DRect(mm.viewportScreen), brush, 1.6f);
+            brush->SetColor(ToD2DColor(isDark ? DocColor::RGBA(56, 189, 248, 240) : DocColor::RGBA(0, 122, 255, 235)));
+            rt->DrawRoundedRectangle(D2D1::RoundedRect(ToD2DRect(mm.viewportScreen), 3.0f, 3.0f), brush, 1.5f);
+        }
+
+        // Composite live Liquid Glass 2.0 floating overlay (e.g. Appearance Popover) inside Direct2D
+        if (overlay->floatingOverlayBgra && overlay->floatingOverlayBgra->Valid() &&
+            overlay->floatingOverlayScreenRect.w > 0.0 && overlay->floatingOverlayScreenRect.h > 0.0) {
+            ComPtr<ID2D1Bitmap> ovBmp;
+            ovBmp.Attach(UploadBgra32(rt, *overlay->floatingOverlayBgra));
+            if (ovBmp) {
+                rt->DrawBitmap(ovBmp.Get(), ToD2DRect(overlay->floatingOverlayScreenRect));
+            }
         }
     }
 };

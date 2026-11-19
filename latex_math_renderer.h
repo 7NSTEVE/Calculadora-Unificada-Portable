@@ -766,7 +766,7 @@ inline BigOpMetrics ComputeBigOpMetrics(HDC hdc, const std::shared_ptr<LatexNode
         int subBotBelow = node->sub ? LMax(opBotBelowBase, bm.subBaselineBelowMain + subDesc) : opBotBelowBase;
 
         int limW = LMax(node->sup ? node->sup->width : 0, node->sub ? node->sub->width : 0);
-        bm.width = bm.opSize.cx + limW + 6;
+        bm.width = bm.opSize.cx + limW + ((limW > 0) ? 4 : 1);
         bm.ascent = supTopAbove + 1;
         bm.height = bm.ascent + subBotBelow + 1;
     }
@@ -842,10 +842,10 @@ inline void MeasureNode(HDC hdc, const std::shared_ptr<LatexNode>& node, int fon
         int innerH = node->num ? node->num->height : fontSize;
         int innerAsc = node->num ? node->num->ascent : (fontSize * 4) / 5;
         int innerW = node->num ? node->num->width : 4;
-        bool tall = (innerH > (fontSize * 145) / 100);
+        bool tall = (innerH > (fontSize * 210) / 100);
         auto measureDel = [&](const std::wstring& d) -> int {
             if (d.empty() || d == L".") return 1;
-            if (tall) return LMax(6, fontSize / 2);
+            if (tall) return LMax(7, (fontSize * 55) / 100);
             HFONT hFont = CreateMathFont(fontSize, false, node->bold, true);
             HFONT hOld = (HFONT)SelectObject(hdc, hFont);
             SIZE sz{};
@@ -910,7 +910,7 @@ inline void MeasureNode(HDC hdc, const std::shared_ptr<LatexNode>& node, int fon
         int radW = LMax(10, (fontSize * 3) / 5);
         int innerH = node->num ? node->num->height : fontSize;
         int innerAsc = node->num ? node->num->ascent : (fontSize * 4) / 5;
-        node->width = idxW + radW + (node->num ? node->num->width : 6) + 4;
+        node->width = idxW + radW + (node->num ? node->num->width : 6) + 7;
         node->ascent = innerAsc + 5;
         node->height = innerH + 6;
         return;
@@ -955,12 +955,12 @@ inline void DrawTallDelimiter(HDC hdc, const std::wstring& sym, int x, int topY,
     int h = LMax(8, botY - topY);
     if (sym == L"(" || sym == L")") {
         bool left = (sym == L"(");
-        int xOuter = left ? (x + parenW - 2) : (x + 1);
-        int xCurve = left ? (x + 2) : (x + parenW - 3);
+        int xOuter = left ? (x + parenW - 1) : (x + 1);
+        int xCurve = left ? (x + 1) : (x + parenW - 2);
         POINT pts[4] = {
             { xOuter, topY + 1 },
-            { xCurve, topY + h / 4 },
-            { xCurve, topY + (3 * h) / 4 },
+            { xCurve, topY + h / 6 },
+            { xCurve, botY - h / 6 },
             { xOuter, botY - 1 }
         };
         PolyBezier(hdc, pts, 4);
@@ -1045,10 +1045,10 @@ inline void DrawNode(HDC hdc, const std::shared_ptr<LatexNode>& node, int x, int
     if (node->type == LatexNode::NODE_PAREN_GROUP) {
         int innerH = node->num ? node->num->height : fontSize;
         int innerW = node->num ? node->num->width : 4;
-        bool tall = (innerH > (fontSize * 145) / 100);
+        bool tall = (innerH > (fontSize * 210) / 100);
         if (tall) {
-            int leftW = (node->text.empty() || node->text == L".") ? 1 : LMax(6, fontSize / 2);
-            int rightW = (node->closeText.empty() || node->closeText == L".") ? 1 : LMax(6, fontSize / 2);
+            int leftW = (node->text.empty() || node->text == L".") ? 1 : LMax(7, (fontSize * 55) / 100);
+            int rightW = (node->closeText.empty() || node->closeText == L".") ? 1 : LMax(7, (fontSize * 55) / 100);
             int topY = baselineY - node->ascent + 1;
             int botY = baselineY + (node->height - node->ascent) - 1;
             DrawTallDelimiter(hdc, node->text, x, topY, botY, leftW, color);
@@ -1140,12 +1140,12 @@ inline void DrawNode(HDC hdc, const std::shared_ptr<LatexNode>& node, int x, int
         LineTo(hdc, radX + 3, midY);
         LineTo(hdc, radX + radW / 2, botY);
         LineTo(hdc, radX + radW - 1, topY);
-        LineTo(hdc, radX + radW + contentW + 2, topY);
+        LineTo(hdc, radX + radW + contentW + 5, topY);
         SelectObject(hdc, hOldPen);
         DeleteObject(hPen);
 
         if (node->num) {
-            DrawNode(hdc, node->num, radX + radW + 1, baselineY, fontSize, color, true);
+            DrawNode(hdc, node->num, radX + radW + 3, baselineY, fontSize, color, true);
         }
         return;
     }

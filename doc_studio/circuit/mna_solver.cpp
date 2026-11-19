@@ -2680,11 +2680,13 @@ TransientWaveformResult SimulateTransientMna(
         tr.vRms = std::sqrt(sumSq * invN);
     }
 
+    const double zeroSnap = 1e-12 * (std::max)(1.0, (std::max)(std::abs(tr.vMax), std::abs(tr.vMin)));
+    auto fmtV = [zeroSnap](double v) noexcept { return (std::abs(v) < zeroSnap) ? 0.0 : v; };
     std::ostringstream oss;
     oss.precision(4);
     oss << "Osciloscopio Nodo " << probe << " [0.." << durationSec * 1000.0 << " ms]: "
-        << "Vmax=" << tr.vMax << " V, Vmin=" << tr.vMin << " V, "
-        << "Vrms=" << tr.vRms << " V, Vdc=" << tr.vDcAvg << " V";
+        << "Vmax=" << fmtV(tr.vMax) << " V, Vmin=" << fmtV(tr.vMin) << " V, "
+        << "Vrms=" << fmtV(tr.vRms) << " V, Vdc=" << fmtV(tr.vDcAvg) << " V";
     tr.summaryUtf8 = oss.str();
     tr.ok = true;
     return tr;

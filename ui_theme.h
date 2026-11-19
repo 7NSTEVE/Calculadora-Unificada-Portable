@@ -876,7 +876,59 @@ inline void DrawStudioButton(
         }
         return;
     }
-    DrawModernButton(hdc, rc, txt, hFont, variant, active, hovered);
+    COLORREF fill = pal.contentCardElevated.ToColorRef();
+    COLORREF border = hc ? pal.borderStrong.ToColorRef() : pal.borderSubtle.ToColorRef();
+    COLORREF fg = pal.labelPrimary.ToColorRef();
+    switch (variant) {
+    case BTN_PRIMARY:
+        fill   = hovered ? pal.accentBlueHover.ToColorRef() : pal.accentBlue.ToColorRef();
+        border = hc ? pal.borderStrong.ToColorRef() : fill;
+        fg     = RGB(255, 255, 255);
+        break;
+    case BTN_SUCCESS:
+        fill   = active ? RGB(20, 128, 88) : SuccessSoft;
+        border = hc ? pal.borderStrong.ToColorRef() : (active ? SuccessGreen : RGB(44, 118, 92));
+        fg     = active ? RGB(255, 255, 255) : SuccessText;
+        break;
+    case BTN_VIOLET:
+        fill   = active ? RGB(104, 72, 206) : VioletSoft;
+        border = hc ? pal.borderStrong.ToColorRef() : (active ? VioletAccent : RGB(102, 82, 168));
+        fg     = active ? RGB(255, 255, 255) : VioletText;
+        break;
+    case BTN_AMBER:
+        fill   = active ? RGB(154, 96, 16) : AmberSoft;
+        border = hc ? pal.borderStrong.ToColorRef() : (active ? AmberWarm : RGB(142, 98, 28));
+        fg     = active ? RGB(255, 255, 255) : AmberText;
+        break;
+    case BTN_DANGER:
+        fill   = active ? RGB(176, 38, 64) : RoseSoft;
+        border = hc ? pal.borderStrong.ToColorRef() : (active ? RoseRed : RGB(146, 52, 74));
+        fg     = active ? RGB(255, 255, 255) : RoseText;
+        break;
+    case BTN_TOOLBAR_GHOST:
+        fill   = active ? pal.glassPillSelected.ToColorRef() : (hovered ? pal.glassPillHover.ToColorRef() : CLR_INVALID);
+        border = active ? pal.accentBlue.ToColorRef() : (hovered ? (hc ? pal.borderStrong.ToColorRef() : pal.borderSubtle.ToColorRef()) : CLR_INVALID);
+        fg     = active ? RGB(122, 198, 255) : (hovered ? pal.labelPrimary.ToColorRef() : pal.labelSecondary.ToColorRef());
+        break;
+    default: // BTN_SECONDARY / BTN_GHOST
+        fill   = active ? pal.accentBlueSoft.ToColorRef() : (hovered ? pal.glassPillHover.ToColorRef() : pal.contentCardElevated.ToColorRef());
+        border = active ? pal.accentBlue.ToColorRef() : (hc ? pal.borderStrong.ToColorRef() : (hovered ? pal.borderStrong.ToColorRef() : pal.borderSubtle.ToColorRef()));
+        fg     = active ? RGB(122, 198, 255) : pal.labelPrimary.ToColorRef();
+        break;
+    }
+    if (fill == CLR_INVALID && border == CLR_INVALID) {
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, fg);
+        HGDIOBJ oldF = hFont ? SelectObject(hdc, hFont) : nullptr;
+        RECT tx = rc;
+        int pad = ((rc.right - rc.left) < 38) ? 2 : 6;
+        tx.left += pad;
+        tx.right -= pad;
+        DrawTextW(hdc, txt.c_str(), -1, &tx, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        if (oldF) SelectObject(hdc, oldF);
+    } else {
+        DrawModernPill(hdc, rc, fill, border, fg, txt, hFont, radius);
+    }
 }
 
 inline void DrawStudioSegmentItem(

@@ -1,18 +1,22 @@
 # Calculadora Unificada — Edición Core Oficial (Producción Win32)
 
-Aplicación de producción para Windows (Win32 `x86`) que integra en un único ejecutable portable (`CalculadoraUnificada.exe`, CRT estático `/MT`) las **cuatro calculadoras científicas y graficadoras CASIO** sobre sus motores y firmwares originales (`fx-991CW ClassWiz II`, `fx-570LA X / 991LA X`, `fx-570VN PLUS / ES PLUS` y `fx-CG50 PRIZM`), con interfaz moderna **Porcelana Claro** y **Modo Oscuro**, renderizado matemático visual en **LaTeX 2D**, modo compacto vertical con cajón lateral expandible de secuencia, capturas automáticas pre-entrada (`App · LCD`), anotador gráfico a mano alzada y **Visor Nativo de PDF sin dependencias externas** sobre **16 manuales oficiales** (Hardware y Software, Español e Inglés).
+Aplicación de producción para Windows que integra en una distribución portable (`CalculadoraUnificada.exe` Win32 con CRT estático `/MT` + `DocumentStudio.exe` x64 Direct2D) las **cuatro calculadoras científicas y graficadoras CASIO** sobre sus motores y firmwares originales (`fx-991CW ClassWiz II`, `fx-570LA X / 991LA X`, `fx-570VN PLUS / ES PLUS` y `fx-CG50 PRIZM`) junto con **Document Studio** (Lienzo Infinito, Motor PDF, Laboratorio STEM y Módulos Académicos), con interfaz rediseñada bajo **Apple HIG + Liquid Glass 2.0** en modos **Claro**, **Oscuro** y **Alto Contraste (WCAG AAA)**, renderizado matemático natural en **2D** con teclas gráficas CASIO, modo compacto vertical con cajón lateral expandible de secuencia, capturas automáticas pre-entrada (`App · LCD`), anotador gráfico a mano alzada y **Visor Nativo de PDF sin dependencias externas** sobre **16 manuales oficiales** (Hardware y Software, Español e Inglés).
 
 ---
 
 ## Vista previa de capturas (`docs/screenshots/`)
 
-| Tema Porcelana Claro (4 calculadoras + Historial e Inspector) | Modo Oscuro (Comparación en vivo + Gráfica dual) |
+| Apple HIG + Liquid Glass 2.0 Claro (4 calculadoras activas) | Modo Oscuro (`fx-991CW` Solo + Dock Liquid Glass 2.0) |
 | :---: | :---: |
-| ![Comparar 4 calculadoras Porcelana Claro](docs/screenshots/09_compare_all4_complex_states.png) | ![Comparar 4 calculadoras Modo Oscuro](docs/screenshots/24_dark_theme_main_all4.png) |
+| ![Comparar 4 calculadoras Liquid Glass Claro](docs/screenshots/lg_calc_compare_all4_light.png) | ![fx-991CW Modo Oscuro Liquid Glass](docs/screenshots/lg_calc_solo_cw_dark.png) |
 
-| `fx-991CW` (Polynomial Solver + `App · LCD`) | `fx-CG50 PRIZM` (Gráfica dual + `G-Solv`) | Modo Compacto + Cajón de Secuencia | Visor Nativo PDF (`Windows.Data.Pdf`) |
+| Document Studio — Lienzo STEM 2D + MNA + 3D CVD (Claro) | Document Studio — Modo Oscuro + Popover Apariencia (Refracción en Vivo) |
+| :---: | :---: |
+| ![Document Studio STEM Liquid Glass Claro](docs/screenshots/lg_studio_stem_light.png) | ![Document Studio Oscuro con Popover Liquid Glass](docs/screenshots/lg_studio_stem_dark_popover.png) |
+
+| Exportador LaTeX 2D (Oscuro) | Modo Compacto Vertical (Oscuro) | Visor Nativo PDF (`Windows.Data.Pdf`) | Document Studio — Módulos Académicos |
 | :---: | :---: | :---: | :---: |
-| ![fx-991CW Polynomial Solver](docs/screenshots/02_fx991cw_poly_roots.png) | ![fx-CG50 Dual Graph G-Solv](docs/screenshots/08_fxcg50_gsolv_root.png) | ![Modo Compacto fx-991CW con cajón](docs/screenshots/12_compact_991cw_drawer.png) | ![Visor Nativo PDF 16 manuales](docs/screenshots/16_pdf_991cw_es.png) |
+| ![Exportador LaTeX 2D Modo Oscuro](docs/screenshots/lg_calc_exporter_dark.png) | ![Modo Compacto Liquid Glass Oscuro](docs/screenshots/lg_calc_compact_dark.png) | ![Visor Nativo PDF 16 manuales](docs/screenshots/lg_calc_pdf_light.png) | ![Document Studio Inspector Académico](docs/screenshots/lg_studio_academic_light.png) |
 
 ---
 

@@ -127,6 +127,8 @@ struct ViewportOverlayState {
     bool focusMode = false;
     bool darkTheme = false;
     bool highContrast = false;
+    const RasterImageBgra32* floatingOverlayBgra = nullptr;
+    DocRect floatingOverlayScreenRect{};
 };
 
 class D2DRenderer {

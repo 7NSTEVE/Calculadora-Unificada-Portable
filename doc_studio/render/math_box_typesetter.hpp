@@ -171,10 +171,27 @@ inline std::string NormalizeLineToRichLatex(const std::string& rawLine, bool isM
                 if (sg.find('=') == std::string::npos) { allAssign = false; break; }
             }
             if (allAssign) {
+                auto prettifyTelemetrySym = [](std::string seg) {
+                    auto rep = [&](const char* from, const char* to) {
+                        const std::size_t flen = std::char_traits<char>::length(from);
+                        if (seg.size() >= flen && seg.compare(0, flen, from) == 0) {
+                            seg.replace(0, flen, to);
+                        }
+                    };
+                    rep("Vmax=", "V_max=");
+                    rep("Vmin=", "V_min=");
+                    rep("Vrms=", "V_rms=");
+                    rep("Vdc=",  "V_dc=");
+                    rep("Imax=", "I_max=");
+                    rep("Imin=", "I_min=");
+                    rep("Irms=", "I_rms=");
+                    rep("Idc=",  "I_dc=");
+                    return seg;
+                };
                 std::string out;
                 for (std::size_t i = 0; i < segs.size(); ++i) {
-                    if (i > 0) out += "   \xC2\xB7   ";
-                    out += "$" + Cas::ConvertCasExprToLatex(segs[i]) + "$";
+                    if (i > 0) out += "  \xC2\xB7  ";
+                    out += "$" + Cas::ConvertCasExprToLatex(prettifyTelemetrySym(segs[i])) + "$";
                 }
                 return out;
             }
@@ -846,7 +863,7 @@ struct CasioKeycapToken {
     DocColor text = DocColor::RGBA(15, 23, 42, 255);
 };
 
-inline std::vector<CasioKeycapToken> ParseCasioKeycaps(const std::string& seqUtf8) {
+inline std::vector<CasioKeycapToken> ParseCasioKeycaps(const std::string& seqUtf8, bool darkSurface = false) {
     std::vector<CasioKeycapToken> out;
     auto pushTok = [&](const std::string& raw, bool bracketed) {
         std::string s = raw;
@@ -858,7 +875,7 @@ inline std::vector<CasioKeycapToken> ParseCasioKeycaps(const std::string& seqUtf
             CasioKeycapToken t;
             t.label = "\xE2\x86\x92";
             t.isArrow = true;
-            t.text = DocColor::RGBA(100, 116, 139, 255);
+            t.text = darkSurface ? DocColor::RGBA(148, 163, 184, 255) : DocColor::RGBA(100, 116, 139, 255);
             out.push_back(t);
             return;
         }
@@ -867,77 +884,81 @@ inline std::vector<CasioKeycapToken> ParseCasioKeycaps(const std::string& seqUtf
         std::string up = s;
         for (char& ch : up) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
 
+        const DocColor opFill   = darkSurface ? DocColor::RGBA(51, 65, 85, 255)   : DocColor::RGBA(226, 232, 240, 255);
+        const DocColor opStroke = darkSurface ? DocColor::RGBA(100, 116, 139, 255) : DocColor::RGBA(148, 163, 184, 255);
+        const DocColor opText   = darkSurface ? DocColor::RGBA(241, 245, 249, 255) : DocColor::RGBA(15, 23, 42, 255);
+        const DocColor numFill  = darkSurface ? DocColor::RGBA(36, 46, 62, 255)   : DocColor::RGBA(255, 255, 255, 255);
+
         if (up == "SHIFT") {
             k.label = "SHIFT";
-            k.fill = DocColor::RGBA(254, 243, 199, 255);
-            k.stroke = DocColor::RGBA(217, 119, 6, 255);
-            k.text = DocColor::RGBA(146, 64, 14, 255);
+            k.fill = darkSurface ? DocColor::RGBA(217, 152, 24, 255) : DocColor::RGBA(254, 243, 199, 255);
+            k.stroke = darkSurface ? DocColor::RGBA(251, 191, 36, 255) : DocColor::RGBA(217, 119, 6, 255);
+            k.text = darkSurface ? DocColor::RGBA(24, 16, 4, 255) : DocColor::RGBA(146, 64, 14, 255);
         } else if (up == "ALPHA") {
             k.label = "ALPHA";
-            k.fill = DocColor::RGBA(254, 226, 226, 255);
-            k.stroke = DocColor::RGBA(220, 38, 38, 255);
-            k.text = DocColor::RGBA(153, 27, 27, 255);
+            k.fill = darkSurface ? DocColor::RGBA(210, 56, 102, 255) : DocColor::RGBA(254, 226, 226, 255);
+            k.stroke = darkSurface ? DocColor::RGBA(248, 113, 113, 255) : DocColor::RGBA(220, 38, 38, 255);
+            k.text = darkSurface ? DocColor::RGBA(255, 255, 255, 255) : DocColor::RGBA(153, 27, 27, 255);
         } else if (up == "EXE" || up == "OK" || up == "=") {
             k.label = (up == "=") ? "=" : up;
             k.fill = DocColor::RGBA(37, 99, 235, 255);
-            k.stroke = DocColor::RGBA(29, 78, 216, 255);
+            k.stroke = darkSurface ? DocColor::RGBA(96, 165, 250, 255) : DocColor::RGBA(29, 78, 216, 255);
             k.text = DocColor::RGBA(255, 255, 255, 255);
         } else if (up == "AC" || up == "DEL" || up == "ON") {
             k.label = up;
             k.fill = DocColor::RGBA(234, 88, 12, 255);
-            k.stroke = DocColor::RGBA(194, 65, 12, 255);
+            k.stroke = darkSurface ? DocColor::RGBA(251, 146, 60, 255) : DocColor::RGBA(194, 65, 12, 255);
             k.text = DocColor::RGBA(255, 255, 255, 255);
         } else if (up == "HOME" || up == "MENU" || up == "MODE" || up == "OPTN" || up == "CATALOG" || up == "TOOLS" || up == "FORMAT") {
             k.label = up;
             k.fill = DocColor::RGBA(30, 41, 59, 255);
-            k.stroke = DocColor::RGBA(15, 23, 42, 255);
+            k.stroke = darkSurface ? DocColor::RGBA(100, 116, 139, 255) : DocColor::RGBA(15, 23, 42, 255);
             k.text = DocColor::RGBA(248, 250, 252, 255);
         } else if (up == "X10^X" || up == "EXP") {
             k.label = "\xC3\x97" "10\xCB\xA3"; // ×10ˣ
-            k.fill = DocColor::RGBA(241, 245, 249, 255);
-            k.stroke = DocColor::RGBA(100, 116, 139, 255);
-            k.text = DocColor::RGBA(15, 23, 42, 255);
+            k.fill = opFill;
+            k.stroke = opStroke;
+            k.text = opText;
         } else if (up == "X" || s == "*") {
             k.label = "\xC3\x97"; // ×
-            k.fill = DocColor::RGBA(226, 232, 240, 255);
-            k.stroke = DocColor::RGBA(148, 163, 184, 255);
-            k.text = DocColor::RGBA(15, 23, 42, 255);
+            k.fill = opFill;
+            k.stroke = opStroke;
+            k.text = opText;
         } else if (s == "/") {
             k.label = "\xC3\xB7"; // ÷
-            k.fill = DocColor::RGBA(226, 232, 240, 255);
-            k.stroke = DocColor::RGBA(148, 163, 184, 255);
-            k.text = DocColor::RGBA(15, 23, 42, 255);
+            k.fill = opFill;
+            k.stroke = opStroke;
+            k.text = opText;
         } else if (s == "(-)" || s == "-") {
             k.label = (s == "(-)") ? "(\xE2\x88\x92)" : "\xE2\x88\x92";
-            k.fill = DocColor::RGBA(226, 232, 240, 255);
-            k.stroke = DocColor::RGBA(148, 163, 184, 255);
-            k.text = DocColor::RGBA(15, 23, 42, 255);
+            k.fill = opFill;
+            k.stroke = opStroke;
+            k.text = opText;
         } else if (up == "RIGHT") {
             k.label = "\xE2\x96\xB6";
-            k.fill = DocColor::RGBA(226, 232, 240, 255);
-            k.stroke = DocColor::RGBA(148, 163, 184, 255);
+            k.fill = opFill;
+            k.stroke = opStroke;
+            k.text = opText;
         } else if (up == "LEFT") {
             k.label = "\xE2\x97\x80";
-            k.fill = DocColor::RGBA(226, 232, 240, 255);
-            k.stroke = DocColor::RGBA(148, 163, 184, 255);
+            k.fill = opFill;
+            k.stroke = opStroke;
+            k.text = opText;
         } else if (up == "DOWN") {
             k.label = "\xE2\x96\xBC";
-            k.fill = DocColor::RGBA(226, 232, 240, 255);
-            k.stroke = DocColor::RGBA(148, 163, 184, 255);
+            k.fill = opFill;
+            k.stroke = opStroke;
+            k.text = opText;
         } else if (up == "UP") {
             k.label = "\xE2\x96\xB2";
-            k.fill = DocColor::RGBA(226, 232, 240, 255);
-            k.stroke = DocColor::RGBA(148, 163, 184, 255);
+            k.fill = opFill;
+            k.stroke = opStroke;
+            k.text = opText;
         } else {
             k.label = s;
-            if (bracketed) {
-                k.fill = DocColor::RGBA(226, 232, 240, 255);
-                k.stroke = DocColor::RGBA(100, 116, 139, 255);
-            } else {
-                k.fill = DocColor::RGBA(255, 255, 255, 255);
-                k.stroke = DocColor::RGBA(148, 163, 184, 255);
-            }
-            k.text = DocColor::RGBA(15, 23, 42, 255);
+            k.fill = bracketed ? opFill : numFill;
+            k.stroke = opStroke;
+            k.text = opText;
         }
         out.push_back(std::move(k));
     };
@@ -974,9 +995,10 @@ inline double DrawCasioKeycapStrip(
     double topY,
     double maxWidth,
     double maxHeight,
-    double fontSize)
+    double fontSize,
+    bool darkSurface = false)
 {
-    const auto caps = ParseCasioKeycaps(keySeqUtf8);
+    const auto caps = ParseCasioKeycaps(keySeqUtf8, darkSurface);
     if (caps.empty()) return 0.0;
 
     const double fs = (std::max)(6.5, fontSize * 0.84);
@@ -1032,7 +1054,8 @@ inline void DrawStemCardContent(
     DocColor titleColor,
     DocColor bodyColor,
     const std::string& headerFallbackUtf8,
-    const std::string& bodyFallbackUtf8)
+    const std::string& bodyFallbackUtf8,
+    bool darkSurface = false)
 {
     const double pad = (std::max)(4.0, 8.0 * zoom);
     const double titleFs = (std::max)(8.5, 11.5 * zoom);
@@ -1060,7 +1083,7 @@ inline void DrawStemCardContent(
     // Subtle hairline separator under header (except PlotBlock where plot frame sits right below)
     if (obj.kind != ObjectKind::PlotBlock && curY < maxY - 6.0) {
         DocColor sep = titleColor;
-        sep.a = 45;
+        sep.a = darkSurface ? 72 : 45;
         bk.DrawLine(sr.x + pad, curY, sr.x + sr.w - pad, curY, (std::max)(0.75, 0.85 * zoom), sep);
         curY += pad * 0.55;
     }
@@ -1078,7 +1101,7 @@ inline void DrawStemCardContent(
         }
         if (!obj.calcKeySeqUtf8.empty() && curY < maxY - 12.0) {
             curY += DrawCasioKeycapStrip(bk, obj.calcKeySeqUtf8, sr.x + pad, curY,
-                                         textW, (std::max)(16.0, (maxY - curY) * 0.52), bodyFs * 0.90);
+                                         textW, (std::max)(16.0, (maxY - curY) * 0.52), bodyFs * 0.90, darkSurface);
         }
         if (!obj.calcLatexUtf8.empty() && curY < maxY - 10.0) {
             curY += DrawRichMathLine(bk, obj.calcLatexUtf8, sr.x + pad, curY, textW, bodyFs, bodyColor, true);
@@ -1104,9 +1127,13 @@ inline void DrawStemCardContent(
         // Check-My-Work status badge pill
         if (obj.kind == ObjectKind::MathBlock && line.size() >= 2 && line.front() == '[' && line.back() == ']') {
             const bool isErr = (line.find("ERR") != std::string::npos || line.find("DIFF") != std::string::npos);
-            const DocColor pillFill = isErr ? DocColor::RGBA(254, 226, 226, 255) : DocColor::RGBA(220, 252, 231, 255);
-            const DocColor pillBorder = isErr ? DocColor::RGBA(220, 38, 38, 255) : DocColor::RGBA(22, 163, 74, 255);
-            const DocColor pillText = isErr ? DocColor::RGBA(153, 27, 27, 255) : DocColor::RGBA(21, 128, 61, 255);
+            const DocColor pillFill = darkSurface
+                ? (isErr ? DocColor::RGBA(96, 26, 36, 240) : DocColor::RGBA(20, 74, 48, 240))
+                : (isErr ? DocColor::RGBA(254, 226, 226, 255) : DocColor::RGBA(220, 252, 231, 255));
+            const DocColor pillBorder = isErr ? DocColor::RGBA(239, 68, 68, 255) : DocColor::RGBA(34, 197, 94, 255);
+            const DocColor pillText = darkSurface
+                ? (isErr ? DocColor::RGBA(254, 202, 202, 255) : DocColor::RGBA(187, 247, 208, 255))
+                : (isErr ? DocColor::RGBA(153, 27, 27, 255) : DocColor::RGBA(21, 128, 61, 255));
             const std::string badge = line.substr(1, line.size() - 2);
             const double badgeFs = (std::max)(7.5, bodyFs * 0.80);
             const auto tm = bk.MeasureText(badge, badgeFs, FontStyleRole::UiSemiBold);
@@ -1116,6 +1143,24 @@ inline void DrawStemCardContent(
             bk.DrawTextRun(sr.x + pad + 6.0, curY + 2.5 + tm.ascent, badge, badgeFs, FontStyleRole::UiSemiBold, pillText);
             curY += pillH + 4.0;
             continue;
+        }
+        // Split long circuit oscilloscope telemetry lines ("Prefix: Vmax=..., Vmin=..., Vrms=..., Vdc=...")
+        // onto two crisp readable lines instead of shrinking everything to micro-text.
+        if (obj.kind == ObjectKind::CircuitBlock) {
+            const auto colon = line.find(": ");
+            if (colon != std::string::npos && colon > 0 && line.find(", ", colon) != std::string::npos &&
+                line.find('=', colon) != std::string::npos && line.size() > 54) {
+                const std::string prefix = line.substr(0, colon);
+                const std::string metrics = line.substr(colon + 2);
+                const double lblFs = (std::max)(8.0, bodyFs * 0.88);
+                const auto tm = bk.MeasureText(prefix, lblFs, FontStyleRole::UiSemiBold);
+                bk.DrawTextRun(sr.x + pad, curY + tm.ascent, prefix, lblFs, FontStyleRole::UiSemiBold, titleColor);
+                curY += tm.ascent + tm.descent + 3.0;
+                if (curY < maxY - 4.0) {
+                    curY += DrawRichMathLine(bk, metrics, sr.x + pad, curY, contentW, bodyFs * 0.94, bodyColor, false);
+                }
+                continue;
+            }
         }
         const bool isCircuitFormula = (obj.kind == ObjectKind::CircuitBlock);
         curY += DrawRichMathLine(bk, line, sr.x + pad, curY, contentW, bodyFs, bodyColor, forceMathBody || isCircuitFormula);

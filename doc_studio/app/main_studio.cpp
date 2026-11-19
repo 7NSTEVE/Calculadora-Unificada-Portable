@@ -990,9 +990,9 @@ void LayoutMainChildren(StudioAppState* st) {
     const int searchBandH = st->searchVisible ? 38 : 0;
     if (st->hwndSearchEdit) {
         if (st->searchVisible) {
-            const int sx = (std::max)(sideW + 16, w - inspW - 340);
-            const int sw = (std::max)(140, (w - inspW - 116) - sx);
-            MoveWindow(st->hwndSearchEdit, sx, kTopChromeH + 7, sw, 24, TRUE);
+            const int sx = (std::max)(sideW + 22, w - inspW - 340);
+            const int sw = (std::max)(140, (w - inspW - 122) - sx);
+            MoveWindow(st->hwndSearchEdit, sx, kTopChromeH + 10, sw, 18, TRUE);
             ShowWindow(st->hwndSearchEdit, SW_SHOW);
         } else {
             ShowWindow(st->hwndSearchEdit, SW_HIDE);
@@ -1024,11 +1024,13 @@ void LayoutMainChildren(StudioAppState* st) {
         st->renderer.Resize(vw, contentH);
     }
 
-    // Floating Appearance Popover geometry (anchored top-right below SlidersGlass button)
+    // Floating Appearance Popover geometry (anchored top-right INSIDE visible viewport,
+    // never clipped behind the right Inspector or Search bar)
     const int popW = 296;
     const int popH = 228;
-    const int popX = (std::max)(12, w - popW - 18);
-    const int popY = kTopChromeH + 8;
+    const int vpRight = w - inspW;
+    const int popX = (std::max)(sideW + 12, vpRight - popW - 16);
+    const int popY = contentTop + 8;
     st->appearancePopoverRc = { popX, popY, popX + popW, popY + popH };
     st->opacityTrackRc = { popX + 20, popY + 124, popX + popW - 20, popY + 144 };
 }
@@ -2383,34 +2385,100 @@ LRESULT CALLBACK ViewportWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (st) {
             RECT rc{};
             GetClientRect(hwnd, &rc);
+            const int vw = (std::max)(1, static_cast<int>(rc.right - rc.left));
+            const int vh = (std::max)(1, static_cast<int>(rc.bottom - rc.top));
             ViewportOverlayState ov{};
             PopulateViewportOverlay(st, ov);
 
-            HWND mainH = st->hwndMain;
-            st->renderer.RenderViewport(
-                st->doc, st->camera,
-                (std::max)(1, static_cast<int>(rc.right - rc.left)),
-                (std::max)(1, static_cast<int>(rc.bottom - rc.top)),
-                &st->pageCache,
-                st->asyncGen,
-                [mainH]() { if (IsWindow(mainH)) PostMessageW(mainH, WM_APP_ASYNC_PAGE_READY, 0, 0); },
-                &ov);
-
-            // Live Liquid Glass 2.0 floating Appearance Popover over viewport
+            // Live Liquid Glass 2.0 floating Appearance Popover composited INSIDE Direct2D
+            // (refracts real D2D scene pixels with zero GDI-over-swapchain flicker!)
+            RasterImageBgra32 popPatch;
             if (st->appearancePopoverOpen && hdcVp) {
                 RECT vpInMain{};
                 GetWindowRect(hwnd, &vpInMain);
                 MapWindowPoints(HWND_DESKTOP, st->hwndMain, reinterpret_cast<LPPOINT>(&vpInMain), 2);
-                const RECT savedPop = st->appearancePopoverRc;
-                const RECT savedTrk = st->opacityTrackRc;
-                OffsetRect(&st->appearancePopoverRc, -vpInMain.left, -vpInMain.top);
-                OffsetRect(&st->opacityTrackRc, -vpInMain.left, -vpInMain.top);
-                PaintAppearancePopoverOnHdc(st, hdcVp, rc.right - rc.left, rc.bottom - rc.top);
-                st->appearancePopoverRc = savedPop;
-                st->opacityTrackRc = savedTrk;
+                RECT popLocal = st->appearancePopoverRc;
+                OffsetRect(&popLocal, -vpInMain.left, -vpInMain.top);
+                RECT trkLocal = st->opacityTrackRc;
+                OffsetRect(&trkLocal, -vpInMain.left, -vpInMain.top);
+
+                const int padX = 12;
+                const int padY = 14;
+                const int capL = (std::max)(0, static_cast<int>(popLocal.left) - padX);
+                const int capT = (std::max)(0, static_cast<int>(popLocal.top) - padY);
+                const int capR = (std::min)(vw, static_cast<int>(popLocal.right) + padX);
+                const int capB = (std::min)(vh, static_cast<int>(popLocal.bottom) + padY);
+                const int pw = capR - capL;
+                const int ph = capB - capT;
+                if (pw > 16 && ph > 16) {
+                    RasterImageBgra32 sceneBg;
+                    if (st->renderer.RenderHwndViewportToOffscreen(st->doc, st->camera, vw, vh, &st->pageCache, sceneBg, &ov) &&
+                        sceneBg.Valid()) {
+                        BITMAPINFO bmi{};
+                        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                        bmi.bmiHeader.biWidth = pw;
+                        bmi.bmiHeader.biHeight = -ph;
+                        bmi.bmiHeader.biPlanes = 1;
+                        bmi.bmiHeader.biBitCount = 32;
+                        bmi.bmiHeader.biCompression = BI_RGB;
+                        void* bits = nullptr;
+                        HDC memDc = CreateCompatibleDC(hdcVp);
+                        HBITMAP hDib = memDc ? CreateDIBSection(hdcVp, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
+                        if (memDc && hDib && bits) {
+                            HGDIOBJ oldB = SelectObject(memDc, hDib);
+                            auto* dst = static_cast<std::uint8_t*>(bits);
+                            for (int y = 0; y < ph; ++y) {
+                                const std::uint8_t* sRow = sceneBg.pixels.data() +
+                                    (static_cast<std::size_t>(capT + y) * static_cast<std::size_t>(vw) + static_cast<std::size_t>(capL)) * 4u;
+                                std::memcpy(dst + static_cast<std::size_t>(y) * static_cast<std::size_t>(pw) * 4u, sRow, static_cast<std::size_t>(pw) * 4u);
+                            }
+                            const RECT savedPop = st->appearancePopoverRc;
+                            const RECT savedTrk = st->opacityTrackRc;
+                            st->appearancePopoverRc = { popLocal.left - capL, popLocal.top - capT, popLocal.right - capL, popLocal.bottom - capT };
+                            st->opacityTrackRc      = { trkLocal.left - capL, trkLocal.top - capT, trkLocal.right - capL, trkLocal.bottom - capT };
+                            PaintAppearancePopoverOnHdc(st, memDc, pw, ph);
+                            GdiFlush();
+                            st->appearancePopoverRc = savedPop;
+                            st->opacityTrackRc = savedTrk;
+
+                            popPatch.width = pw;
+                            popPatch.height = ph;
+                            popPatch.pixels.resize(static_cast<std::size_t>(pw) * static_cast<std::size_t>(ph) * 4u);
+                            std::memcpy(popPatch.pixels.data(), bits, popPatch.pixels.size());
+                            for (std::size_t k = 3; k < popPatch.pixels.size(); k += 4) popPatch.pixels[k] = 255;
+
+                            ov.floatingOverlayBgra = &popPatch;
+                            ov.floatingOverlayScreenRect = {
+                                static_cast<double>(capL), static_cast<double>(capT),
+                                static_cast<double>(pw), static_cast<double>(ph)
+                            };
+                            SelectObject(memDc, oldB);
+                        }
+                        if (hDib) DeleteObject(hDib);
+                        if (memDc) DeleteDC(memDc);
+                    }
+                }
             }
+
+            HWND mainH = st->hwndMain;
+            st->renderer.RenderViewport(
+                st->doc, st->camera,
+                vw, vh,
+                &st->pageCache,
+                st->asyncGen,
+                [mainH]() { if (IsWindow(mainH)) PostMessageW(mainH, WM_APP_ASYNC_PAGE_READY, 0, 0); },
+                &ov);
         }
         EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_CAPTURECHANGED: {
+        if (st) {
+            st->draggingOpacitySlider = false;
+            st->panning = false;
+            st->drawing = false;
+            st->laserPointer.active = false;
+        }
         return 0;
     }
     case WM_MOUSEWHEEL: {
@@ -2878,7 +2946,9 @@ void UpdateAppearanceFromPoint(StudioAppState* st, POINT pt, bool isDrag) {
         const int segW = (pr.right - pr.left - 32) / 3;
         const int idx = std::clamp(static_cast<int>((pt.x - (pr.left + 16)) / (std::max)(1, segW)), 0, 2);
         st->glassSettings.mode = static_cast<UiGlass::AppearanceMode>(idx);
-        st->glassSettings.increaseContrast = (st->glassSettings.mode == UiGlass::AppearanceMode::HighContrast);
+        const bool isHcMode = (st->glassSettings.mode == UiGlass::AppearanceMode::HighContrast);
+        st->glassSettings.increaseContrast = isHcMode;
+        st->glassSettings.reduceTransparency = isHcMode;
         UiGlass::ApplyGoldenGateWindowFrame(st->hwndMain, st->glassSettings.IsDark());
         UiGlass::SaveGlassSettings(st->glassSettings);
         InvalidateViews(st);
@@ -2923,14 +2993,14 @@ void PaintAppearancePopoverOnHdc(StudioAppState* st, HDC hdcTarget, int clientW,
     HGDIOBJ oldF = SelectObject(hdcTarget, st->hUiBoldFont ? st->hUiBoldFont : st->hUiFont);
     SetTextColor(hdcTarget, pal.labelPrimary.ToColorRef());
     RECT titleRc{ pr.left + 18, pr.top + 14, pr.right - 18, pr.top + 36 };
-    DrawTextW(hdcTarget, L"Apariencia \u00B7 Liquid Glass 2.0", -1, &titleRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdcTarget, L"Apariencia", -1, &titleRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // Theme Segmented Control (concentric radius = max(4, 16 - 6) = 10)
     RECT segOuter{ pr.left + 16, pr.top + 46, pr.right - 16, pr.top + 76 };
     Gdiplus::GraphicsPath segTrack;
     UiGlass::AddRoundPath(segTrack, static_cast<float>(segOuter.left), static_cast<float>(segOuter.top),
         static_cast<float>(segOuter.right - segOuter.left), static_cast<float>(segOuter.bottom - segOuter.top), 10.0f);
-    Gdiplus::SolidBrush trBr(st->glassSettings.IsDark() ? Gdiplus::Color(150, 22, 26, 34) : Gdiplus::Color(155, 226, 232, 242));
+    Gdiplus::SolidBrush trBr(st->glassSettings.IsDark() ? Gdiplus::Color(220, 18, 22, 30) : Gdiplus::Color(175, 224, 231, 242));
     g.FillPath(&trBr, &segTrack);
 
     const wchar_t* themeNames[3] = { L"Claro", L"Oscuro", L"Contraste" };
@@ -2945,16 +3015,18 @@ void PaintAppearancePopoverOnHdc(StudioAppState* st, HDC hdcTarget, int clientW,
                 static_cast<float>(sr.right - sr.left), static_cast<float>(sr.bottom - sr.top), 7.5f);
             Gdiplus::SolidBrush sbr(UiGlass::ToGdip(pal.glassPillSelected));
             g.FillPath(&sbr, &sp);
-            Gdiplus::Pen spen(UiGlass::ToGdip(pal.accentBlue, 180), 1.0f);
+            Gdiplus::Pen spen(UiGlass::ToGdip(pal.accentBlue, 200), 1.0f);
             g.DrawPath(&spen, &sp);
         }
-        SetTextColor(hdcTarget, sel ? pal.accentBlue.ToColorRef() : pal.labelSecondary.ToColorRef());
+        const COLORREF inactiveFg = st->glassSettings.IsDark() ? RGB(214, 222, 236) : pal.labelSecondary.ToColorRef();
+        const COLORREF activeFg = st->glassSettings.IsDark() ? RGB(122, 198, 255) : pal.accentBlue.ToColorRef();
+        SetTextColor(hdcTarget, sel ? activeFg : inactiveFg);
         DrawTextW(hdcTarget, themeNames[i], -1, &sr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
     // macOS 27 Golden Gate continuous UserOpacitySlider (0% Ultra-Clear .. 100% Frosted Opaque)
     const int pct = static_cast<int>(std::lround(st->glassSettings.EffectiveOpacity() * 100.0f));
-    const wchar_t* modeTag = (pct <= 20) ? L"Design" : (pct >= 75 ? L"Escarchado" : L"Equilibrado");
+    const wchar_t* modeTag = (pct <= 20) ? L"Claro" : (pct >= 75 ? L"Esmerilado" : L"Equilibrado");
     std::wstring opLbl = L"Opacidad del cristal: " + std::to_wstring(pct) + L"% (" + modeTag + L")";
     SetTextColor(hdcTarget, pal.labelPrimary.ToColorRef());
     RECT opTxtRc{ pr.left + 18, pr.top + 92, pr.right - 18, pr.top + 114 };
@@ -2993,7 +3065,7 @@ void PaintAppearancePopoverOnHdc(StudioAppState* st, HDC hdcTarget, int clientW,
         g.FillEllipse(&kb, kx, ty0 + 2.0f, 14.0f, 14.0f);
     };
     drawToggleRow(pr.top + 164, L"Reducir transparencia", st->glassSettings.reduceTransparency);
-    drawToggleRow(pr.top + 194, L"Aumentar contraste (1 px)", st->glassSettings.increaseContrast);
+    drawToggleRow(pr.top + 194, L"Aumentar contraste", st->glassSettings.increaseContrast);
 
     if (oldF) SelectObject(hdcTarget, oldF);
 }
@@ -3597,13 +3669,23 @@ void PaintRibbonAndStatus(StudioAppState* st, HDC hdc) {
             }
         }
 
-        // Optional Search Action Buttons when search bar is visible
+        // Optional Search Action Buttons + HIG rounded input chrome when search bar is visible
         if (st->searchVisible && st->hwndSearchEdit) {
             RECT seRc{};
             GetWindowRect(st->hwndSearchEdit, &seRc);
             MapWindowPoints(HWND_DESKTOP, st->hwndMain, reinterpret_cast<LPPOINT>(&seRc), 2);
-            RECT bFind{ seRc.right + 6, kTopChromeH + 7, seRc.right + 48, kTopChromeH + 31 };
-            RECT bRepl{ seRc.right + 54, kTopChromeH + 7, seRc.right + 104, kTopChromeH + 31 };
+            RECT frameRc{ seRc.left - 6, seRc.top - 3, seRc.right + 6, seRc.bottom + 3 };
+            {
+                Gdiplus::GraphicsPath sp;
+                UiGlass::AddRoundPath(sp, static_cast<float>(frameRc.left), static_cast<float>(frameRc.top),
+                    static_cast<float>(frameRc.right - frameRc.left), static_cast<float>(frameRc.bottom - frameRc.top), 7.0f);
+                Gdiplus::SolidBrush sbr(UiGlass::ToGdip(pal.contentCard));
+                g.FillPath(&sbr, &sp);
+                Gdiplus::Pen spn(UiGlass::ToGdip(pal.borderStrong), 1.0f);
+                g.DrawPath(&spn, &sp);
+            }
+            RECT bFind{ seRc.right + 10, kTopChromeH + 7, seRc.right + 52, kTopChromeH + 31 };
+            RECT bRepl{ seRc.right + 58, kTopChromeH + 7, seRc.right + 108, kTopChromeH + 31 };
             auto drawMini = [&](const RECT& r, const wchar_t* t) {
                 Gdiplus::GraphicsPath p;
                 UiGlass::AddRoundPath(p, static_cast<float>(r.left), static_cast<float>(r.top),
@@ -3628,14 +3710,12 @@ void PaintRibbonAndStatus(StudioAppState* st, HDC hdc) {
         Gdiplus::Pen sepPen(UiGlass::ToGdip(pal.separator), 1.0f);
         g.DrawLine(&sepPen, 0.0f, static_cast<float>(h - kBottomStatusH), static_cast<float>(w), static_cast<float>(h - kBottomStatusH));
 
-        const double usedMiB = static_cast<double>(st->pageCache.BytesUsed()) / (1024.0 * 1024.0);
-        const double maxMiB = static_cast<double>(st->pageCache.MaxBytes()) / (1024.0 * 1024.0);
         std::wostringstream status;
-        status << (st->doc.Mode() == DocumentMode::InfiniteCanvas ? L"Lienzo Infinito" : L"PDF Paginado")
-               << L"  \u00B7  P\u00E1g. " << (st->activePageIndex + 1) << L"/" << (std::max<std::size_t>)(1u, st->doc.Pages().size())
-               << L"  \u00B7  Cach\u00E9 " << static_cast<int>(std::lround(usedMiB)) << L"/" << static_cast<int>(std::lround(maxMiB)) << L" MiB";
+        status << (st->doc.Mode() == DocumentMode::InfiniteCanvas ? L"Lienzo Infinito" : L"PDF Paginado");
         if (st->doc.Mode() == DocumentMode::InfiniteCanvas) {
             status << L"  \u00B7  " << st->doc.CanvasQuadtreeSize() << L" objetos";
+        } else {
+            status << L"  \u00B7  P\u00E1g. " << (st->activePageIndex + 1) << L"/" << (std::max<std::size_t>)(1u, st->doc.Pages().size());
         }
         status << L"  \u00B7  " << Utf8ToWide(st->statusBannerUtf8);
 
@@ -3694,8 +3774,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         UiGlass::ApplyGoldenGateWindowFrame(hwnd, st->glassSettings.IsDark());
         RebuildToolbarButtons(st);
 
-        st->hwndSearchEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | ES_AUTOHSCROLL, 740, kTopChromeH + 7, 180, 24, hwnd,
+        st->hwndSearchEdit = CreateWindowExW(0, L"EDIT", L"",
+            WS_CHILD | ES_AUTOHSCROLL, 740, kTopChromeH + 10, 180, 18, hwnd,
             reinterpret_cast<HMENU>(CMD_SEARCH_EDIT), cs->hInstance, nullptr);
         SendMessageW(st->hwndSearchEdit, WM_SETFONT, reinterpret_cast<WPARAM>(st->hUiFont), TRUE);
         SendMessageW(st->hwndSearchEdit, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"Buscar texto... (Ctrl+F)"));
@@ -3717,6 +3797,33 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SIZE:
         LayoutMainChildren(st);
         return 0;
+    case WM_DPICHANGED: {
+        if (!st) break;
+        const RECT* suggested = reinterpret_cast<const RECT*>(lp);
+        if (suggested) {
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                suggested->right - suggested->left, suggested->bottom - suggested->top,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        const UINT newDpi = HIWORD(wp);
+        if (newDpi >= 96) {
+            const int scaleDen = (newDpi <= 120) ? static_cast<int>(newDpi) : 120;
+            auto recreateFont = [&](HFONT& f, int basePx, int wt) {
+                if (f) DeleteObject(f);
+                f = UiGlass::CreateHigUiFont((std::min)(basePx + 5, MulDiv(basePx, static_cast<int>(newDpi), scaleDen)), wt);
+            };
+            recreateFont(st->hUiFont, 13, FW_NORMAL);
+            recreateFont(st->hUiBoldFont, 13, FW_SEMIBOLD);
+            recreateFont(st->hUiSmallFont, 12, FW_NORMAL);
+            recreateFont(st->hUiTitleFont, 15, FW_SEMIBOLD);
+            if (st->hwndSearchEdit && st->hUiFont) {
+                SendMessageW(st->hwndSearchEdit, WM_SETFONT, reinterpret_cast<WPARAM>(st->hUiFont), TRUE);
+            }
+        }
+        LayoutMainChildren(st);
+        InvalidateViews(st);
+        return 0;
+    }
     case WM_DROPFILES: {
         if (!st) break;
         HDROP hDrop = reinterpret_cast<HDROP>(wp);
@@ -3741,6 +3848,24 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (hit != st->hoveredButton) {
             st->hoveredButton = hit;
             InvalidateViews(st);
+        }
+        return 0;
+    }
+    case WM_CTLCOLOREDIT: {
+        if (st && reinterpret_cast<HWND>(lp) == st->hwndSearchEdit) {
+            const UiGlass::GlassPalette pal = UiGlass::GetPalette(st->glassSettings);
+            HDC hdcE = reinterpret_cast<HDC>(wp);
+            SetTextColor(hdcE, pal.labelPrimary.ToColorRef());
+            SetBkColor(hdcE, pal.contentCard.ToColorRef());
+            if (st->hSearchBgBrush) DeleteObject(st->hSearchBgBrush);
+            st->hSearchBgBrush = CreateSolidBrush(pal.contentCard.ToColorRef());
+            return reinterpret_cast<LRESULT>(st->hSearchBgBrush);
+        }
+        break;
+    }
+    case WM_CAPTURECHANGED: {
+        if (st) {
+            st->draggingOpacitySlider = false;
         }
         return 0;
     }
@@ -3779,8 +3904,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             RECT seRc{};
             GetWindowRect(st->hwndSearchEdit, &seRc);
             MapWindowPoints(HWND_DESKTOP, hwnd, reinterpret_cast<LPPOINT>(&seRc), 2);
-            RECT bFind{ seRc.right + 6, kTopChromeH + 7, seRc.right + 48, kTopChromeH + 31 };
-            RECT bRepl{ seRc.right + 54, kTopChromeH + 7, seRc.right + 104, kTopChromeH + 31 };
+            RECT bFind{ seRc.right + 10, kTopChromeH + 7, seRc.right + 52, kTopChromeH + 31 };
+            RECT bRepl{ seRc.right + 58, kTopChromeH + 7, seRc.right + 108, kTopChromeH + 31 };
             if (PtInRect(&bFind, pt)) { ExecuteToolbarCommand(st, CMD_SEARCH_NEXT); return 0; }
             if (PtInRect(&bRepl, pt)) { ExecuteToolbarCommand(st, CMD_REPLACE_TEXT); return 0; }
         }
@@ -3929,15 +4054,22 @@ void ParseCliArgs(StudioAppState* st, std::wstring& outOpenPath, std::string& ou
             st->smokeTestMode = true;
         } else if (arg == L"--theme" && i + 1 < argc) {
             const std::wstring t = argv[++i];
-            if (t == L"dark") st->glassSettings.mode = UiGlass::AppearanceMode::Dark;
-            else if (t == L"high-contrast" || t == L"hc") {
+            if (t == L"dark") {
+                st->glassSettings.mode = UiGlass::AppearanceMode::Dark;
+                st->glassSettings.increaseContrast = false;
+                st->glassSettings.reduceTransparency = false;
+            } else if (t == L"high-contrast" || t == L"hc") {
                 st->glassSettings.mode = UiGlass::AppearanceMode::HighContrast;
                 st->glassSettings.increaseContrast = true;
+                st->glassSettings.reduceTransparency = true;
             } else {
                 st->glassSettings.mode = UiGlass::AppearanceMode::Light;
+                st->glassSettings.increaseContrast = false;
+                st->glassSettings.reduceTransparency = false;
             }
         } else if (arg == L"--glass-opacity" && i + 1 < argc) {
             st->glassSettings.userOpacitySlider = std::clamp(static_cast<float>(_wtof(argv[++i])), 0.0f, 1.0f);
+            st->glassSettings.reduceTransparency = false;
         } else if (arg == L"--inspector" && i + 1 < argc) {
             const std::wstring tab = argv[++i];
             if (tab == L"academic") { st->inspectorVisible = true; st->inspectorTab = 0; }
@@ -3946,6 +4078,8 @@ void ParseCliArgs(StudioAppState* st, std::wstring& outOpenPath, std::string& ou
             else if (tab == L"off") { st->inspectorVisible = false; }
         } else if (arg == L"--appearance-popover") {
             st->appearancePopoverOpen = true;
+        } else if (arg == L"--search-open") {
+            st->searchVisible = true;
         }
     }
     LocalFree(argv);
@@ -3954,7 +4088,15 @@ void ParseCliArgs(StudioAppState* st, std::wstring& outOpenPath, std::string& ou
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
-    SetProcessDPIAware();
+    if (HMODULE hUser32 = GetModuleHandleW(L"user32.dll")) {
+        using SetDpiCtxFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+        auto pSetDpiCtx = reinterpret_cast<SetDpiCtxFn>(GetProcAddress(hUser32, "SetProcessDpiAwarenessContext"));
+        if (!pSetDpiCtx || !pSetDpiCtx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+            SetProcessDPIAware();
+        }
+    } else {
+        SetProcessDPIAware();
+    }
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     RoInitialize(RO_INIT_SINGLETHREADED);
 
