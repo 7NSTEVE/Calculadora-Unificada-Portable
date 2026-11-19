@@ -893,6 +893,7 @@ int TestNeutralUiStringsAndZeroEmojis()
         "pdf_viewer.h",
         "knowledge_catalog.h",
         "learning_studio.h",
+        "doc_studio/app/main_studio.cpp",
         "catalog/casio_knowledge_catalog.json"
     };
     const wchar_t* bannedTerms[] = {
@@ -901,8 +902,32 @@ int TestNeutralUiStringsAndZeroEmojis()
         L"did\u00E1ctic",
         L"didactic",
         L"guias_alumnos",
-        L"alum."
+        L"alum.",
+        L"Cach\u00E9 0/256 MiB",
+        L"Apariencia \u00B7 Liquid Glass 2.0",
+        L"nX-U8 + firmware embebido",
+        L"LaTeX v\u00E1lido",
+        L"Sintaxis LaTeX"
     };
+    const char* dpiRequiredFiles[] = {
+        "main.cpp",
+        "settings_and_exporter.h",
+        "learning_studio.h",
+        "smart_help_view.h",
+        "pdf_viewer.h",
+        "popup_display.h",
+        "key_history_view.h",
+        "doc_studio/app/main_studio.cpp"
+    };
+    for (const char* drel : dpiRequiredFiles) {
+        std::ifstream df(repo / drel, std::ios::binary);
+        if (!df) return Fail("Cannot open window module for WM_DPICHANGED audit");
+        std::string dbytes((std::istreambuf_iterator<char>(df)), std::istreambuf_iterator<char>());
+        if (dbytes.find("case WM_DPICHANGED:") == std::string::npos) {
+            std::cerr << "[FAIL] Missing case WM_DPICHANGED: in " << drel << "\n";
+            return 1;
+        }
+    }
 
     for (const char* rel : files) {
         const fs::path p = repo / rel;
@@ -1061,6 +1086,32 @@ int TestUiScalingAndTransformAlignment()
     CasioTheme::g_uiScaleMode = prevMode;
     if (std::abs(forced100 - 1.0f) > 0.01f || std::abs(clampedHuge - 1.0f) > 0.01f) {
         return Fail("ComputeDialogUiScale bounds check failed");
+    }
+
+    // Synthetic WM_DPICHANGED (144 -> 192 -> 96 DPI) injection test on live Native PDF Viewer window
+    {
+        const auto samplePdf = (ResolveTestRepoRoot() / "manuales" / g_officialManuals[0].fileName).wstring();
+        HWND hPdf = CreateNativePdfViewerWindow(samplePdf, 1, nullptr, L"", nullptr, false, 0, 16ull * 1024ull * 1024ull, false);
+        if (!hPdf || !IsWindow(hPdf)) {
+            return Fail("Failed to create offscreen NativePdfViewer window for WM_DPICHANGED test");
+        }
+        struct DpiStep { UINT dpi; RECT rc; };
+        const DpiStep steps[3] = {
+            { 144u, RECT{ 80, 60, 1280, 920 } },
+            { 192u, RECT{ 80, 60, 1440, 1040 } },
+            { 96u,  RECT{ 80, 60, 1100, 840 } }
+        };
+        for (const auto& s : steps) {
+            SendMessageW(hPdf, WM_DPICHANGED, MAKEWPARAM(s.dpi, s.dpi), reinterpret_cast<LPARAM>(&s.rc));
+            RECT actual{};
+            GetWindowRect(hPdf, &actual);
+            if ((actual.right - actual.left) != (s.rc.right - s.rc.left) ||
+                (actual.bottom - actual.top) != (s.rc.bottom - s.rc.top)) {
+                DestroyWindow(hPdf);
+                return Fail("PdfViewerWndProc WM_DPICHANGED did not resize window to suggested RECT");
+            }
+        }
+        DestroyWindow(hPdf);
     }
 
     std::cout << "[PASS] TestUiScalingAndTransformAlignment\n";

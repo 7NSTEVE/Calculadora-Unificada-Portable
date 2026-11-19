@@ -14,9 +14,9 @@ Aplicación de producción para Windows que integra en una distribución portabl
 | :---: | :---: |
 | ![Document Studio STEM Liquid Glass Claro](docs/screenshots/lg_studio_stem_light.png) | ![Document Studio Oscuro con Popover Liquid Glass](docs/screenshots/lg_studio_stem_dark_popover.png) |
 
-| Exportador LaTeX 2D (Oscuro) | Modo Compacto Vertical (Oscuro) | Visor Nativo PDF (`Windows.Data.Pdf`) | Document Studio — Módulos Académicos |
+| Exportador de Fórmulas 2D (Oscuro) | Modo Compacto Vertical (Oscuro) | Visor Nativo PDF (`Windows.Data.Pdf`) | Document Studio — Módulos Académicos |
 | :---: | :---: | :---: | :---: |
-| ![Exportador LaTeX 2D Modo Oscuro](docs/screenshots/lg_calc_exporter_dark.png) | ![Modo Compacto Liquid Glass Oscuro](docs/screenshots/lg_calc_compact_dark.png) | ![Visor Nativo PDF 16 manuales](docs/screenshots/lg_calc_pdf_light.png) | ![Document Studio Inspector Académico](docs/screenshots/lg_studio_academic_light.png) |
+| ![Exportador de Fórmulas 2D Modo Oscuro](docs/screenshots/lg_calc_exporter_dark.png) | ![Modo Compacto Liquid Glass Oscuro](docs/screenshots/lg_calc_compact_dark.png) | ![Visor Nativo PDF 16 manuales](docs/screenshots/lg_calc_pdf_light.png) | ![Document Studio Inspector Académico](docs/screenshots/lg_studio_academic_light.png) |
 
 ---
 

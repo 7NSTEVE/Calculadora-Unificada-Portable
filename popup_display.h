@@ -255,6 +255,17 @@ static LRESULT CALLBACK PopupDisplayWndProc(HWND hWnd, UINT msg, WPARAM wParam, 
         InvalidateRect(hWnd, nullptr, FALSE);
         return 0;
 
+    case WM_DPICHANGED: {
+        const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+        if (suggested) {
+            SetWindowPos(hWnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left, suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        InvalidateRect(hWnd, nullptr, FALSE);
+        return 0;
+    }
+
     case WM_LBUTTONDOWN: {
         int mx = LOWORD(lParam);
         int my = HIWORD(lParam);

@@ -1550,6 +1550,33 @@ void TestF11FourDocsComplianceSuite(const fs::path& tmpDir) {
         ViewportOverlayState ovProj{};
         ovProj.presenterMode = true;
         CHECK(!RenderCommon::ShouldDrawObjectOnLayer(vdoc, teacherNote, op, &ovProj));
+
+#ifdef _WIN32
+        // Live synthetic WM_DPICHANGED (144 -> 192 -> 96 DPI) cycle test on DocumentStudio.exe
+        wchar_t exePathBuf[4096]{};
+        if (GetModuleFileNameW(nullptr, exePathBuf, 4096) > 0) {
+            const fs::path studioExe = fs::path(exePathBuf).parent_path() / "DocumentStudio.exe";
+            if (fs::exists(studioExe)) {
+                std::wstring cmdLine = L"\"" + studioExe.wstring() + L"\" --showcase-stem --inspector academic --test-dpi-cycle";
+                STARTUPINFOW si{};
+                si.cb = sizeof(si);
+                PROCESS_INFORMATION pi{};
+                const BOOL created = CreateProcessW(
+                    studioExe.c_str(), cmdLine.data(),
+                    nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi);
+                CHECK(created != FALSE);
+                if (created) {
+                    const DWORD waitRes = WaitForSingleObject(pi.hProcess, 15000);
+                    DWORD exitCode = 999;
+                    GetExitCodeProcess(pi.hProcess, &exitCode);
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                    CHECK(waitRes == WAIT_OBJECT_0);
+                    CHECK(exitCode == 0);
+                }
+            }
+        }
+#endif
     }
 }
 

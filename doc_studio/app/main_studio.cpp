@@ -323,6 +323,9 @@ struct StudioAppState {
 
     // CLI automation state
     bool smokeTestMode = false;
+    bool testDpiCycleCli = false;
+    UINT currentDpi = 96;
+    int dpiCycleTransitions = 0;
     std::wstring screenshotOutPath;
     int initialPage1Based = 1;
     std::string cliCalcCardSpec;
@@ -388,7 +391,7 @@ bool ShowSaveDialog(HWND owner, const wchar_t* title, const COMDLG_FILTERSPEC* s
     return !outPath.empty();
 }
 
-// Dynamic modal text prompt (no .rc dependency)
+// Dynamic modal text prompt (no .rc dependency, Apple HIG + Liquid Glass 2.0 synchronized)
 struct PromptState {
     std::wstring label1;
     std::wstring val1;
@@ -396,8 +399,13 @@ struct PromptState {
     std::wstring val2;
     bool twoFields = false;
     bool accepted = false;
+    UiGlass::GlassSettings glassSettings{};
     HWND hwndEdit1 = nullptr;
     HWND hwndEdit2 = nullptr;
+    HFONT hFont = nullptr;
+    HFONT hBoldFont = nullptr;
+    HBRUSH hBgBrush = nullptr;
+    HBRUSH hCardBrush = nullptr;
 };
 
 LRESULT CALLBACK PromptWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -407,7 +415,13 @@ LRESULT CALLBACK PromptWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
         ps = reinterpret_cast<PromptState*>(cs->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ps));
-        HFONT hf = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        UiGlass::ApplyGoldenGateWindowFrame(hwnd, ps->glassSettings.IsDark());
+        ps->hFont = UiGlass::CreateHigUiFont(13, FW_NORMAL);
+        ps->hBoldFont = UiGlass::CreateHigUiFont(13, FW_SEMIBOLD);
+        const UiGlass::GlassPalette pal = UiGlass::GetPalette(ps->glassSettings);
+        ps->hBgBrush = CreateSolidBrush(pal.sidebarBg.ToColorRef());
+        ps->hCardBrush = CreateSolidBrush(pal.contentCard.ToColorRef());
+        HFONT hf = ps->hFont ? ps->hFont : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 
         HWND l1 = CreateWindowW(L"STATIC", ps->label1.c_str(), WS_CHILD | WS_VISIBLE, 14, 12, 390, 20, hwnd, nullptr, nullptr, nullptr);
         SendMessageW(l1, WM_SETFONT, reinterpret_cast<WPARAM>(hf), TRUE);
@@ -429,9 +443,48 @@ LRESULT CALLBACK PromptWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             234, btnY, 82, 28, hwnd, reinterpret_cast<HMENU>(IDOK), nullptr, nullptr);
         HWND bCancel = CreateWindowW(L"BUTTON", L"Cancelar", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
             322, btnY, 82, 28, hwnd, reinterpret_cast<HMENU>(IDCANCEL), nullptr, nullptr);
-        SendMessageW(bOk, WM_SETFONT, reinterpret_cast<WPARAM>(hf), TRUE);
+        SendMessageW(bOk, WM_SETFONT, reinterpret_cast<WPARAM>(ps->hBoldFont ? ps->hBoldFont : hf), TRUE);
         SendMessageW(bCancel, WM_SETFONT, reinterpret_cast<WPARAM>(hf), TRUE);
         SetFocus(ps->hwndEdit1);
+        return 0;
+    }
+    case WM_ERASEBKGND: {
+        if (ps && ps->hBgBrush) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            FillRect(reinterpret_cast<HDC>(wp), &rc, ps->hBgBrush);
+            return 1;
+        }
+        break;
+    }
+    case WM_CTLCOLORSTATIC: {
+        if (ps && ps->hBgBrush) {
+            const UiGlass::GlassPalette pal = UiGlass::GetPalette(ps->glassSettings);
+            HDC hdcS = reinterpret_cast<HDC>(wp);
+            SetTextColor(hdcS, pal.labelPrimary.ToColorRef());
+            SetBkColor(hdcS, pal.sidebarBg.ToColorRef());
+            return reinterpret_cast<LRESULT>(ps->hBgBrush);
+        }
+        break;
+    }
+    case WM_CTLCOLOREDIT: {
+        if (ps && ps->hCardBrush) {
+            const UiGlass::GlassPalette pal = UiGlass::GetPalette(ps->glassSettings);
+            HDC hdcE = reinterpret_cast<HDC>(wp);
+            SetTextColor(hdcE, pal.labelPrimary.ToColorRef());
+            SetBkColor(hdcE, pal.contentCard.ToColorRef());
+            return reinterpret_cast<LRESULT>(ps->hCardBrush);
+        }
+        break;
+    }
+    case WM_DPICHANGED: {
+        const RECT* suggested = reinterpret_cast<const RECT*>(lp);
+        if (suggested) {
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                suggested->right - suggested->left, suggested->bottom - suggested->top,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        InvalidateRect(hwnd, nullptr, TRUE);
         return 0;
     }
     case WM_COMMAND:
@@ -458,6 +511,14 @@ LRESULT CALLBACK PromptWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (ps) ps->accepted = false;
         DestroyWindow(hwnd);
         return 0;
+    case WM_DESTROY:
+        if (ps) {
+            if (ps->hFont) { DeleteObject(ps->hFont); ps->hFont = nullptr; }
+            if (ps->hBoldFont) { DeleteObject(ps->hBoldFont); ps->hBoldFont = nullptr; }
+            if (ps->hBgBrush) { DeleteObject(ps->hBgBrush); ps->hBgBrush = nullptr; }
+            if (ps->hCardBrush) { DeleteObject(ps->hCardBrush); ps->hCardBrush = nullptr; }
+        }
+        return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
@@ -470,6 +531,11 @@ bool ShowTextPrompt(HWND owner, const wchar_t* title, const wchar_t* label1, std
     if (ps.twoFields) {
         ps.label2 = label2;
         ps.val2 = *val2;
+    }
+    if (owner) {
+        if (const auto* ownerSt = reinterpret_cast<const StudioAppState*>(GetWindowLongPtrW(owner, GWLP_USERDATA))) {
+            ps.glassSettings = ownerSt->glassSettings;
+        }
     }
 
     RECT ownerRc{};
@@ -3767,6 +3833,13 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         st = reinterpret_cast<StudioAppState*>(cs->lpCreateParams);
         st->hwndMain = hwnd;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
+        if (HMODULE hUser32 = GetModuleHandleW(L"user32.dll")) {
+            using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+            if (auto pGetDpi = reinterpret_cast<GetDpiForWindowFn>(GetProcAddress(hUser32, "GetDpiForWindow"))) {
+                const UINT wndDpi = pGetDpi(hwnd);
+                if (wndDpi >= 72) st->currentDpi = wndDpi;
+            }
+        }
         st->hUiFont      = UiGlass::CreateHigUiFont(13, FW_NORMAL);
         st->hUiBoldFont  = UiGlass::CreateHigUiFont(13, FW_SEMIBOLD);
         st->hUiSmallFont = UiGlass::CreateHigUiFont(12, FW_NORMAL);
@@ -3799,26 +3872,31 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DPICHANGED: {
         if (!st) break;
+        const UINT newDpi = HIWORD(wp) ? HIWORD(wp) : (LOWORD(wp) ? LOWORD(wp) : 96u);
+        if (newDpi >= 72) {
+            st->currentDpi = newDpi;
+            st->dpiCycleTransitions++;
+            HFONT newUiFont      = UiGlass::CreateHigUiFont(13, FW_NORMAL);
+            HFONT newUiBoldFont  = UiGlass::CreateHigUiFont(13, FW_SEMIBOLD);
+            HFONT newUiSmallFont = UiGlass::CreateHigUiFont(12, FW_NORMAL);
+            HFONT newUiTitleFont = UiGlass::CreateHigUiFont(15, FW_SEMIBOLD);
+            if (st->hwndSearchEdit && newUiFont) {
+                SendMessageW(st->hwndSearchEdit, WM_SETFONT, reinterpret_cast<WPARAM>(newUiFont), FALSE);
+            }
+            if (st->hUiFont)      DeleteObject(st->hUiFont);
+            if (st->hUiBoldFont)  DeleteObject(st->hUiBoldFont);
+            if (st->hUiSmallFont) DeleteObject(st->hUiSmallFont);
+            if (st->hUiTitleFont) DeleteObject(st->hUiTitleFont);
+            st->hUiFont      = newUiFont;
+            st->hUiBoldFont  = newUiBoldFont;
+            st->hUiSmallFont = newUiSmallFont;
+            st->hUiTitleFont = newUiTitleFont;
+        }
         const RECT* suggested = reinterpret_cast<const RECT*>(lp);
         if (suggested) {
             SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
                 suggested->right - suggested->left, suggested->bottom - suggested->top,
                 SWP_NOZORDER | SWP_NOACTIVATE);
-        }
-        const UINT newDpi = HIWORD(wp);
-        if (newDpi >= 96) {
-            const int scaleDen = (newDpi <= 120) ? static_cast<int>(newDpi) : 120;
-            auto recreateFont = [&](HFONT& f, int basePx, int wt) {
-                if (f) DeleteObject(f);
-                f = UiGlass::CreateHigUiFont((std::min)(basePx + 5, MulDiv(basePx, static_cast<int>(newDpi), scaleDen)), wt);
-            };
-            recreateFont(st->hUiFont, 13, FW_NORMAL);
-            recreateFont(st->hUiBoldFont, 13, FW_SEMIBOLD);
-            recreateFont(st->hUiSmallFont, 12, FW_NORMAL);
-            recreateFont(st->hUiTitleFont, 15, FW_SEMIBOLD);
-            if (st->hwndSearchEdit && st->hUiFont) {
-                SendMessageW(st->hwndSearchEdit, WM_SETFONT, reinterpret_cast<WPARAM>(st->hUiFont), TRUE);
-            }
         }
         LayoutMainChildren(st);
         InvalidateViews(st);
@@ -3975,6 +4053,33 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (st) InvalidateViews(st);
         return 0;
     case WM_APP_TAKE_SCREENSHOT: {
+        if (st && st->testDpiCycleCli) {
+            RECT origRc{};
+            GetWindowRect(hwnd, &origRc);
+            const int origW = (std::max)(800, static_cast<int>(origRc.right - origRc.left));
+            const int origH = (std::max)(600, static_cast<int>(origRc.bottom - origRc.top));
+            struct DpiStep { UINT dpi; int w; int h; };
+            const DpiStep steps[3] = {
+                { 144u, origW + 120, origH + 80 },
+                { 192u, origW + 240, origH + 140 },
+                { 96u,  origW,       origH }
+            };
+            bool ok = true;
+            for (const auto& step : steps) {
+                RECT sug{ origRc.left, origRc.top, origRc.left + step.w, origRc.top + step.h };
+                SendMessageW(hwnd, WM_DPICHANGED, MAKEWPARAM(step.dpi, step.dpi), reinterpret_cast<LPARAM>(&sug));
+                if (st->currentDpi != step.dpi) ok = false;
+                RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+                if (st->hwndSidebar && IsWindowVisible(st->hwndSidebar)) RedrawWindow(st->hwndSidebar, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+                if (st->hwndInspector && IsWindowVisible(st->hwndInspector)) RedrawWindow(st->hwndInspector, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+                if (st->hwndViewport && IsWindowVisible(st->hwndViewport)) RedrawWindow(st->hwndViewport, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            }
+            if (!ok || st->dpiCycleTransitions < 3 || st->currentDpi != 96u || !st->hUiFont || !st->hUiBoldFont) {
+                DestroyWindow(hwnd);
+                PostQuitMessage(2);
+                return 0;
+            }
+        }
         if (st && !st->screenshotOutPath.empty()) {
             auto ensureThumb = [&](std::size_t p) {
                 if (p >= st->doc.Pages().size()) return;
@@ -4051,6 +4156,9 @@ void ParseCliArgs(StudioAppState* st, std::wstring& outOpenPath, std::string& ou
         } else if (arg == L"--screenshot-out" && i + 1 < argc) {
             st->screenshotOutPath = argv[++i];
         } else if (arg == L"--smoke-test") {
+            st->smokeTestMode = true;
+        } else if (arg == L"--test-dpi-cycle") {
+            st->testDpiCycleCli = true;
             st->smokeTestMode = true;
         } else if (arg == L"--theme" && i + 1 < argc) {
             const std::wstring t = argv[++i];
@@ -4208,9 +4316,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
             st->rulerState.centerY = 294.0;
             st->rulerState.angleDeg = -8.0;
             st->rulerState.lengthPt = 250.0;
-            st->camera.zoom = 1.0;
-            st->camera.panX = -18.0;
-            st->camera.panY = -12.0;
+            if (st->inspectorVisible) {
+                const int sideW = st->sidebarVisible ? kSidebarWidth : 0;
+                const int availVw = (std::max)(560, winW - 16 - sideW - kInspectorWidth);
+                st->camera.zoom = std::clamp(static_cast<double>(availVw - 24) / 908.0, 0.78, 1.0);
+                st->camera.panX = -14.0;
+                st->camera.panY = -12.0;
+            } else {
+                st->camera.zoom = 1.0;
+                st->camera.panX = -18.0;
+                st->camera.panY = -12.0;
+            }
         } else if (!st->cliCalcCardSpec.empty() && !cliOpts.calcBridgeSync) {
             ApplyCliCalcCardSpec(st.get());
         } else if (st->doc.Mode() == DocumentMode::InfiniteCanvas && st->doc.CanvasObjects().empty() && initialOpen.empty()) {
@@ -4245,7 +4361,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        const int exitCode = (msg.message == WM_QUIT) ? static_cast<int>(msg.wParam) : 0;
         st.reset();
+        if (gdiplusToken) Gdiplus::GdiplusShutdown(gdiplusToken);
+        RoUninitialize();
+        CoUninitialize();
+        return exitCode;
     }
 
     if (gdiplusToken) Gdiplus::GdiplusShutdown(gdiplusToken);

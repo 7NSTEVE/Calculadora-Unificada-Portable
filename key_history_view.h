@@ -349,15 +349,30 @@ inline bool PromptStepNoteEdit(HWND owner, std::wstring& ioNote)
             auto* cs = reinterpret_cast<CREATESTRUCTW*>(l);
             p = reinterpret_cast<NoteDlgState*>(cs->lpCreateParams);
             SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(p));
+            UiGlass::ApplyGoldenGateWindowFrame(h, CasioTheme::GetActiveGlassSettings().IsDark());
             p->hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", p->text.c_str(),
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 14, 34, 412, 26, h, (HMENU)101, g_hInst, nullptr);
             SendMessageW(p->hEdit, WM_SETFONT, (WPARAM)g_fontNormal, TRUE);
-            CreateWindowExW(0, L"BUTTON", L"Guardar Nota", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            HWND bSave = CreateWindowExW(0, L"BUTTON", L"Guardar Nota", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                 220, 72, 110, 28, h, (HMENU)IDOK, g_hInst, nullptr);
-            CreateWindowExW(0, L"BUTTON", L"Cancelar", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            HWND bCancel = CreateWindowExW(0, L"BUTTON", L"Cancelar", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 338, 72, 88, 28, h, (HMENU)IDCANCEL, g_hInst, nullptr);
+            SendMessageW(bSave, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
+            SendMessageW(bCancel, WM_SETFONT, (WPARAM)g_fontNormal, TRUE);
             SetFocus(p->hEdit);
             SendMessageW(p->hEdit, EM_SETSEL, 0, -1);
+            return 0;
+        }
+        case WM_CTLCOLOREDIT:
+            return CasioTheme::HandleStudioEditCtlColor(w);
+        case WM_DPICHANGED: {
+            const RECT* suggested = reinterpret_cast<const RECT*>(l);
+            if (suggested) {
+                SetWindowPos(h, nullptr, suggested->left, suggested->top,
+                             suggested->right - suggested->left, suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            InvalidateRect(h, nullptr, TRUE);
             return 0;
         }
         case WM_COMMAND:
@@ -380,13 +395,13 @@ inline bool PromptStepNoteEdit(HWND owner, std::wstring& ioNote)
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(h, &ps);
             RECT r{}; GetClientRect(h, &r);
-            HBRUSH hb = CreateSolidBrush(RGB(22, 26, 36));
+            HBRUSH hb = CreateSolidBrush(CasioTheme::StudioSurface());
             FillRect(hdc, &r, hb);
             DeleteObject(hb);
             SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(230, 238, 250));
+            SetTextColor(hdc, CasioTheme::StudioText());
             SelectObject(hdc, g_fontSmall);
-            TextOutW(hdc, 14, 12, L"Nota de este paso (se mostrara en Reproductor y Exportador):", 60);
+            TextOutW(hdc, 14, 12, L"Nota de este paso (se mostrar\u00E1 en Reproductor y Exportador):", 60);
             EndPaint(h, &ps);
             return 0;
         }

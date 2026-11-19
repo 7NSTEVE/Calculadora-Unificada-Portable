@@ -2360,6 +2360,24 @@ inline LRESULT CALLBACK PdfViewerWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         if (st) InvalidateRect(hWnd, &st->toolbarRc, FALSE);
         return 0;
 
+    case WM_DPICHANGED: {
+        const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+        if (suggested) {
+            SetWindowPos(hWnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left, suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        LayoutPdfViewer(st);
+        if (st) {
+            if (!st->currentPath.empty()) {
+                RequestPageRender(st, false);
+            }
+            InvalidateRect(hWnd, nullptr, FALSE);
+            if (st->hCanvas) InvalidateRect(st->hCanvas, nullptr, FALSE);
+        }
+        return 0;
+    }
+
     case WM_MOUSEMOVE:
         if (st) {
             POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };

@@ -55,7 +55,7 @@ struct LatexNode {
 
 struct LatexValidationResult {
     bool valid = true;
-    std::wstring diagnostic = L"Sintaxis LaTeX 2D v\u00E1lida";
+    std::wstring diagnostic = L"F\u00F3rmula 2D v\u00E1lida";
 };
 
 namespace LatexEngine {
@@ -1380,7 +1380,7 @@ inline LatexValidationResult ValidateMathSegment(const std::wstring& s) {
             std::wstring cmd = s.substr(st, i - st);
             if (!IsSupportedLatexCommand(cmd)) {
                 res.valid = false;
-                res.diagnostic = L"Comando LaTeX no soportado en el subconjunto 2D: \\" + cmd;
+                res.diagnostic = L"Comando matem\u00E1tico no soportado en el subconjunto 2D: \\" + cmd;
                 return res;
             }
             if (cmd == L"frac" || cmd == L"dfrac" || cmd == L"tfrac" || cmd == L"binom") {
@@ -1419,7 +1419,7 @@ inline LatexValidationResult ValidateMathSegment(const std::wstring& s) {
 
     if (braceDepth != 0) {
         res.valid = false;
-        res.diagnostic = L"Falta cerrar " + std::to_wstring(braceDepth) + L" llave(s) '}' en la expresi\u00F3n LaTeX.";
+        res.diagnostic = L"Falta cerrar " + std::to_wstring(braceDepth) + L" llave(s) '}' en la f\u00F3rmula.";
         return res;
     }
     return res;
@@ -1434,7 +1434,7 @@ inline LatexValidationResult ValidateRichLatexInput(const std::wstring& input) {
             size_t end = input.find(L'$', i);
             if (end == std::wstring::npos) {
                 ok.valid = false;
-                ok.diagnostic = L"Sintaxis LaTeX: falta delimitador de cierre '$'.";
+                ok.diagnostic = L"F\u00F3rmula: falta delimitador de cierre '$'.";
                 return ok;
             }
             std::wstring seg = input.substr(i, end - i);
